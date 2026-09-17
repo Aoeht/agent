@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    // === 类型安全（从 Rust 转来的你必须开这些）===
+    "strict": true,
+    "noUncheckedIndexedAccess": true,   // 数组/对象访问强制检查 undefined
+    "exactOptionalPropertyTypes": true, // 可选属性不能赋 undefined
+    "forceConsistentCasingInFileNames": true,
+
+    // === 模块系统（Bun 原生 ESM）===
+    "module": "ESNext",
+    "moduleResolution": "bundler",      // Bun/Vite/Next.js 标准
+
+    "target": "ESNext",
+    "lib": ["ESNext","DOM"],                  // 不需要 DOM 类型！
+
+
+
+    // === 其他===
+    "esModuleInterop": true,
+    "skipLibCheck": true,               // 加速类型检查
+    "resolveJsonModule": true           // 允许 import json
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules"]
+}
