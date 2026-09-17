@@ -13,7 +13,7 @@
     "target": "ESNext",
     "lib": ["ESNext","DOM"],                  // 不需要 DOM 类型！
 
-
+    "types": ["bun-types"],
 
     // === 其他===
     "esModuleInterop": true,
