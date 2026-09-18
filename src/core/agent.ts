@@ -1,7 +1,7 @@
 import OpenAI from "openai";
 import { toolRegistry } from "../tools/registry";
 import { Message, AgentResult, ToolCall } from "./types";
-
+import { ContextManager } from "./context_manager";
 interface AgentConfig {
   model: string;
   systemPrompt: string;
@@ -21,7 +21,7 @@ function isFunctionToolCall(
 export class Agent {
   private client: OpenAI;
   private config: Required<AgentConfig>;
-
+  private contextManager: ContextManager;
   constructor(config: AgentConfig) {
     this.client = new OpenAI();
     this.config = {
@@ -29,7 +29,15 @@ export class Agent {
       temperature: 0,
       ...config,
     };
-  }
+    this.contextManager = new ContextManager({
+    maxTokens: 128000,       // 根据模型调整
+    reserveTokens: 4096,
+    summaryModel: "qwen3.5-plus", // 用廉价模型做摘要
+  });
+}
+
+
+
 
   async run(userMessage: string): Promise<AgentResult> {
     const messages: Message[] = [
@@ -44,12 +52,14 @@ export class Agent {
     while (iterations < this.config.maxIterations) {
       iterations++;
 
-      const response = await this.client.chat.completions.create({
-        model: this.config.model,
-        messages,
-        tools: toolRegistry.toOpenAITools(),
-        temperature: this.config.temperature,
-      });
+const compressedMessages = await this.contextManager.compress(messages);
+
+const response = await this.client.chat.completions.create({
+  model: this.config.model,
+  messages: compressedMessages,  // ← 使用压缩后的消息
+  tools: toolRegistry.toOpenAITools(),
+  temperature: this.config.temperature,
+});
 
       const choice = response.choices[0];
       if (!choice) throw new Error("No response from LLM");

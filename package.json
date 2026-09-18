@@ -8,7 +8,8 @@
   "start": "bun run src/index.ts",
   "typecheck": "tsc --noEmit",
   "fmt": "bun fmt src/",
-  "skill:add": "bunx skills add"
+  "skill:add": "bunx skills add",
+  "test": "bun  test"
 
   },
   "devDependencies": {
