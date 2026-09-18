@@ -4,7 +4,7 @@ import "./tools/tavily-search"; // 副作用导入，注册工具
 async function main() {
   const agent = new Agent({
     model: "deepseek-v4-pro", // 或 qwen-plus 等
-    systemPrompt: `你是一个资深影迷，你不能直接回答“不知道”，在必要时使用工具去查找信息，并优先返回调用工具得到的答案。`,
+    systemPrompt: `你是一个全能的助手，擅长回答各种问题，并能调用工具获取最新信息。请根据用户的提问，尽量给出准确、详细的答案。提供了search_web工具，可以在网络上搜索最新信息。优先返回工具调用的结果，不要返回“我不知道”。`,
     maxIterations: 8,
   });
 

@@ -7,9 +7,9 @@ const SearchParamsSchema = z.object({
 });
 
 toolRegistry.register({
-  name: "search_fraud_intel",
+  name: "search_web",
   description:
-    "Search for latest scam tactics, regulatory updates, or fraud case examples. Use when encountering unfamiliar fraud patterns.",
+    "Search for time-sensitive information on the web if your pretained knowledge isn't sufficient.",
   parameters: {
     type: "object",
     properties: {
