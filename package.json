@@ -1,3 +1,4 @@
+
 {
   "name": "ai_agent",
   "module": "index.ts",
@@ -22,6 +23,7 @@
   "dependencies": {
     "@tavily/core": "^0.7.12",
     "openai": "^7.15.0",
-    "zod": "^4.6.5"
+    "zod": "^4.6.5",
+    "@modelcontextprotocol/sdk": "^1.30.1",
   }
 }

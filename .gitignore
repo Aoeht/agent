@@ -5,7 +5,7 @@ node_modules
 out
 dist
 *.tgz
-
+src/basic_knowledge.ts
 # code coverage
 coverage
 *.lcov
