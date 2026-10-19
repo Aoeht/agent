@@ -11,7 +11,7 @@
     "moduleResolution": "bundler",      // Bun/Vite/Next.js 标准
 
     "target": "ESNext",
-    "lib": ["ESNext","DOM"],                  // 不需要 DOM 类型！
+    "lib": ["ESNext", "DOM"],   // DOM 保留：browser 采证代码在页面上下文里跑 document/window（Playwright 注入）
 
     "types": ["bun-types"],
 
@@ -20,6 +20,6 @@
     "skipLibCheck": true,               // 加速类型检查
     "resolveJsonModule": true           // 允许 import json
   },
-  "include": ["src/**/*.ts"],
+  "include": ["src/**/*.ts", "benchmarks/**/*.ts", "tests/**/*.ts"],
   "exclude": ["node_modules"]
 }

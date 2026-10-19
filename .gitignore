@@ -9,11 +9,12 @@ src/basic_knowledge.ts
 # code coverage
 coverage
 *.lcov
-text_stamp/*.srt
+# B 站字幕数据（历史遗留，只留磁盘不入库）
+text_stamp/
 # logs
 logs
-_.log
-report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
+*.log
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 
 # dotenv environment variable files
 .env
@@ -21,7 +22,24 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .env.test.local
 .env.production.local
 .env.local
-
+.rag-cache
+.mcp-sandbox
+.sand-box
+.bun-cache
+.agent-sessions
+# 发现库（对话/分析沉淀的本地标注数据，含对话内容）
+.agent-data
+# 个人文件，与项目无关，不入库
+C盘清理资料_2026-10-15.zip
+# 真实浏览器复用实验用的专用 Chrome profile（体积大且含浏览器状态，绝不入库）
+.chrome-sandbox-profile
+# 运行轨迹（含对话与工具结果，本地排查用）
+.traces
+.inspect-evidence/
+work/
+# GAIA 评测：数据集与运行产物不入库，评测代码 benchmarks/ 正常入库
+benchmarks/gaia
+benchmarks/gaia-runs
 # caches
 .eslintcache
 .cache
@@ -32,3 +50,10 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # Finder (MacOS) folder config
 .DS_Store
+
+# AI 工具的本地状态目录（技能缓存、会话配置等，机器本地）
+.opencode/
+.qoder/
+.zcode/
+# load_skill 物化到沙箱的技能副本（机器本地）
+.skills/

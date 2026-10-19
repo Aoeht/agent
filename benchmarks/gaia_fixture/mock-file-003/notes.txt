@@ -1,0 +1,5 @@
+Field notes — mock attachment for the GAIA harness self-check.
+
+The secret codeword is: opensesame
+
+Do not share this codeword outside the test.
