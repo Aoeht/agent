@@ -1,0 +1,109 @@
+@import "tailwindcss";
+
+@theme {
+  /* 米白暖色板：cream 为底，clay（陶土）做强调，sage/terra 做成功/错误 */
+  --color-cream-50: #fdfbf4;
+  --color-cream-100: #f7f2e7;
+  --color-cream-200: #efe8d8;
+  --color-cream-300: #e3dac5;
+  --color-cream-400: #d3c8ae;
+
+  --color-ink-900: #3b362c;
+  --color-ink-600: #6e6656;
+  --color-ink-400: #a29885;
+
+  --color-clay-100: #f6e8d8;
+  --color-clay-200: #eed7bd;
+  --color-clay-500: #c2703e;
+  --color-clay-600: #a6592f;
+
+  --color-sage-100: #e9efe2;
+  --color-sage-500: #7d8f6d;
+
+  --color-terra-100: #f5e1dc;
+  --color-terra-500: #b65c4a;
+
+  --font-sans: ui-sans-serif, system-ui, "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Code", Consolas, "JetBrains Mono", monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-cream-100 font-sans text-ink-900 antialiased;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-cream-400);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* markdown 正文排版（.md 容器内），与米白色板同调 */
+.md {
+  @apply text-[15px] leading-7;
+}
+.md > :first-child {
+  margin-top: 0;
+}
+.md > :last-child {
+  margin-bottom: 0;
+}
+.md p {
+  @apply my-2;
+}
+.md h1 {
+  @apply mt-5 mb-2 text-lg font-semibold;
+}
+.md h2 {
+  @apply mt-5 mb-2 text-base font-semibold;
+}
+.md h3 {
+  @apply mt-4 mb-1.5 text-[15px] font-semibold;
+}
+.md ul {
+  @apply my-2 list-disc pl-5;
+}
+.md ol {
+  @apply my-2 list-decimal pl-5;
+}
+.md li {
+  @apply my-1;
+}
+.md a {
+  @apply text-clay-600 underline underline-offset-2;
+}
+.md blockquote {
+  @apply my-2 border-l-4 border-clay-200 pl-3 text-ink-600;
+}
+.md code {
+  @apply rounded-md bg-cream-200 px-1.5 py-0.5 font-mono text-[0.85em];
+}
+.md pre {
+  @apply my-3 overflow-x-auto rounded-xl bg-ink-900 p-4 text-xs leading-6;
+}
+.md pre code {
+  @apply bg-transparent p-0 text-cream-50;
+}
+.md table {
+  @apply my-3 w-full border-collapse text-sm;
+}
+.md th {
+  @apply border border-cream-300 bg-cream-200 px-3 py-1.5 text-left font-medium;
+}
+.md td {
+  @apply border border-cream-300 px-3 py-1.5 align-top;
+}
+.md hr {
+  @apply my-4 border-cream-300;
+}

@@ -1,29 +1,35 @@
-
 {
   "name": "ai_agent",
-  "module": "index.ts",
+  "module": "src/index.ts",
   "type": "module",
   "private": true,
   "scripts": {
-  "dev": "bun run dev",
-  "start": "bun run src/index.ts",
-  "typecheck": "tsc --noEmit",
-  "fmt": "bun fmt src/",
-  "skill:add": "bunx skills add",
-  "test": "bun  test"
-
+    "start": "bun run src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "fmt": "bun fmt src/",
+    "skill:add": "bunx skills add",
+    "rag:ingest": "bun run src/rag/ingest.ts",
+    "rag:migrate-pg": "bun run src/rag/migrate_to_pg.ts",
+    "test:rag": "bun run tests/rag.test.ts && bun run tests/rag_ingest.test.ts && bun run tests/rag_ranking.test.ts && bun run tests/rag_vector.test.ts && bun run tests/rag_pg.test.ts",
+    "test": "bun  test"
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "@types/node": "^22.20.3"
+    "@types/node": "^22.20.3",
+    "@types/pg": "^8.23.1"
   },
   "peerDependencies": {
     "typescript": "^7.0.2"
   },
   "dependencies": {
-    "@tavily/core": "^0.7.12",
-    "openai": "^7.15.0",
-    "zod": "^4.6.5",
     "@modelcontextprotocol/sdk": "^1.30.1",
+    "@modelcontextprotocol/server-filesystem": "^2026.8.31",
+    "@tavily/core": "^0.7.12",
+    "gpt-tokenizer": "^4.0.0",
+    "hyparquet": "^1.31.3",
+    "openai": "^7.15.0",
+    "pg": "^8.23.1",
+    "playwright": "^1.64.1",
+    "zod": "^4.6.5"
   }
 }

@@ -1,0 +1,202 @@
+// web/src/components/Composer.tsx
+import { useEffect, useRef, useState } from "react";
+import type { SessionConfigInput } from "../lib/transport";
+
+export interface ComposerConfig {
+  model?: string;
+  temperature?: number;
+  maxIterations?: number;
+}
+
+export function Composer({
+  running,
+  disabled,
+  models,
+  config,
+  onSend,
+  onCancel,
+  onApplyConfig,
+}: {
+  running: boolean;
+  disabled: boolean;
+  models: string[];
+  config: ComposerConfig;
+  onSend: (text: string) => void;
+  onCancel: () => void;
+  onApplyConfig: (config: SessionConfigInput) => void;
+}) {
+  const [text, setText] = useState("");
+  const [panelOpen, setPanelOpen] = useState(false);
+  const [draft, setDraft] = useState<{ model: string; temperature: string; maxIterations: string }>({
+    model: "",
+    temperature: "",
+    maxIterations: "",
+  });
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  // 打开面板时用当前生效值填充草稿
+  useEffect(() => {
+    if (panelOpen) {
+      setDraft({
+        model: config.model ?? models[0] ?? "",
+        temperature: String(config.temperature ?? 0.1),
+        maxIterations: String(config.maxIterations ?? 8),
+      });
+    }
+  }, [panelOpen, config.model, config.temperature, config.maxIterations, models]);
+
+  // 点击面板外部关闭
+  useEffect(() => {
+    if (!panelOpen) return;
+    const onDown = (event: MouseEvent) => {
+      if (panelRef.current && !panelRef.current.contains(event.target as Node)) setPanelOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [panelOpen]);
+
+  const submit = () => {
+    const trimmed = text.trim();
+    if (!trimmed || disabled) return;
+    onSend(trimmed);
+    setText("");
+    if (textareaRef.current) textareaRef.current.style.height = "auto";
+  };
+
+  const autoGrow = () => {
+    const el = textareaRef.current;
+    if (el) {
+      el.style.height = "auto";
+      el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+    }
+  };
+
+  const applyConfig = () => {
+    const payload: SessionConfigInput = {};
+    if (draft.model && draft.model !== config.model) payload.model = draft.model;
+    const temperature = Number.parseFloat(draft.temperature);
+    if (Number.isFinite(temperature) && temperature !== (config.temperature ?? 0.1)) {
+      payload.temperature = temperature;
+    }
+    const maxIterations = Number.parseInt(draft.maxIterations, 10);
+    if (Number.isInteger(maxIterations) && maxIterations !== (config.maxIterations ?? 8)) {
+      payload.maxIterations = maxIterations;
+    }
+    if (Object.keys(payload).length > 0) onApplyConfig(payload);
+    setPanelOpen(false);
+  };
+
+  return (
+    <div className="border-t border-cream-300 bg-cream-200/40 px-6 py-4">
+      <div className="relative mx-auto max-w-3xl">
+        {/* 模型/参数弹层 */}
+        {panelOpen && (
+          <div
+            ref={panelRef}
+            className="absolute bottom-full left-0 z-20 mb-2 w-80 rounded-2xl border border-cream-300 bg-cream-50 p-4 shadow-xl"
+          >
+            <h3 className="mb-3 text-sm font-semibold">模型与参数</h3>
+            <label className="block">
+              <span className="text-xs text-ink-600">模型</span>
+              <select
+                value={draft.model}
+                onChange={(e) => setDraft((d) => ({ ...d, model: e.target.value }))}
+                className="mt-1 w-full rounded-xl border border-cream-300 bg-white/70 px-3 py-2 font-mono text-xs outline-none focus:border-clay-500"
+              >
+                {models.map((model) => (
+                  <option key={model} value={model}>
+                    {model}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="mt-3 grid grid-cols-2 gap-3">
+              <label className="block">
+                <span className="text-xs text-ink-600">温度 (0–2)</span>
+                <input
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  max="2"
+                  value={draft.temperature}
+                  onChange={(e) => setDraft((d) => ({ ...d, temperature: e.target.value }))}
+                  className="mt-1 w-full rounded-xl border border-cream-300 bg-white/70 px-3 py-2 text-sm outline-none focus:border-clay-500"
+                />
+              </label>
+              <label className="block">
+                <span className="text-xs text-ink-600">迭代上限</span>
+                <input
+                  type="number"
+                  min="1"
+                  max="50"
+                  value={draft.maxIterations}
+                  onChange={(e) => setDraft((d) => ({ ...d, maxIterations: e.target.value }))}
+                  className="mt-1 w-full rounded-xl border border-cream-300 bg-white/70 px-3 py-2 text-sm outline-none focus:border-clay-500"
+                />
+              </label>
+            </div>
+            <p className="mt-2 text-[11px] leading-4 text-ink-400">
+              模型切换会随会话保存；温度与迭代上限仅当前运行有效。
+            </p>
+            <div className="mt-3 flex justify-end">
+              <button
+                onClick={applyConfig}
+                disabled={running}
+                className="rounded-full bg-clay-600 px-4 py-1.5 text-xs font-medium text-cream-50 transition hover:bg-clay-500 disabled:opacity-40"
+              >
+                应用
+              </button>
+            </div>
+          </div>
+        )}
+
+        <div className="flex items-end gap-2 rounded-2xl border border-cream-300 bg-cream-50 p-2 shadow-sm transition focus-within:border-clay-500/50">
+          <button
+            onClick={() => setPanelOpen((open) => !open)}
+            disabled={disabled}
+            title="模型与参数"
+            className="shrink-0 rounded-full bg-cream-200 px-3 py-2 text-xs font-medium text-ink-600 transition hover:bg-cream-300 disabled:opacity-40"
+          >
+            ⚙ {(config.model ?? models[0] ?? "模型").split("/").pop()}
+          </button>
+          <textarea
+            ref={textareaRef}
+            value={text}
+            onChange={(e) => {
+              setText(e.target.value);
+              autoGrow();
+            }}
+            onKeyDown={(e) => {
+              // 中文输入法组词中的 Enter 不应发送
+              if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                e.preventDefault();
+                submit();
+              }
+            }}
+            rows={1}
+            placeholder={disabled ? "先选择一个会话" : "给 Agent 派个任务…（Enter 发送，Shift+Enter 换行）"}
+            disabled={disabled}
+            className="max-h-40 min-h-[42px] flex-1 resize-none bg-transparent px-2.5 py-2 text-[15px] leading-6 outline-none placeholder:text-ink-400 disabled:opacity-50"
+          />
+          {running ? (
+            <button
+              onClick={onCancel}
+              className="shrink-0 rounded-full bg-terra-500 px-4 py-2 text-sm font-medium text-cream-50 transition hover:opacity-90"
+            >
+              停止
+            </button>
+          ) : (
+            <button
+              onClick={submit}
+              disabled={disabled || !text.trim()}
+              className="shrink-0 rounded-full bg-clay-600 px-5 py-2 text-sm font-medium text-cream-50 transition hover:bg-clay-500 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              发送
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
