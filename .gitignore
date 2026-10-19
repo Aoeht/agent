@@ -57,3 +57,6 @@ benchmarks/gaia-runs
 .zcode/
 # load_skill 物化到沙箱的技能副本（机器本地）
 .skills/
+
+# Obsidian 编辑器本地配置（workspace.json 每次开笔记都会变）
+docs/.obsidian/
