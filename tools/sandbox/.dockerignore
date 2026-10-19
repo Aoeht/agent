@@ -1,0 +1,5 @@
+# tools/sandbox 的构建上下文裁剪（docker build -t ai-agent-sandbox:latest tools/sandbox/）
+# 本目录虽只有 Dockerfile，仍显式声明：构建上下文 = 传输的文件集合，
+# 拒绝任何未来被放进来的文件（密钥、脚本、数据）默认进入镜像层。
+*
+!Dockerfile
