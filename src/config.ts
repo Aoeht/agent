@@ -1,0 +1,109 @@
+// src/config.ts
+/**
+ * CLI 运行配置：环境变量 → 类型化配置对象，全部带默认值。
+ * 换模型、调预算、改迭代数不再需要动源码。
+ *
+ * 可用环境变量：
+ *   AGENT_MODEL                    主模型（默认 glm-5.2）
+ *   AGENT_SUMMARY_MODEL            历史压缩摘要用的模型（默认 qwen3.6-plus）
+ *   AGENT_MAX_ITERATIONS           单次 run 的最大 ReAct 迭代数（默认 8）
+ *   AGENT_TEMPERATURE              采样温度（默认 0.1）
+ *   AGENT_MAX_HISTORY_TURNS        跨进程续聊保留的完整对话轮数（默认 20）
+ *   AGENT_MAX_TOTAL_TOKENS         单次 run 的 token 硬预算，<=0 表示不限（默认 500000）
+ *   AGENT_MAX_TOOL_CALLS           单次 run 的工具调用总次数上限，<=0 表示不限（默认 40）
+ *   AGENT_MAX_TOOL_CALLS_PER_NAME  单个工具名的调用次数上限，<=0 表示不限（默认 12）
+ *   AGENT_STREAM                   是否流式输出，"0"/"false" 关闭（默认开启）
+ *   AGENT_REPL                     设为 "1" 时即使 stdin 非终端也进入逐行 REPL（脚本/测试用）
+ *   AGENT_TRACE_DIR                运行轨迹（.traces JSONL）落盘目录，缺省为项目根 .traces
+ *   AGENT_SESSION_ID / AGENT_SESSION_DIR  会话选择，见 chooseSession
+ *   AGENT_SKILLS_DIR               Agent Skill 目录（缺省 .agents/skills，即 skills CLI 的安装位置）
+ *   AGENT_SANDBOX                  run_script 执行沙箱：host（宿主机进程）/ docker（一次性容器）/
+ *                                  auto（默认，docker 守护进程与镜像都就绪才启用容器，否则显式回退 host）
+ *   AGENT_SANDBOX_IMAGE            docker 沙箱镜像（默认 ai-agent-sandbox:latest，构建见 tools/sandbox/Dockerfile）
+ *   AGENT_SANDBOX_NET              docker 沙箱网络：none 断网（默认，防外传）/ bridge 显式放开
+ *   AGENT_CHECKPOINTS              是否开启回合级回滚检查点（/rewind），"0"/"false" 关闭（默认开启）
+ */
+
+import type { RunBudgetLimits } from "./core/run_budget";
+
+/** run_script 执行沙箱模式，语义见 tools/sandbox_docker.ts 的 resolveScriptSandbox */
+export type ScriptSandboxMode = "host" | "docker" | "auto";
+
+export interface SandboxConfig {
+  mode: ScriptSandboxMode;
+  /** docker 沙箱镜像：镜像即解释器白名单（python3/bun/bash），host 模式忽略 */
+  image: string;
+  /** 容器网络档位：none 断网（默认）/ bridge 放开，host 模式忽略 */
+  network: "none" | "bridge";
+}
+
+export interface AgentRunConfig {
+  model: string;
+  summaryModel: string;
+  maxIterations: number;
+  temperature: number;
+  maxHistoryTurns: number;
+  stream: boolean;
+  /** Agent Skill 目录：目录不存在视为没有技能，运行时行为与未开启技能完全一致 */
+  skillsDir: string;
+  /** run_script 执行沙箱：决定脚本是宿主机进程还是容器内一次性执行 */
+  sandbox: SandboxConfig;
+  /** 回合级回滚检查点（/rewind）：开启后每轮对话开始前快照工作区与会话边界 */
+  checkpointsEnabled: boolean;
+  budget: RunBudgetLimits;
+}
+
+function intEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const value = Number.parseInt(raw, 10);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function floatEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const value = Number.parseFloat(raw);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+/** 数值型预算：<=0 视为不设限（映射成缺省，交给 RunBudget 的「缺省即不限」语义） */
+function limitEnv(name: string, fallback: number): number | undefined {
+  const value = intEnv(name, fallback);
+  return value > 0 ? value : undefined;
+}
+
+function boolEnv(name: string, fallback: boolean): boolean {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === "") return fallback;
+  return !["0", "false", "off", "no"].includes(raw.trim().toLowerCase());
+}
+
+export function loadAgentConfig(): AgentRunConfig {
+  const maxTotalTokens = limitEnv("AGENT_MAX_TOTAL_TOKENS", 500_000);
+  const maxToolCalls = limitEnv("AGENT_MAX_TOOL_CALLS", 40);
+  const maxToolCallsPerName = limitEnv("AGENT_MAX_TOOL_CALLS_PER_NAME", 12);
+  // 枚举型环境变量只认列出的字面量，其余一律落回默认值（不猜测、不告警刷屏）
+  const sandboxModeRaw = process.env.AGENT_SANDBOX?.trim().toLowerCase();
+
+  return {
+    model: process.env.AGENT_MODEL ?? "glm-5.2",
+    summaryModel: process.env.AGENT_SUMMARY_MODEL ?? "qwen3.6-plus",
+    maxIterations: intEnv("AGENT_MAX_ITERATIONS", 8),
+    temperature: floatEnv("AGENT_TEMPERATURE", 0.1),
+    maxHistoryTurns: intEnv("AGENT_MAX_HISTORY_TURNS", 20),
+    stream: boolEnv("AGENT_STREAM", true),
+    skillsDir: process.env.AGENT_SKILLS_DIR?.trim() || ".agents/skills",
+    sandbox: {
+      mode: sandboxModeRaw === "host" || sandboxModeRaw === "docker" || sandboxModeRaw === "auto" ? sandboxModeRaw : "auto",
+      image: process.env.AGENT_SANDBOX_IMAGE?.trim() || "ai-agent-sandbox:latest",
+      network: process.env.AGENT_SANDBOX_NET?.trim().toLowerCase() === "bridge" ? "bridge" : "none",
+    },
+    checkpointsEnabled: boolEnv("AGENT_CHECKPOINTS", true),
+    budget: {
+      ...(maxTotalTokens !== undefined ? { maxTotalTokens } : {}),
+      ...(maxToolCalls !== undefined ? { maxToolCalls } : {}),
+      ...(maxToolCallsPerName !== undefined ? { maxToolCallsPerName } : {}),
+    },
+  };
+}

@@ -1,117 +1,525 @@
-// src/core/context-manager.ts
+// src/core/context_manager.ts
 import OpenAI from "openai";
 import { Message } from "./types";
+import { CommercialTokenCounter } from "../utils/token_counter";
+import { wrapSummaryBlock } from "./untrusted";
+import type { CompactEvent } from "./events";
+import {
+  SUMMARY_FRESH_PROMPT,
+  SUMMARY_MERGE_PROMPT,
+  summaryMaxTokensFor,
+} from "./summary_prompts";
 
 interface ContextConfig {
+  modelName: string;
   maxTokens: number;        // 模型上下文上限
+  compressThreshold?: number; // 触发压缩的安全水位，如 100,000 (留出 buffer)
   reserveTokens: number;    // 预留给当前回复的token
   summaryModel: string;     // 用于摘要的廉价模型
+  client: OpenAI;           // LLM 客户端由外部注入，内部不再自建
+}
+
+/** 摘要连续失败多少次后放弃 LLM 摘要，改用硬截断兜底 */
+const MAX_SUMMARY_FAILURES = 3;
+
+/** 摘要输入的 token 上限：折叠量极大时先中段截断，别让摘要调用自己先爆上下文 */
+const SUMMARY_INPUT_TOKEN_CAP = 20_000;
+
+/** 一次工具组的定位：[start, end) 是它在 messages 里的下标区间（含 owner assistant）。 */
+interface ToolGroupSpan {
+  start: number;
+  end: number;
+}
+
+interface MessageAnalysis {
+  systemMsgs: Message[];
+  pinned: Message[];
+  /** 普通对话（user + 无 tool_calls 的 assistant），不含 system 与 pinned */
+  conv: Message[];
+  groups: ToolGroupSpan[];
 }
 
 export class ContextManager {
   private client: OpenAI;
   private config: ContextConfig;
+  private tokenCounter: CommercialTokenCounter;
+  // 滚动摘要：已折叠历史累积出的摘要文本（增量维护，跨调用复用）
+  private rollingSummary: string | null = null;
+  // 已折叠进摘要的普通对话条数（conv 去掉 system/pinned 后的前缀长度，只增不减）
+  private foldedCount = 0;
+  // 摘要块消息缓存：仅在摘要更新时重建，保证跨请求前缀引用稳定
+  private summaryBlock: Message[] | null = null;
+  // 钉住前缀：永远原样保留、永不折叠的消息（跨 run 长期摘要块）。按对象身份识别。
+  private pinnedPrefix: Message[] = [];
+  private pinnedSet = new Set<Message>();
+  // 每请求消息之外的固定开销（工具 schema 等），计入越线判断
+  private overheadTokens = 0;
+  // 估算校准：actual/estimate 的 EMA。估算盲区（图片、tokenizer 误差）靠它吸收，
+  // 钳在 [1, 3]：只允许"更保守"，估算偏大时不会推迟压缩。
+  private calibrationRatio = 1;
+  // 每条消息原始内容的 token 缓存：run 内消息 append-only，按对象身份缓存一次测量
+  private tokenCache = new WeakMap<Message, { original: number; stubText?: string; stubTokens?: number }>();
+  // 阶梯去重：同一 run 内某级压缩只发一次事件，避免每步刷屏
+  private reachedStage = 0;
+  // 摘要连续失败计数：达到上限后本 run 不再尝试 LLM 摘要，直接硬截断
+  private summaryFailures = 0;
+
+  /** 摘要调用产生 token 时的记账回调（Agent 用来喂 RunBudget 与总账） */
+  onSummaryUsage: ((usage: { promptTokens: number; completionTokens: number; totalTokens: number }) => void) | null = null;
+  /** 压缩动作的可观测性回调（Agent 转发到事件总线） */
+  onCompact: ((event: CompactEvent) => void) | null = null;
 
   constructor(config: ContextConfig) {
-    this.client = new OpenAI();
+    this.client = config.client;
     this.config = config;
+    this.tokenCounter = new CommercialTokenCounter();
   }
-   private estimateTokens(messages: Message[]): number {
-    let chars = 0;
+
+  /** 一个 Agent.run 对应一段独立的消息序列，不能复用上一轮 run 的折叠水位或摘要。 */
+  reset(): void {
+    this.rollingSummary = null;
+    this.foldedCount = 0;
+    this.summaryBlock = null;
+    this.pinnedPrefix = [];
+    this.pinnedSet = new Set();
+    this.reachedStage = 0;
+    this.summaryFailures = 0;
+    this.tokenCache = new WeakMap();
+  }
+
+  /**
+   * 切换主模型：token 估算与窗口按新模型走（压缩摘要模型不变，它由 summaryModel 指定）。
+   * 只影响后续 run —— 已经折叠出的摘要文本不需要重算。
+   */
+  setModel(modelName: string, maxTokens?: number): void {
+    this.config.modelName = modelName;
+    if (maxTokens !== undefined) this.config.maxTokens = maxTokens;
+  }
+
+  /**
+   * 设置钉住前缀（跨 run 长期摘要块）：它在每次表示里都排在最前、永不折叠也不进摘要。
+   * 每次 run 都要重新设置（reset 会清空），传空数组表示本 run 没有。
+   */
+  setPinnedPrefix(messages: Message[]): void {
+    this.pinnedPrefix = [...messages];
+    this.pinnedSet = new Set(messages);
+  }
+
+  /** 设置每请求的固定 token 开销（工具 schema 等），计入越线判断 */
+  setRequestOverheadTokens(tokens: number): void {
+    this.overheadTokens = Math.max(0, Math.floor(tokens));
+  }
+
+  /**
+   * 用真实 usage 校准估算：估算盲区（图片、tokenizer 词表差异、协议开销）表现为
+   * actual/estimate 的比值，EMA 平滑后乘到后续估算上。
+   */
+  recordPromptUsage(messages: Message[], actualPromptTokens: number): void {
+    if (actualPromptTokens <= 0) return;
+    const estimate = this.estimateTokens(messages) + this.overheadTokens;
+    if (estimate <= 0) return;
+    const ratio = actualPromptTokens / estimate;
+    this.calibrationRatio = Math.min(3, Math.max(1, this.calibrationRatio * 0.7 + ratio * 0.3));
+  }
+
+  private estimateTokens(messages: Message[]): number {
+    let total = 0;
     for (const msg of messages) {
-      if (typeof msg.content === "string") chars += msg.content.length;
-      if ("tool_calls" in msg && msg.tool_calls) {
-        chars += JSON.stringify(msg.tool_calls).length;
+      // 每条消息有固定的协议开销 (~4 tokens)
+      total += 4 + this.entryFor(msg).original;
+    }
+    return total;
+  }
+
+  /** 越线判断用的估算：原始估算 + 固定开销，再乘校准比（只放大不缩小） */
+  private effectiveTokens(rawEstimate: number): number {
+    return Math.ceil((rawEstimate + this.overheadTokens) * this.calibrationRatio);
+  }
+
+  private entryFor(msg: Message): { original: number; stubText?: string; stubTokens?: number } {
+    let entry = this.tokenCache.get(msg);
+    if (!entry) {
+      entry = { original: this.measure(msg) };
+      this.tokenCache.set(msg, entry);
+    }
+    return entry;
+  }
+
+  private measure(msg: Message): number {
+    let total = 0;
+    if (typeof msg.content === "string") {
+      total += this.tokenCounter.estimateText(msg.content, this.config.modelName);
+    } else if (Array.isArray(msg.content)) {
+      for (const part of msg.content) {
+        if (part.type === "text") {
+          total += this.tokenCounter.estimateText(part.text, this.config.modelName);
+        }
       }
     }
-    return Math.ceil(chars / 3); // 中英混合取折中值
+    if ("tool_calls" in msg && msg.tool_calls) {
+      total += this.tokenCounter.estimateText(JSON.stringify(msg.tool_calls), this.config.modelName);
+    }
+    if ("tool_call_id" in msg && msg.tool_call_id) {
+      total += this.tokenCounter.estimateText(msg.tool_call_id, this.config.modelName);
+    }
+    return total;
   }
+
+  /** 把普通 user/assistant 对话按完整轮分组，窗口与摘要都只能在轮边界处分割。 */
+  private conversationGroups(conv: Message[]): Message[][] {
+    const groups: Message[][] = [];
+    let pending: Message[] = [];
+    for (const message of conv) {
+      if (message.role === "user") {
+        if (pending.length > 0) groups.push(pending);
+        pending = [message];
+      } else if (message.role === "assistant") {
+        if (pending.length > 0) {
+          pending.push(message);
+          groups.push(pending);
+          pending = [];
+        } else {
+          groups.push([message]);
+        }
+      }
+    }
+    if (pending.length > 0) groups.push(pending);
+    return groups;
+  }
+
   /**
-   * ✅ 智能压缩消息历史，确保不超过 token 预算
+   * 一次遍历完成消息分类：system / pinned / 普通对话 / 工具组。
+   * 工具组 = assistant(tool_calls) + 紧随其后的全部 tool 响应。
    */
-  async compress(messages: Message[]): Promise<Message[]> {
-   
-    if (messages.length <= 2) return messages;
-
-  // ✅ 未超预算时直接返回，不做任何处理
-  
-    const totalTokens = this.estimateTokens(messages);
-    const budget = this.config.maxTokens - this.config.reserveTokens;
-
-    if (totalTokens <= budget) return messages;
-
-    // 策略：保留 system + 最近N条 + 中间摘要
-    const systemMsg = messages.find((m) => m.role === "system");
-    const recentMessages: Message[] = [];
-    let recentTokens = 0;
-    const recentBudget = Math.floor(budget * 0.4); // 40%预算给最近消息
-
-    // 从后往前取最近消息
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const msg = messages[i];
-      if (!msg) continue;
-      if (msg.role === "system") continue;
-      const msgTokens = this.estimateTokens([msg]);
-      if (recentTokens + msgTokens > recentBudget) break;
-      recentMessages.unshift(msg);
-      recentTokens += msgTokens;
+  private analyze(messages: Message[]): MessageAnalysis {
+    const systemMsgs: Message[] = [];
+    const pinned: Message[] = [];
+    const conv: Message[] = [];
+    const groups: ToolGroupSpan[] = [];
+    for (let i = 0; i < messages.length; i++) {
+      const message = messages[i]!;
+      if (message.role === "system") {
+        systemMsgs.push(message);
+        continue;
+      }
+      if (this.pinnedSet.has(message)) {
+        pinned.push(message);
+        continue;
+      }
+      if (message.role === "user" || (message.role === "assistant" && !message.tool_calls?.length)) {
+        conv.push(message);
+        continue;
+      }
+      if (message.role === "assistant" && message.tool_calls?.length) {
+        let end = i + 1;
+        while (end < messages.length && messages[end]!.role === "tool") end++;
+        groups.push({ start: i, end });
+        i = end - 1; // for 循环的 i++ 会跳到 end
+      }
+      // 孤立的 tool 消息（没有 owner）不该出现，直接跳过
     }
-
-    // 对中间历史做摘要
-    const middleMessages = messages.filter(
-      (m) => m.role !== "system" && !recentMessages.includes(m)
-    );
-    // 对中间历史做摘要
-
-
-    let summaryContent = "";
-    if (middleMessages.length >= 2) {
-      summaryContent = await this.summarize(middleMessages);
-    }
-
-    // 重组消息
-    const compressed: Message[] = [];
-    if (systemMsg) compressed.push(systemMsg);
-    if (summaryContent) {
-      compressed.push({
-        role: "user",
-        content: `[Historical Context Summary]\n${summaryContent}`,
-      });
-      compressed.push({
-        role: "assistant",
-        content: "Understood. I have the historical context summarized above.",
-      });
-    }
-    compressed.push(...recentMessages);
-
-    return compressed;
+    return { systemMsgs, pinned, conv, groups };
   }
 
-  private async summarize(messages: Message[]): Promise<string> {
-    const conversationText = messages
+  /** 旧工具消息的占位文本：保留"调用过什么、参数是什么"，只省输出。确定性生成，可缓存。 */
+  private stubEntryFor(toolMsg: Message & { role: "tool" }, owner: Message) {
+    const entry = this.entryFor(toolMsg);
+    if (entry.stubText !== undefined) return entry;
+    const calls = owner.role === "assistant" ? owner.tool_calls : undefined;
+    const call = calls?.find((c) => c.id === toolMsg.tool_call_id);
+    const name = call?.function.name ?? "unknown_tool";
+    const rawArgs = call?.function.arguments ?? "";
+    const argsPreview = rawArgs.length > 120 ? `${rawArgs.slice(0, 120)}…` : rawArgs;
+    entry.stubText = `[工具输出已省略以节省上下文：原约 ${entry.original} tokens。此前调用了 ${name}(${argsPreview})。]`;
+    entry.stubTokens = 4 + this.tokenCounter.estimateText(entry.stubText, this.config.modelName);
+    return entry;
+  }
+
+  /** 中段截断：保留头尾，掐掉中间（最早的原始请求和最近的进展通常都重要） */
+  private clipMiddle(text: string, tokenCap: number): string {
+    const tokens = this.tokenCounter.estimateText(text, this.config.summaryModel);
+    if (tokens <= tokenCap) return text;
+    const charsPerToken = text.length / tokens;
+    const headChars = Math.floor(charsPerToken * tokenCap * 0.3);
+    const tailChars = Math.floor(charsPerToken * tokenCap * 0.7);
+    return `${text.slice(0, headChars)}\n…[此处省略约 ${tokens - tokenCap} tokens]…\n${text.slice(text.length - tailChars)}`;
+  }
+
+  /**
+   * 上下文压缩的降级阶梯（每级只在上一级不够时才启用）：
+   * 0. 原样发送；
+   * 1. 旧工具输出替换为占位符（保留调用与参数，模型知道"我做过什么"）；
+   * 2. 旧工具组整体移出请求（最新待消费的完整工具组永远原样保留）；
+   * 3. 旧对话轮折叠进滚动摘要（结构化 8 节，工具观察一并并入）。
+   * emergency（API 已报上下文超限）：跳过 0-2 的越线判断直接做 3，最近窗口压到 15%。
+   */
+  async compress(
+    messages: Message[],
+    opts: { emergency?: boolean; signal?: AbortSignal | undefined } = {}
+  ): Promise<Message[]> {
+    if (messages.length <= 2) return messages;
+    const emergency = opts.emergency === true;
+    const { systemMsgs, pinned, conv, groups } = this.analyze(messages);
+
+    // 消息序列变短（外部直接复用本类、新 run 未 reset）时折叠水位失效，全部重来
+    if (this.foldedCount > conv.length) {
+      this.rollingSummary = null;
+      this.foldedCount = 0;
+      this.summaryBlock = null;
+      this.reachedStage = 0;
+      this.summaryFailures = 0;
+    }
+
+    const budget = this.config.compressThreshold ?? this.config.maxTokens - this.config.reserveTokens;
+
+    if (!emergency) {
+      if (this.effectiveTokens(this.estimateTokens(messages)) <= budget) return messages;
+
+      if (groups.length > 1) {
+        const { stubbedEstimate, droppedEstimate } = this.ladderEstimates(messages, groups);
+        if (stubbedEstimate !== null && this.effectiveTokens(stubbedEstimate) <= budget) {
+          this.notifyStage(1, {
+            action: "stub_tool_outputs",
+            tokens: this.estimateTokens(messages) - stubbedEstimate,
+          });
+          return this.buildWithStubs(messages, groups);
+        }
+        if (droppedEstimate !== null && this.effectiveTokens(droppedEstimate) <= budget) {
+          this.notifyStage(2, {
+            action: "drop_tool_history",
+            tokens: this.estimateTokens(messages) - droppedEstimate,
+          });
+          return this.buildWithoutOldGroups(messages, groups);
+        }
+      }
+    }
+
+    // 阶梯 3：滚动摘要。摘要不可用（连续失败达上限）时硬截断兜底，保证请求能进窗口。
+    const recentRatio = emergency ? 0.15 : 0.4;
+    const recentBudget = Math.floor(budget * recentRatio);
+    const convGroups = this.conversationGroups(conv);
+    let windowStart = conv.length;
+    let recentTokens = 0;
+    for (let i = convGroups.length - 1; i >= 0; i--) {
+      const group = convGroups[i]!;
+      const groupTokens = this.estimateTokens(group);
+      if (recentTokens + groupTokens > recentBudget) {
+        // 最近一轮自己就超预算时仍要保留它，否则模型连当前问题都看不到
+        if (i === convGroups.length - 1 && recentTokens === 0) windowStart -= group.length;
+        break;
+      }
+      recentTokens += groupTokens;
+      windowStart -= group.length;
+    }
+
+    const foldTarget = Math.max(windowStart, this.foldedCount);
+    const canSummarize = this.summaryFailures < MAX_SUMMARY_FAILURES;
+    if (foldTarget > this.foldedCount && canSummarize) {
+      const observations = this.collectToolObservations(messages, groups);
+      try {
+        this.rollingSummary = await this.mergeSummary(
+          this.rollingSummary,
+          conv.slice(this.foldedCount, foldTarget),
+          observations,
+          opts.signal
+        );
+        this.foldedCount = foldTarget;
+        this.summaryBlock = null;
+        this.summaryFailures = 0;
+        this.onCompact?.({
+          action: "fold_summary",
+          messages: foldTarget,
+          detail: `${observations.length} 条工具观察并入摘要`,
+        });
+      } catch (error) {
+        this.summaryFailures++;
+        this.onCompact?.({
+          action: "summary_failed",
+          detail: `${error instanceof Error ? error.message : String(error)}（连续第 ${this.summaryFailures} 次）`,
+        });
+        if (!emergency) {
+          // 摘要失败不折叠：不丢消息，先返回阶梯 2 的无损表示，下轮迭代再试摘要
+          return groups.length > 1 ? this.buildWithoutOldGroups(messages, groups) : messages;
+        }
+        return this.hardTruncate(messages, { systemMsgs, pinned, conv, groups });
+      }
+    } else if (!canSummarize) {
+      return this.hardTruncate(messages, { systemMsgs, pinned, conv, groups });
+    }
+
+    return this.stage3Representation(messages, { systemMsgs, pinned, conv, groups });
+  }
+
+  /** 阶梯 1/2 的估算值：不物化数组，直接在原估算上做增减（groups > 1 时才有意义） */
+  private ladderEstimates(messages: Message[], groups: ToolGroupSpan[]): {
+    stubbedEstimate: number | null;
+    droppedEstimate: number | null;
+  } {
+    if (groups.length <= 1) return { stubbedEstimate: null, droppedEstimate: null };
+    const base = this.estimateTokens(messages);
+    let toolSaved = 0;
+    let stubAdded = 0;
+    let groupSaved = 0;
+    for (let g = 0; g < groups.length - 1; g++) {
+      const span = groups[g]!;
+      groupSaved += (span.end - span.start) * 4;
+      for (let i = span.start; i < span.end; i++) {
+        const msg = messages[i]!;
+        groupSaved += this.entryFor(msg).original;
+        if (msg.role === "tool") {
+          toolSaved += this.entryFor(msg).original;
+          stubAdded += this.stubEntryFor(msg, messages[span.start]!).stubTokens ?? 0;
+        }
+      }
+    }
+    return {
+      stubbedEstimate: base - toolSaved + stubAdded,
+      droppedEstimate: base - groupSaved,
+    };
+  }
+
+  /** 阶梯 1 表示：旧工具组的 tool 输出替换为占位符，assistant 的调用与参数原样保留 */
+  private buildWithStubs(messages: Message[], groups: ToolGroupSpan[]): Message[] {
+    const owners = new Map<number, Message>();
+    for (let g = 0; g < groups.length - 1; g++) {
+      const span = groups[g]!;
+      for (let i = span.start + 1; i < span.end; i++) owners.set(i, messages[span.start]!);
+    }
+    return messages.map((message, index) => {
+      const owner = owners.get(index);
+      if (!owner || message.role !== "tool") return message;
+      return { ...message, content: this.stubEntryFor(message, owner).stubText! };
+    });
+  }
+
+  /** 阶梯 2 表示：旧工具组（owner + 响应）整体移出，只留最新一组 */
+  private buildWithoutOldGroups(messages: Message[], groups: ToolGroupSpan[]): Message[] {
+    const dropped = new Set<number>();
+    for (let g = 0; g < groups.length - 1; g++) {
+      for (let i = groups[g]!.start; i < groups[g]!.end; i++) dropped.add(i);
+    }
+    return messages.filter((_, index) => !dropped.has(index));
+  }
+
+  /**
+   * 工具观察（给摘要当输入）：阶梯 3 会把「除最新组外」的所有工具组从请求里丢掉，
+   * 它们的关键结果必须先并入摘要，否则 run 内最重要的观察就无声消失了。
+   * 每条截断，最多取最近 8 条。
+   */
+  private collectToolObservations(messages: Message[], groups: ToolGroupSpan[]): string[] {
+    const out: string[] = [];
+    for (let g = 0; g < groups.length - 1; g++) {
+      const span = groups[g]!;
+      const owner = messages[span.start]!;
+      const calls = owner.role === "assistant" ? owner.tool_calls : undefined;
+      for (let i = span.start + 1; i < span.end; i++) {
+        const toolMsg = messages[i]!;
+        if (toolMsg.role !== "tool" || typeof toolMsg.content !== "string") continue;
+        const call = calls?.find((c) => c.id === toolMsg.tool_call_id);
+        const name = call?.function.name ?? "unknown_tool";
+        const args = (call?.function.arguments ?? "").slice(0, 200);
+        out.push(`${name}(${args}) → ${toolMsg.content.slice(0, 800)}`);
+      }
+    }
+    return out.length > 8 ? [...out.slice(-8), `（更早的 ${out.length - 8} 条工具观察已省略）`] : out;
+  }
+
+  /** 阶梯 3 表示：「system + 钉住前缀 + 摘要块 + 未折叠对话 + 最新工具组」 */
+  private stage3Representation(
+    messages: Message[],
+    parts: { systemMsgs: Message[]; pinned: Message[]; conv: Message[]; groups: ToolGroupSpan[] }
+  ): Message[] {
+    const out: Message[] = [...parts.systemMsgs, ...parts.pinned];
+    if (this.rollingSummary !== null) {
+      out.push(
+        ...(this.summaryBlock ?? (this.summaryBlock = [
+          { role: "user", content: wrapSummaryBlock("历史上下文摘要", this.rollingSummary) },
+          { role: "assistant", content: "收到，我已了解以上历史摘要。" },
+        ]))
+      );
+    }
+    out.push(...parts.conv.slice(this.foldedCount));
+    const latest = parts.groups[parts.groups.length - 1];
+    if (latest) out.push(...messages.slice(latest.start, latest.end));
+    return out;
+  }
+
+  /** 最后兜底：摘要不可用时按轮硬截断，只保留预算 25% 内的最近对话 + 最新工具组 */
+  private hardTruncate(messages: Message[], parts: MessageAnalysis): Message[] {
+    const budget = this.config.compressThreshold ?? this.config.maxTokens - this.config.reserveTokens;
+    const keepBudget = Math.floor(budget * 0.25);
+    const convGroups = this.conversationGroups(parts.conv);
+    let used = 0;
+    let start = parts.conv.length;
+    for (let i = convGroups.length - 1; i >= 0; i--) {
+      const groupTokens = this.estimateTokens(convGroups[i]!);
+      if (used + groupTokens > keepBudget) break;
+      used += groupTokens;
+      start -= convGroups[i]!.length;
+    }
+    // 被截掉的对话不再出现在任何表示里，水位推到截断点，后续折叠不会再碰它们
+    this.foldedCount = Math.max(this.foldedCount, start);
+    this.notifyStage(4, {
+      action: "hard_truncate",
+      messages: start,
+      detail: "摘要不可用，更早的普通对话已被直接丢弃",
+    });
+    return this.stage3Representation(messages, parts);
+  }
+
+  private notifyStage(stage: number, event: CompactEvent): void {
+    if (stage <= this.reachedStage) return;
+    this.reachedStage = stage;
+    this.onCompact?.(event);
+  }
+
+  /**
+   * 增量合并摘要：有旧摘要则把「新折叠段 + 工具观察」并入旧摘要，无则首次摘要。
+   * 结构化 8 节 + 任务节只补不改，对抗迭代衰减；失败直接抛出，由 compress 降级处理。
+   */
+  private async mergeSummary(
+    previous: string | null,
+    newMessages: Message[],
+    observations: string[],
+    signal?: AbortSignal
+  ): Promise<string> {
+    const conversationText = newMessages
       .map((m) => `${m.role}: ${typeof m.content === "string" ? m.content : "[non-text]"}`)
       .join("\n");
+    const observationsText = observations.length
+      ? `\n\n折叠范围内的工具观察（已截断）：\n${observations.map((o) => `- ${o}`).join("\n")}`
+      : "";
 
-    const resp = await this.client.chat.completions.create({
-      model: this.config.summaryModel,
-      messages: [
-        {
-          role: "system",
-          content:
-            "Summarize the following conversation in 3-5 bullet points. Focus on: key decisions, tool call results, and unresolved questions. Be concise.",
-        },
-        { role: "user", content: conversationText },
-      ],
-      max_tokens: 300,
-      temperature: 0,
-    });
+    const input = this.clipMiddle(
+      previous
+        ? `现有摘要：\n${previous}\n\n新产生的对话：\n${conversationText}${observationsText}`
+        : `对话内容：\n${conversationText}${observationsText}`,
+      SUMMARY_INPUT_TOKEN_CAP
+    );
+    const inputTokens = this.tokenCounter.estimateText(input, this.config.summaryModel);
 
-    return resp.choices[0]?.message?.content ?? "No summary available.";
+    const resp = await this.client.chat.completions.create(
+      {
+        model: this.config.summaryModel,
+        messages: [
+          { role: "system", content: previous ? SUMMARY_MERGE_PROMPT : SUMMARY_FRESH_PROMPT },
+          { role: "user", content: input },
+        ],
+        max_tokens: summaryMaxTokensFor(inputTokens),
+        temperature: 0,
+      },
+      signal ? { signal } : {}
+    );
+    if (resp.usage) {
+      this.onSummaryUsage?.({
+        promptTokens: resp.usage.prompt_tokens ?? 0,
+        completionTokens: resp.usage.completion_tokens ?? 0,
+        totalTokens: resp.usage.total_tokens ?? 0,
+      });
+    }
+    const content = resp.choices[0]?.message?.content?.trim();
+    // 空摘要不能作为折叠结果：水位会前进但内容丢了，必须当作失败走降级
+    if (!content) throw new Error("摘要模型返回空内容");
+    return content;
   }
-
-  /**
-   * ✅ 粗略 token 估算（1 token ≈ 4 chars for English, ~2 chars for Chinese）
-   * 生产环境建议用 tiktoken 精确计算
-   */
-
 }
