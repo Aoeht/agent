@@ -3,6 +3,7 @@ import path from "node:path";
 import OpenAI from "openai";
 import { ToolRegistry } from "./registry";
 import { Message, AgentResult, ToolCall, StepInfo, ToolRuntime, McpPromptRole } from "./types";
+import { extractSources, renderCitationBlock, type Citation } from "./citations";
 import { AgentEventBus } from "./events";
 import { ContextManager } from "./context_manager";
 import { SessionStore, normalizeSessionName } from "./session_store";
@@ -184,6 +185,8 @@ export class Agent {
   private sessionLongTermSummary: string | undefined;
   /** 最近一次 run 的工具观察（name(args) → 结果摘要），供长期摘要 fold 使用 */
   private lastRunObservations: string[] = [];
+  /** 本轮 run 已编号的证据来源（Grounded 引用），run 开始重置、跨工具全局递增编号 */
+  private runCitations: Citation[] = [];
   /**
    * 后台长期摘要 fold：run() 结束不再阻塞等待（REPL 立刻回到提示符），
    * 下一轮 run 开始前必须落地——钉住前缀要读到最新摘要。
@@ -325,6 +328,7 @@ export class Agent {
 
   /** 发布 run_start/run_end 生命周期事件后进入主循环；异常时 run_end 不发（错误直接抛给调用方） */
   async run(userMessage: string, runtime?: ToolRuntime): Promise<AgentResult> {
+    this.runCitations = [];
     this.events.emit("run_start", { userMessage, promptHash: this.systemPromptHash });
     // 上一轮的后台记忆更新先落地再开新轮：钉住前缀要读到最新长期摘要；
     // 其 token 成本在本轮总账里补记（后台化只是挪了支付时间，不是免单）
@@ -421,7 +425,7 @@ export class Agent {
     while (iterations < this.config.maxIterations) {
       // 外部取消：立即结束循环，返回已完成的部分
       if (runtime?.signal?.aborted) {
-        return { success: false, messages, finalAnswer: null, toolCallsCount, totalTokens: totalTokens + summaryTokens, steps };
+        return { success: false, messages, finalAnswer: null, toolCallsCount, totalTokens: totalTokens + summaryTokens, steps, citations: this.runCitations };
       }
 
       // 运行预算越线：优雅停止，交给后面的强制收尾拿一个真实答案
@@ -489,6 +493,7 @@ export class Agent {
           toolCallsCount,
           totalTokens: totalTokens + summaryTokens,
           steps, // 👈 返回完整记录
+          citations: this.runCitations,
         };
       }
 
@@ -559,27 +564,33 @@ export class Agent {
       if (blockedResults.size > 0) budgetStopped = budget.check() ?? "max_tool_calls";
 
       for (const { toolCall, toolResult } of toolResults) {
+        // 🔗 Grounded 引用：解析工具结果中的证据来源，分配全局编号并注册到本轮引用表
+        const registered = this.registerCitations(toolCall.function.name, toolResult);
+        const citationBlock = renderCitationBlock(registered);
+
         // 超大结果先截断/落盘再入上下文：最新工具组永远原样保留，不截的话一条大结果自己就顶爆请求
         const processed = await this.processToolResult(toolCall.function.name, toolResult);
+        // 引用块注入消息头部——截断策略保留头部，编号清单不会丢；模型在最终回答里直接用 [n] 指代
+        const content = citationBlock ? `${citationBlock}\n\n${processed.content}` : processed.content;
 
         // 记入工具执行快照（result 记录的是模型实际看到的截断后文本）
         stepToolRecords.push({
           id: toolCall.id,
           name: toolCall.function.name,
           arguments: toolCall.function.arguments,
-          result: processed.content,
-          resultPreview: processed.content.slice(0, 200), // 提取前200字预览
+          result: content,
+          resultPreview: content.slice(0, 200), // 提取前200字预览
         });
 
         const toolMessage: Message = {
           role: "tool",
           tool_call_id: toolCall.id,
-          content: processed.content,
+          content,
         };
         messages.push(toolMessage);
         // 供 run 结束后长期摘要 fold 使用（已截断，避免囤大字符串）
         this.lastRunObservations.push(
-          `${toolCall.function.name}(${clipText(toolCall.function.arguments, 160)}) → ${clipText(processed.content, 500)}`
+          `${toolCall.function.name}(${clipText(toolCall.function.arguments, 160)}) → ${clipText(content, 500)}`
         );
       }
 
@@ -682,6 +693,7 @@ export class Agent {
           totalTokens: totalTokens + summaryTokens,
           steps,
           budgetStopped,
+          citations: this.runCitations,
         };
       }
     }
@@ -694,6 +706,7 @@ export class Agent {
       totalTokens: totalTokens + summaryTokens,
       steps,
       budgetStopped,
+      citations: this.runCitations,
     };
   }
 
@@ -965,6 +978,26 @@ export class Agent {
       });
       return 0;
     }
+  }
+
+  /**
+   * Grounded 引用注册：从工具结果 JSON 提取来源，跨工具按 url（无 url 按 title）去重，
+   * 分配全局递增编号后存入本轮引用表。返回的已编号列表用于渲染注入模型上下文的引用块。
+   */
+  private registerCitations(toolName: string, toolResult: string): Citation[] {
+    const pending = extractSources(toolName, toolResult);
+    if (pending.length === 0) return [];
+    const existing = new Set(this.runCitations.map((c) => c.url ?? c.title));
+    const registered: Citation[] = [];
+    for (const source of pending) {
+      const key = source.url ?? source.title;
+      if (existing.has(key)) continue;
+      existing.add(key);
+      const citation: Citation = { ...source, index: this.runCitations.length + 1 };
+      this.runCitations.push(citation);
+      registered.push(citation);
+    }
+    return registered;
   }
 
   /** 执行单个工具：未知工具/参数解析失败不抛出，统一转为 JSON observation 回给模型 */

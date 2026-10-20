@@ -23,7 +23,14 @@ import { MockTransport } from "../lib/mock";
 
 export type ChatItem =
   | { kind: "user"; id: string; text: string }
-  | { kind: "assistant"; id: string; text: string; streaming: boolean }
+  | {
+      kind: "assistant";
+      id: string;
+      text: string;
+      streaming: boolean;
+      /** Grounded 引用来源：与回答中的 [n] 标记对应（仅 run_end 透传的最终回答携带） */
+      citations?: ReadonlyArray<{ index: number; title: string; url?: string; snippet?: string; tool: string }>;
+    }
   | {
       kind: "tool";
       id: string;
@@ -224,7 +231,13 @@ function applyEvent(s: SessionUIState, e: ServerEvent): SessionUIState {
         it.kind === "assistant" && it.streaming ? { ...it, streaming: false } : it
       );
       if (e.finalAnswer && e.finalAnswer.trim() && !items.some((it) => it.kind === "assistant" && it.text.trim())) {
-        items.push({ kind: "assistant", id: uid(), text: e.finalAnswer, streaming: false });
+        items.push({
+          kind: "assistant",
+          id: uid(),
+          text: e.finalAnswer,
+          streaming: false,
+          ...(e.citations && e.citations.length > 0 ? { citations: e.citations } : {}),
+        });
       }
       if (!e.success) {
         items.push(

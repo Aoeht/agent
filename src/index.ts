@@ -168,6 +168,12 @@ async function runTurn(
       console.log("\n📝 最终回答:");
       console.log(result.finalAnswer);
     }
+    if (result.citations.length > 0) {
+      console.log("\n📎 引用来源:");
+      for (const c of result.citations) {
+        console.log(`  [${c.index}] ${c.title}${c.url ? ` — ${c.url}` : ""}`);
+      }
+    }
     console.log(
       `\n---------------- 💰 ${result.totalTokens} tokens · 🔧 ${result.toolCallsCount} 次工具调用 ----------------`
     );

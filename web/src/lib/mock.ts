@@ -129,7 +129,7 @@ async function stream(
 const FINAL_ACCEPT_ANSWER = [
   "## 调参结论",
   "",
-  "对照 `docs/rag-design.md` 与当前配置，问题定位如下：",
+  "对照 `docs/rag-design.md` 与当前配置，问题定位如下：[1]",
   "",
   "| 配置项 | 文档建议值 | 当前值 | 影响 |",
   "| --- | --- | --- | --- |",
@@ -150,8 +150,33 @@ const FINAL_ACCEPT_ANSWER = [
   "BM25_WEIGHT=0.4",
   "```",
   "",
-  "脚本验证结果：基线 nDCG@10 **0.62 → 0.71**，与文档预期一致。需要的话我可以把这次调参写一条 findings 存进知识库。",
+  "脚本验证结果：基线 nDCG@10 **0.62 → 0.71**，与文档预期一致[2]。基线测试定义见 `tests/rag_ranking.test.ts`[3]。需要的话我可以把这次调参写一条 findings 存进知识库。",
 ].join("\n");
+
+/** 演示用 Grounded 引用来源（编号与最终回答中的 [n] 对应） */
+const DEMO_CITATIONS = [
+  {
+    index: 1,
+    title: "docs/rag-design.md#L112 — 检索权重设计",
+    url: "https://github.com/ai-agent/ai-agent/blob/main/docs/rag-design.md#L112",
+    snippet: "初版默认权重 向量 0.7 / BM25 0.3；精排池 rerank.candidates 建议 ≥ 50",
+    tool: "rag_search",
+  },
+  {
+    index: 2,
+    title: "scripts/rerank_bench.ts 基线输出",
+    url: "https://github.com/ai-agent/ai-agent/blob/main/.sand-box/rerank_bench.out",
+    snippet: "基线 nDCG@10 = 0.62，调整 candidates=50 后 0.71",
+    tool: "run_script",
+  },
+  {
+    index: 3,
+    title: "tests/rag_ranking.test.ts — nDCG@10 基线断言",
+    url: "https://github.com/ai-agent/ai-agent/blob/main/tests/rag_ranking.test.ts",
+    snippet: "nDCG@10 基线 0.62",
+    tool: "rag_search",
+  },
+] as const satisfies Extract<ServerEvent, { type: "run_end" }>["citations"];
 
 const FINAL_DECLINE_ANSWER = [
   "明白，不执行脚本。那先只基于文档给你**无侵入的调参建议**（按预期收益排序）：",
@@ -304,6 +329,7 @@ async function runDemoScript(
         totalTokens: 12480,
         toolCallsCount: 3,
         iterations: 5,
+        citations: DEMO_CITATIONS,
       });
     } else {
       await stream(emit, FINAL_DECLINE_ANSWER, signal, 3, 14);

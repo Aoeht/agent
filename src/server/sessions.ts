@@ -424,6 +424,8 @@ export class SessionManager {
       toolCallsCount: result.toolCallsCount,
       iterations: result.steps.length,
       ...(result.budgetStopped !== undefined ? { budgetStopped: result.budgetStopped } : {}),
+      // Grounded 引用：引用表随 run_end 透出，前端把最终回答里的 [n] 渲染成来源卡片
+      ...(result.citations.length > 0 ? { citations: result.citations } : {}),
     });
 
     // 会话命名：与 REPL 的 createSessionNamer 同语义——只对第一个成功的回合尝试一次

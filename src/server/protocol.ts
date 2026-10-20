@@ -41,6 +41,16 @@ const ToolCallRecordSchema = z.object({
   resultPreview: z.string().optional(),
 });
 
+/** Grounded 引用来源：与最终回答中的 [n] 标记一一对应（核心字段对齐 core/citations.ts） */
+export const CitationSchema = z.object({
+  index: z.number().int().positive(),
+  title: z.string(),
+  url: z.string().optional(),
+  snippet: z.string().optional(),
+  tool: z.string(),
+});
+export type Citation = z.infer<typeof CitationSchema>;
+
 /** 审批表单字段描述：对齐 MCP elicitation 的 requestedSchema 形状 */
 export type RequestedSchemaField = {
   type?: string;
@@ -163,6 +173,11 @@ export const ServerEventSchema = z.discriminatedUnion("type", [
     toolCallsCount: z.number().int(),
     iterations: z.number().int(),
     budgetStopped: z.string().optional(),
+    /**
+     * Grounded 引用来源：与最终回答中的 [n] 标记一一对应。
+     * 前端据此把 [n] 渲染成可点击的来源卡片。
+     */
+    citations: z.array(CitationSchema).optional(),
   }),
   /** 会话名生成完成（新会话第一轮结束后） */
   z.object({ type: z.literal("session_name"), name: z.string() }),

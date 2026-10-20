@@ -1,6 +1,7 @@
 import { z } from "zod";
 import OpenAI from "openai";
 import type { BudgetStopReason } from "./run_budget";
+import type { Citation } from "./citations";
 
 // 直接使用官方定义的类型
 // type Message = OpenAI.Chat.Completions.ChatCompletionMessageParam;
@@ -125,6 +126,8 @@ export interface AgentResult {
   totalTokens: number;
   /** 每步的详细 token 与工具调用记录 */
   steps: StepInfo[];
+  /** 本轮工具产出且经过编号的证据来源（Grounded 引用，按 index 全局递增） */
+  citations: Citation[];
   /** 因运行预算越线而提前停止时记录原因；正常结束为 undefined */
   budgetStopped?: BudgetStopReason | undefined;
 }

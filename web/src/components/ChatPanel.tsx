@@ -92,6 +92,42 @@ function ChatItemView({ item }: { item: ChatItem }) {
           <div className="md">
             <Markdown remarkPlugins={[remarkGfm]}>{item.text || "…"}</Markdown>
           </div>
+          {item.citations && item.citations.length > 0 && (
+            <div className="mt-2.5 border-t border-cream-300/70 pt-2">
+              <p className="mb-1.5 text-[11px] font-medium tracking-wide text-ink-400">引用来源</p>
+              <div className="flex flex-wrap gap-1.5">
+                {item.citations.map((c) => {
+                  const badge = (
+                    <>
+                      <span className="font-mono text-[11px] font-semibold text-clay-600">[{c.index}]</span>
+                      <span className="truncate">{c.title}</span>
+                    </>
+                  );
+                  return c.url ? (
+                    <a
+                      key={c.index}
+                      href={c.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      title={c.snippet ?? c.url}
+                      className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-cream-300 bg-cream-100 px-2.5 py-1 text-xs text-ink-600 transition hover:border-clay-500/60 hover:text-ink-900"
+                    >
+                      {badge}
+                    </a>
+                  ) : (
+                    <span
+                      key={c.index}
+                      title={c.snippet}
+                      className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-cream-300 bg-cream-100 px-2.5 py-1 text-xs text-ink-600"
+                    >
+                      {badge}
+                      <span className="font-mono text-[10px] text-ink-400">{c.tool}</span>
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
+          )}
           {item.streaming && (
             <span className="ml-0.5 inline-block h-4 w-2 animate-pulse rounded-sm bg-clay-500 align-middle" />
           )}
