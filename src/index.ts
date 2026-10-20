@@ -18,6 +18,7 @@ import { TraceRecorder } from "./core/trace";
 import { CheckpointStore } from "./core/checkpoint_store";
 import { handleRewindCommand } from "./core/rewind_command";
 import { AgentResult, StepInfo, ToolRuntime } from "./core/types";
+import { STOP_REASON_LABELS } from "./core/run_outcome";
 
 /**
  * 会话选择：AGENT_SESSION_ID 显式指定时直接用（跳过询问，适合脚本/定时任务）；
@@ -168,28 +169,22 @@ async function runTurn(
   });
   if (ui.streamState.active) process.stdout.write("\n");
 
-  if (result.success) {
-    if (!ui.stream) {
-      console.log("\n📝 最终回答:");
-      console.log(result.finalAnswer);
-    }
-    if (result.citations.length > 0) {
-      console.log("\n📎 引用来源:");
-      for (const c of result.citations) {
-        console.log(`  [${c.index}] ${c.title}${c.url ? ` — ${c.url}` : ""}`);
-      }
-    }
-    console.log(
-      `\n---------------- 💰 ${result.totalTokens} tokens · 🔧 ${result.toolCallsCount} 次工具调用 ----------------`
-    );
-  } else {
-    const reason = result.budgetStopped
-      ? `运行预算越线（${result.budgetStopped}）`
-      : signal.aborted
-        ? "已被中断"
-        : "未能得到最终答案";
-    console.log(`\n⚠️ 本回合未完成: ${reason}`);
+  if (result.finalAnswer && (!ui.stream || !ui.streamState.active ||
+      result.finalAnswer === result.refusal)) {
+    console.log(result.success ? "\n📝 最终回答:" : "\n📝 已返回的内容:");
+    console.log(result.finalAnswer);
   }
+  if (result.citations.length > 0) {
+    console.log("\n📎 引用来源:");
+    for (const c of result.citations) {
+      console.log(`  [${c.index}] ${c.title}${c.url ? ` — ${c.url}` : ""}`);
+    }
+  }
+  console.log(
+    `\n---------------- 💰 ${result.totalTokens} tokens · 🔧 ${result.toolCallsCount} 次工具调用 ----------------`
+  );
+  console.log(`\n${result.success ? "📝" : "⚠️"} ${STOP_REASON_LABELS[result.stopReason]}${result.budgetStopped ? `（${result.budgetStopped}）` : ""}`);
+  if (result.errorMessage) console.log(`详情：${result.errorMessage}`);
   if (nameSession) await nameSession(agent, input, result, signal);
   return result;
 }

@@ -3,6 +3,7 @@ import { useState } from "react";
 import { useStore, type SessionUIState } from "../state/store";
 import { PlanPanel } from "./PlanPanel";
 import { SandboxModal } from "./Modals";
+import { STOP_REASON_LABELS } from "../../../src/core/run_outcome";
 
 /** 工具开关面板：折叠框，勾选 = 启用；下一轮迭代立即生效 */
 function ToolToggles({ session }: { session: SessionUIState | null }) {
@@ -128,7 +129,7 @@ function Stats({ session }: { session: SessionUIState }) {
               session.stats.success ? "bg-sage-100 text-sage-500" : "bg-terra-100 text-terra-500"
             }`}
           >
-            {session.stats.success ? "成功" : "未完成"}
+            {session.stats.stopReason ? STOP_REASON_LABELS[session.stats.stopReason] : session.stats.success ? "已回答" : "未完成"}
           </span>
         </div>
       )}

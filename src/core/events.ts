@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import type { BudgetStopReason } from "./run_budget";
 import type { PlanStep } from "./plan_store";
 import type { StepInfo } from "./types";
+import type { RunOutcome } from "./run_outcome";
 
 export interface RunStartEvent {
   userMessage: string;
@@ -14,7 +15,7 @@ export interface RunStartEvent {
   promptHash?: string;
 }
 
-export interface RunEndEvent {
+export interface RunEndEvent extends RunOutcome {
   success: boolean;
   totalTokens: number;
   toolCallsCount: number;

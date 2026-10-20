@@ -2,6 +2,7 @@ import { z } from "zod";
 import OpenAI from "openai";
 import type { BudgetStopReason } from "./run_budget";
 import type { Citation } from "./citations";
+import type { RunOutcome } from "./run_outcome";
 
 // 直接使用官方定义的类型
 // type Message = OpenAI.Chat.Completions.ChatCompletionMessageParam;
@@ -113,6 +114,8 @@ export interface StepInfo {
   };
   /** 本轮 LLM 的文本输出（思考过程或解释，可能为 null） */
   llmContent: string | null;
+  finishReason?: string | null;
+  refusal?: string | null;
   /** 该步骤执行的所有工具调用详情 */
   toolCalls: {
     id: string;
@@ -124,7 +127,7 @@ export interface StepInfo {
 }
 
 // ✅ Agent 运行结果
-export interface AgentResult {
+export interface AgentResult extends RunOutcome {
   success: boolean;
   messages: Message[];
   finalAnswer: string | null;

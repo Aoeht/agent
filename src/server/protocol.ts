@@ -23,6 +23,8 @@
  */
 
 import { z } from "zod";
+import { STOP_REASONS } from "../core/run_outcome";
+import type { RunOutcome } from "../core/run_outcome";
 
 // ---------- 共享小结构 ----------
 
@@ -50,6 +52,15 @@ export const CitationSchema = z.object({
   tool: z.string(),
 });
 export type Citation = z.infer<typeof CitationSchema>;
+
+export const RunOutcomeSchema = z.object({
+  runStatus: z.enum(["completed", "stopped", "failed"]),
+  taskStatus: z.enum(["answered", "incomplete", "blocked"]),
+  stopReason: z.enum(STOP_REASONS),
+  finishReason: z.string().nullable(),
+  refusal: z.string().nullable(),
+  errorMessage: z.string().optional(),
+});
 
 /** 审批表单字段描述：对齐 MCP elicitation 的 requestedSchema 形状 */
 export type RequestedSchemaField = {
@@ -167,6 +178,7 @@ export const ServerEventSchema = z.discriminatedUnion("type", [
   }),
   z.object({
     type: z.literal("run_end"),
+    ...RunOutcomeSchema.partial().shape,
     success: z.boolean(),
     finalAnswer: z.string().nullable().optional(),
     totalTokens: z.number().int(),
@@ -205,6 +217,7 @@ export interface HistoryMessageDTO {
    * 前端据此重建与回答中 [n] 标记对应的可点击来源卡片。非终答消息 / 老会话没有该字段。
    */
   citations?: Citation[];
+  outcome?: RunOutcome;
 }
 
 export interface SessionDetailDTO {

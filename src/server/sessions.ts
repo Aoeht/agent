@@ -14,6 +14,7 @@ import type { UiBridge } from "./bridge";
 import { runSessionStore } from "./run_context";
 import type { ServerRuntime } from "./runtime";
 import type { ServerEvent, SessionDetailDTO, SessionSummaryDTO, StatusDTO, Citation } from "./protocol";
+import { RunOutcomeSchema } from "./protocol";
 
 /**
  * 落盘行 citations 的形状校验：JSONL 是无人看守的磁盘格式，手工编辑 / 旧版本 / 写坏的字段
@@ -220,10 +221,14 @@ export class SessionManager {
         // 终答消息落盘时随行写入的引用：透出给前端重建引用卡片；损坏行直接丢弃
         const citations = message.role === "assistant" ? (message as { citations?: unknown }).citations : undefined;
         const kept = Array.isArray(citations) ? citations.filter(isPersistedCitation) : undefined;
+        const outcome = RunOutcomeSchema.safeParse(
+          message.role === "assistant" ? (message as { outcome?: unknown }).outcome : undefined,
+        );
         messages.push({
           role: message.role,
           content: message.content,
           ...(kept && kept.length > 0 ? { citations: kept } : {}),
+          ...(outcome.success ? { outcome: outcome.data } : {}),
         });
       }
     }
@@ -448,6 +453,12 @@ export class SessionManager {
     this.options.hub.publish(sessionId, {
       type: "run_end",
       success: result.success,
+      runStatus: result.runStatus,
+      taskStatus: result.taskStatus,
+      stopReason: result.stopReason,
+      finishReason: result.finishReason,
+      refusal: result.refusal,
+      ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
       ...(result.finalAnswer !== null ? { finalAnswer: result.finalAnswer } : {}),
       totalTokens: result.totalTokens,
       toolCallsCount: result.toolCallsCount,

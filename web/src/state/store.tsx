@@ -18,6 +18,7 @@ import type {
 } from "@protocol";
 import type { SessionConfigInput, Transport } from "../lib/transport";
 import { MockTransport } from "../lib/mock";
+import { STOP_REASON_LABELS, type RunOutcome } from "../../../src/core/run_outcome";
 
 // ---------- 会话内的可渲染项 ----------
 
@@ -70,7 +71,8 @@ export interface SessionUIState {
     requestedSchema?: Record<string, import("@protocol").RequestedSchemaField>;
   };
   pendingInput?: { id: string; source?: string; prompt: string };
-  stats?: { success: boolean; totalTokens: number; toolCallsCount: number; iterations: number };
+  stats?: { success: boolean; totalTokens: number; toolCallsCount: number; iterations: number } & Partial<RunOutcome>;
+  runStartIndex?: number;
   meta?: Extract<ServerEvent, { type: "hello" }>;
   cancelledByUser?: boolean;
 }
@@ -114,24 +116,27 @@ function emptySession(): SessionUIState {
   return { items: [], plan: [], status: "idle" };
 }
 
-function historyToItems(detail: SessionDetailDTO): ChatItem[] {
-  return detail.messages.map((message) => {
+export function historyToItems(detail: SessionDetailDTO): ChatItem[] {
+  return detail.messages.flatMap((message): ChatItem[] => {
     // 历史回放的引用：落盘时随终答消息写入，这里重建可点击的来源卡片
     const citations = message.citations && message.citations.length > 0 ? message.citations : undefined;
-    return message.role === "user"
-      ? { kind: "user", id: uid(), text: message.content }
-      : {
+    if (message.role === "user") return [{ kind: "user", id: uid(), text: message.content }];
+    const items: ChatItem[] = message.content || citations ? [{
           kind: "assistant",
           id: uid(),
           text: message.content,
           streaming: false,
           ...(citations ? { citations } : {}),
-        };
+        }] : [];
+    if (message.outcome && message.outcome.stopReason !== "answer") {
+      items.push(notice(`⚠️ ${STOP_REASON_LABELS[message.outcome.stopReason]}`, "warn"));
+    }
+    return items;
   });
 }
 
 /** 单个 ServerEvent → 会话状态的纯函数迁移（UI 渲染的全部逻辑都在这） */
-function applyEvent(s: SessionUIState, e: ServerEvent): SessionUIState {
+export function applyEvent(s: SessionUIState, e: ServerEvent): SessionUIState {
   switch (e.type) {
     case "hello":
       return {
@@ -151,7 +156,7 @@ function applyEvent(s: SessionUIState, e: ServerEvent): SessionUIState {
         maxIterations: e.maxIterations ?? s.maxIterations,
       };
     case "run_start":
-      return { ...s, status: "running", stats: undefined, cancelledByUser: false };
+      return { ...s, status: "running", stats: undefined, cancelledByUser: false, runStartIndex: s.items.length };
     case "token": {
       const items = [...s.items];
       const last = items[items.length - 1];
@@ -237,21 +242,21 @@ function applyEvent(s: SessionUIState, e: ServerEvent): SessionUIState {
     case "run_end": {
       const citations = e.citations && e.citations.length > 0 ? e.citations : undefined;
       const items = [...s.items];
-      // 流式回答：终答已渐进渲染成一条 streaming assistant —— 关掉流式标记，
-      // 并把参考文献贴到这条尾巴上（引用只随 run_end 透传，此前无从附加，会丢）
-      for (let i = items.length - 1; i >= 0; i--) {
+      // 只在本轮匹配终答，避免历史回答或工具前的解释吞掉本轮拒绝信息。
+      let matched = false;
+      for (let i = items.length - 1; i >= (s.runStartIndex ?? 0); i--) {
         const it = items[i];
-        if (it?.kind === "assistant" && it.streaming) {
-          items[i] = { ...it, streaming: false, ...(citations ? { citations } : {}) };
-          break;
+        if (it?.kind === "assistant") {
+          const isFinal = !matched && !!e.finalAnswer && it.text === e.finalAnswer;
+          items[i] = { ...it, streaming: false, ...(isFinal && citations ? { citations } : {}) };
+          if (isFinal) matched = true;
         }
       }
-      // 非流式回答（没有可贴的流式尾巴）：终答作为新消息入列，同样带引用
-      if (e.finalAnswer && e.finalAnswer.trim() && !items.some((it) => it.kind === "assistant" && it.text.trim())) {
+      if (!matched && (e.finalAnswer?.trim() || citations)) {
         items.push({
           kind: "assistant",
           id: uid(),
-          text: e.finalAnswer,
+          text: e.finalAnswer ?? "",
           streaming: false,
           ...(citations ? { citations } : {}),
         });
@@ -259,11 +264,12 @@ function applyEvent(s: SessionUIState, e: ServerEvent): SessionUIState {
       if (!e.success) {
         items.push(
           notice(
-            s.cancelledByUser ? "⏹️ 已中断本次运行" : `⚠️ 本回合未完成${e.budgetStopped ? `（${e.budgetStopped}）` : ""}`,
+            s.cancelledByUser ? "⏹️ 已中断本次运行" : `⚠️ ${e.stopReason ? STOP_REASON_LABELS[e.stopReason] : "本回合未完成"}${e.budgetStopped ? `（${e.budgetStopped}）` : ""}`,
             "warn"
           )
         );
       }
+      if (e.errorMessage) items.push(notice(`详情：${e.errorMessage}`, "error"));
       return {
         ...s,
         items,
@@ -273,6 +279,11 @@ function applyEvent(s: SessionUIState, e: ServerEvent): SessionUIState {
         accumulatedTokens: (s.accumulatedTokens ?? 0) + e.totalTokens,
         stats: {
           success: e.success,
+          runStatus: e.runStatus,
+          taskStatus: e.taskStatus,
+          stopReason: e.stopReason,
+          finishReason: e.finishReason,
+          refusal: e.refusal,
           totalTokens: e.totalTokens,
           toolCallsCount: e.toolCallsCount,
           iterations: e.iterations,

@@ -253,8 +253,11 @@ describe("Agent 集成", () => {
       maxIterations: 1,
     });
     const result = await agent.run("多步任务");
-    expect(result.success).toBe(true);
+    expect(result.success).toBe(false);
+    expect(result.stopReason).toBe("iteration_limit");
     expect(result.finalAnswer).toBe("兜底最终回答");
+    expect(result.totalTokens).toBe(45);
+    expect(result.steps.at(-1)?.tokens.totalTokens).toBe(30);
     // 第一次收尾带工具 + tool_choice:"none"，重试不带工具
     expect(requests[1]!.tool_choice).toBe("none");
     expect(requests[2]!.tools).toBeUndefined();
