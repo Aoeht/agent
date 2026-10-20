@@ -200,6 +200,11 @@ export interface SessionSummaryDTO {
 export interface HistoryMessageDTO {
   role: "user" | "assistant";
   content: string;
+  /**
+   * Grounded 引用来源：历史回放时透出的贡献（assistant 终答消息落盘时随行写入），
+   * 前端据此重建与回答中 [n] 标记对应的可点击来源卡片。非终答消息 / 老会话没有该字段。
+   */
+  citations?: Citation[];
 }
 
 export interface SessionDetailDTO {

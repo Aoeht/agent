@@ -37,6 +37,24 @@ const SESSION_NAME_PROMPT =
   "你是会话命名器。用不超过 14 个字概括这段对话的主题，只输出标题本身：" +
   "不要引号、不要句号、不要“会话名：”之类的前缀，也不要解释或换行。";
 
+/**
+ * 落盘态 assistant 终答消息：本次运行的 Grounded 引用（citations）随消息一起写入会话文件。
+ * JSONL 一行一个 JSON，OpenAI Message 之外的字段本来就能存（旧版本读到会忽略多余字段）；
+ * 它只服务历史回放——刷新 / 切回旧会话后据此恢复引用卡片。
+ * 重新加载进 LLM 上下文前必须剥离，见 stripPersistedCitations。
+ */
+type PersistedAssistantMessage = Message & { citations?: Citation[] };
+
+/** 从会话历史里剥掉 citations：它不是 OpenAI 标准消息字段，多数兼容服务端忽略，严格的可能拒收。 */
+function stripPersistedCitations(message: Message): Message {
+  if (message.role === "assistant" && "citations" in message) {
+    const { citations, ...rest } = message as PersistedAssistantMessage;
+    void citations;
+    return rest;
+  }
+  return message;
+}
+
 interface AgentConfig {
   model: string;
   systemPrompt: string;
@@ -367,7 +385,8 @@ export class Agent {
     // 会话文件里的模板记录不进 history，但会把"上次选定的模板"带回来：历史可见、且可被 /prompt 撤销。
     await this.compactHistory();
     const stored = this.config.sessionStore ? await this.config.sessionStore.load() : undefined;
-    const history = stored?.messages ?? [];
+    // 落盘行的 citations 只服务历史回放，进 LLM 上下文前按标准消息形态剥离
+    const history = (stored?.messages ?? []).map(stripPersistedCitations);
     // 调用方（REPL）若已显式设过就以它为准：显式 setPromptTemplate(undefined) 代表"用户刚清除"。
     // 顺序上很关键 —— REPL 每轮跑前都会调用一次 setPromptTemplate（哪怕传 undefined），
     // 所以这里的兜底恢复只对"不自己管模板生命周期"的调用方生效，不会把用户清除过的模板又拉回来。
@@ -481,7 +500,12 @@ export class Agent {
         this.events.emit("step", { step: finalStep });
 
         // 最终回答一并计入历史：多轮续聊时模型需要看到自己上一轮回答了什么
-        const finalMessage: Message = { role: "assistant", content: llmContent };
+        // 引用随消息落盘：历史回放时据此重建引用卡片（进上下文前会被剥离）
+        const finalMessage: PersistedAssistantMessage = {
+          role: "assistant",
+          content: llmContent,
+          ...(this.runCitations.length > 0 ? { citations: this.runCitations } : {}),
+        };
         messages.push(finalMessage);
         await this.persist(finalMessage);
         await this.compactHistory();
@@ -679,8 +703,12 @@ export class Agent {
       this.events.emit("step", { step: forcedStep });
 
       if (forcedContent && forcedContent.trim().length > 0) {
-        // 收尾回答同样入历史：多轮续聊时模型需要看到自己最后答了什么
-        const finalMessage: Message = { role: "assistant", content: forcedContent };
+        // 收尾回答同样入历史：多轮续聊时模型需要看到自己最后答了什么；引用同样随消息落盘
+        const finalMessage: PersistedAssistantMessage = {
+          role: "assistant",
+          content: forcedContent,
+          ...(this.runCitations.length > 0 ? { citations: this.runCitations } : {}),
+        };
         messages.push(finalMessage);
         await this.persist(finalMessage);
         await this.compactHistory();

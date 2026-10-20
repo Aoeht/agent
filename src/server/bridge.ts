@@ -63,6 +63,17 @@ export class UiBridge {
   };
 
   /**
+   * ToolRuntime.askUser 通道：模型发起的主动澄清（ask_user 工具），向用户征询
+   * 一段自由文本回答。复用 human_input_request 事件链路（Web 端渲染输入模态框，
+   * 应答 POST /inputs/:id → resolveInput）。与此相对的 requestHuman 是 y/N 审批语义。
+   */
+  readonly askUser = async (prompt: string, signal: AbortSignal): Promise<string | null> => {
+    const sessionId = this.sessionFor();
+    if (sessionId === null) return null;
+    return this.askInput(sessionId, prompt.trim(), signal);
+  };
+
+  /**
    * 标记某 server 连接上有某会话的在飞调用（由每会话注册表的包装中间件在
    * MCP 工具执行前后调用）。elicitation 从传输层回调进来时 ALS 已丢失，靠它归因。
    */
@@ -168,7 +179,7 @@ export class UiBridge {
     });
   }
 
-  /** 保留：真正的"要用户输入文本"的调用方出现时恢复此通道（human_input_request 事件） */
+  /** 人工输入事件通道：由公开的 askUser（模型发起的澄清）使用，会话路由由调用方解析 */
   private askInput(sessionId: string, prompt: string, signal: AbortSignal): Promise<string | null> {
     const id = `input-${Date.now().toString(36)}-${++this.seq}`;
     return new Promise<string | null>((resolve) => {

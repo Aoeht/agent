@@ -15,6 +15,12 @@ export interface ToolRuntime {
   /** 本地可信工具提供的图片附件；不经 JSON 文本或 trace 传递。 */
   emitImage?: (image: { dataUrl: string; label: string }) => void;
   requestHuman?: (prompt: string, signal: AbortSignal) => Promise<string | null>;
+  /**
+   * 模型发起的主动澄清通道：向用户要一段自由文本回答（与 requestHuman 的 y/N 审批语义分开）。
+   * 返回 null 表示用户跳过/取消/超时或当前环境不支持；CLI 实现走 readline，
+   * Web 实现走 human_input_request 事件（bridge.askUser）。
+   */
+  askUser?: (prompt: string, signal: AbortSignal) => Promise<string | null>;
   /** 单次 run 内失败的浏览器网址，防止模型反复打断用户验证。 */
   browserFailures?: Set<string>;
 }

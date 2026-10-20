@@ -115,11 +115,19 @@ function emptySession(): SessionUIState {
 }
 
 function historyToItems(detail: SessionDetailDTO): ChatItem[] {
-  return detail.messages.map((message) =>
-    message.role === "user"
+  return detail.messages.map((message) => {
+    // 历史回放的引用：落盘时随终答消息写入，这里重建可点击的来源卡片
+    const citations = message.citations && message.citations.length > 0 ? message.citations : undefined;
+    return message.role === "user"
       ? { kind: "user", id: uid(), text: message.content }
-      : { kind: "assistant", id: uid(), text: message.content, streaming: false }
-  );
+      : {
+          kind: "assistant",
+          id: uid(),
+          text: message.content,
+          streaming: false,
+          ...(citations ? { citations } : {}),
+        };
+  });
 }
 
 /** 单个 ServerEvent → 会话状态的纯函数迁移（UI 渲染的全部逻辑都在这） */
@@ -227,16 +235,25 @@ function applyEvent(s: SessionUIState, e: ServerEvent): SessionUIState {
         pendingInput: { id: e.id, source: e.source, prompt: e.prompt },
       };
     case "run_end": {
-      const items = s.items.map((it) =>
-        it.kind === "assistant" && it.streaming ? { ...it, streaming: false } : it
-      );
+      const citations = e.citations && e.citations.length > 0 ? e.citations : undefined;
+      const items = [...s.items];
+      // 流式回答：终答已渐进渲染成一条 streaming assistant —— 关掉流式标记，
+      // 并把参考文献贴到这条尾巴上（引用只随 run_end 透传，此前无从附加，会丢）
+      for (let i = items.length - 1; i >= 0; i--) {
+        const it = items[i];
+        if (it?.kind === "assistant" && it.streaming) {
+          items[i] = { ...it, streaming: false, ...(citations ? { citations } : {}) };
+          break;
+        }
+      }
+      // 非流式回答（没有可贴的流式尾巴）：终答作为新消息入列，同样带引用
       if (e.finalAnswer && e.finalAnswer.trim() && !items.some((it) => it.kind === "assistant" && it.text.trim())) {
         items.push({
           kind: "assistant",
           id: uid(),
           text: e.finalAnswer,
           streaming: false,
-          ...(e.citations && e.citations.length > 0 ? { citations: e.citations } : {}),
+          ...(citations ? { citations } : {}),
         });
       }
       if (!e.success) {

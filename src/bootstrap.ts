@@ -16,6 +16,7 @@ import { createInspectLinkTool } from "./tools/inspect_link";
 import { createIngestFindingsTool } from "./tools/ingest_findings";
 import { createGitTreeTool } from "./tools/git_tree";
 import { createUpdatePlanTool } from "./tools/update_plan";
+import { createAskUserTool } from "./tools/ask_user";
 import { createLoadSkillTool } from "./tools/load_skill";
 import { createRunScriptTool } from "./tools/run_script";
 import { resolveScriptSandbox, ScriptSandboxResolution } from "./tools/sandbox_docker";
@@ -73,6 +74,8 @@ export function registerSessionTools(
 ): void {
   const sandboxRoot = options.sandboxRoot ?? MCP_SANDBOX_DIR;
   registry.register(createUpdatePlanTool(options.planStore));
+  // 主动澄清：信息缺失且查不到时向用户征询自由文本回答，通道由入口注入（CLI readline / UI human_input_request）
+  registry.register(createAskUserTool());
   registry.register(createSearchWebTool());
   registry.register(createRagSearchTool());
   registry.register(createInspectLinkTool());

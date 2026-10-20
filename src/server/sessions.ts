@@ -13,7 +13,25 @@ import type { AgentResult, ToolDefinition, ToolRuntime } from "../core/types";
 import type { UiBridge } from "./bridge";
 import { runSessionStore } from "./run_context";
 import type { ServerRuntime } from "./runtime";
-import type { ServerEvent, SessionDetailDTO, SessionSummaryDTO, StatusDTO } from "./protocol";
+import type { ServerEvent, SessionDetailDTO, SessionSummaryDTO, StatusDTO, Citation } from "./protocol";
+
+/**
+ * 落盘行 citations 的形状校验：JSONL 是无人看守的磁盘格式，手工编辑 / 旧版本 / 写坏的字段
+ * 都可能混进来。坏引用直接丢弃（filter），不让畸形数据进 DTO 破坏前端渲染。
+ */
+function isPersistedCitation(value: unknown): value is Citation {
+  if (typeof value !== "object" || value === null) return false;
+  const c = value as Record<string, unknown>;
+  return (
+    typeof c.index === "number" &&
+    Number.isFinite(c.index) &&
+    typeof c.title === "string" &&
+    c.title.trim() !== "" &&
+    typeof c.tool === "string" &&
+    (c.url === undefined || typeof c.url === "string") &&
+    (c.snippet === undefined || typeof c.snippet === "string")
+  );
+}
 
 /**
  * 会话级事件扇出：publish 做成箭头字段，运行时组装可以早于本类实例化就持有它
@@ -199,7 +217,14 @@ export class SessionManager {
     const messages: SessionDetailDTO["messages"] = [];
     for (const message of loaded.messages) {
       if ((message.role === "user" || message.role === "assistant") && typeof message.content === "string") {
-        messages.push({ role: message.role, content: message.content });
+        // 终答消息落盘时随行写入的引用：透出给前端重建引用卡片；损坏行直接丢弃
+        const citations = message.role === "assistant" ? (message as { citations?: unknown }).citations : undefined;
+        const kept = Array.isArray(citations) ? citations.filter(isPersistedCitation) : undefined;
+        messages.push({
+          role: message.role,
+          content: message.content,
+          ...(kept && kept.length > 0 ? { citations: kept } : {}),
+        });
       }
     }
     return { summary: await this.summaryFor(sessionId, messages.length), messages };
@@ -402,7 +427,11 @@ export class SessionManager {
       userMessage: text,
       promptHash: agent.systemPromptHash,
     });
-    const runtime: ToolRuntime = { signal, requestHuman: this.options.bridge.requestHuman };
+    const runtime: ToolRuntime = {
+      signal,
+      requestHuman: this.options.bridge.requestHuman,
+      askUser: this.options.bridge.askUser,
+    };
 
     let result: AgentResult;
     try {

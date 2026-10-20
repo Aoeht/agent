@@ -157,10 +157,15 @@ async function runTurn(
   signal: AbortSignal,
   ui: TurnUi,
   requestHuman?: ToolRuntime["requestHuman"],
+  askUser?: ToolRuntime["askUser"],
   nameSession?: SessionNamer
 ): Promise<AgentResult> {
   ui.streamState.active = false;
-  const result = await agent.run(input, { signal, ...(requestHuman ? { requestHuman } : {}) });
+  const result = await agent.run(input, {
+    signal,
+    ...(requestHuman ? { requestHuman } : {}),
+    ...(askUser ? { askUser } : {}),
+  });
   if (ui.streamState.active) process.stdout.write("\n");
 
   if (result.success) {
@@ -210,7 +215,7 @@ async function runOneShot(
   };
   process.on("SIGINT", onSigint);
   try {
-    const result = await runTurn(agent, input, controller.signal, ui, undefined, nameSession);
+    const result = await runTurn(agent, input, controller.signal, ui, undefined, undefined, nameSession);
     // 后台记忆更新等它落地再退：一次性模式没有"下一轮"来收账，摘要写盘必须先于进程退出
     await agent.flushSummary();
     if (!result.success) process.exitCode = 1;
@@ -347,7 +352,7 @@ async function runRepl(
       const controller = new AbortController();
       activeController = controller;
       try {
-        await runTurn(agent, input, controller.signal, ui, (prompt, signal) => lines.next(prompt, signal));
+        await runTurn(agent, input, controller.signal, ui, (prompt, signal) => lines.next(prompt, signal), (prompt, signal) => lines.next(prompt, signal));
       } catch (error) {
         console.error(`\n❌ 本回合失败: ${error instanceof Error ? error.message : String(error)}`);
       } finally {
