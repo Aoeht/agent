@@ -15,6 +15,7 @@
  *   GET    /sessions                  → SessionSummaryDTO[]
  *   POST   /sessions                  → SessionSummaryDTO（新建）
  *   GET    /sessions/:id/history      → SessionDetailDTO（摘要 + 历史）
+ *   GET    /sessions/:id/tasks        → TaskRecord[]（独立任务历史）
  *   POST   /sessions/:id/messages     body { text } → 202；忙时 409 { error }
  *   POST   /sessions/:id/cancel       → 204
  *   POST   /approvals/:id             body ApprovalDecisionBody → 204；未知/已过期 404/410
@@ -25,6 +26,8 @@
 import { z } from "zod";
 import { STOP_REASONS } from "../core/run_outcome";
 import type { RunOutcome } from "../core/run_outcome";
+import { TaskSchema, VerificationSchema } from "../core/task_types";
+import type { TaskRecord } from "../core/task_types";
 
 // ---------- 共享小结构 ----------
 
@@ -55,7 +58,10 @@ export type Citation = z.infer<typeof CitationSchema>;
 
 export const RunOutcomeSchema = z.object({
   runStatus: z.enum(["completed", "stopped", "failed"]),
-  taskStatus: z.enum(["answered", "incomplete", "blocked"]),
+  taskStatus: z.enum(["answered", "verified", "incomplete", "blocked"]),
+  taskId: z.string().optional(),
+  runId: z.string().optional(),
+  verification: VerificationSchema.optional(),
   stopReason: z.enum(STOP_REASONS),
   finishReason: z.string().nullable(),
   refusal: z.string().nullable(),
@@ -73,10 +79,12 @@ export type RequestedSchemaField = {
 // ---------- 下行事件 ----------
 
 export const ServerEventSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("task_update"), task: TaskSchema }),
   /** SSE 连接建立后第一条：声明当前运行环境（右栏「环境」卡片的数据源） */
   z.object({
     type: z.literal("hello"),
     model: z.string(),
+    configRevision: z.number().optional(),
     summaryModel: z.string().optional(),
     /** 沙箱后端描述，如 "docker 容器（断网）" 或 "宿主机进程（回退原因）" */
     sandbox: z.string(),
@@ -129,6 +137,7 @@ export const ServerEventSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("session_config"),
     model: z.string(),
+    configRevision: z.number().optional(),
     contextWindow: z.number().int().optional(),
     temperature: z.number().optional(),
     maxIterations: z.number().int().optional(),
@@ -178,6 +187,7 @@ export const ServerEventSchema = z.discriminatedUnion("type", [
   }),
   z.object({
     type: z.literal("run_end"),
+    task: TaskSchema.optional(),
     ...RunOutcomeSchema.partial().shape,
     success: z.boolean(),
     finalAnswer: z.string().nullable().optional(),
@@ -197,6 +207,7 @@ export const ServerEventSchema = z.discriminatedUnion("type", [
 ]);
 
 export type ServerEvent = z.infer<typeof ServerEventSchema>;
+export type SessionConfigEvent = Extract<ServerEvent, { type: "session_config" }>;
 
 // ---------- REST DTO ----------
 
@@ -221,6 +232,7 @@ export interface HistoryMessageDTO {
 }
 
 export interface SessionDetailDTO {
+  task?: TaskRecord;
   summary: SessionSummaryDTO;
   messages: HistoryMessageDTO[];
 }

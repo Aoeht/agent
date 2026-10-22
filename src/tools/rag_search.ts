@@ -294,6 +294,7 @@ export function createRagSearchTool(options: RagSearchOptions = {}): ToolDefinit
     schema: RagSearchParamsSchema,
     // 写入集中在 ingestWeb 一处，且有跨进程锁 + 写链串行化，upsert 按来源合并幂等
     parallelSafe: true,
+    needsReconciliation: false,
     description:
       "检索反诈相关资料（历史诈骗案例、平台规则、监管政策等）。先在本地知识缓存（以往联网检索沉淀的网页片段）中做" +
       (embeddings ? "中英文关键词与语义（向量）双路" : "中英文关键词") +

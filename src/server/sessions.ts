@@ -13,8 +13,10 @@ import type { AgentResult, ToolDefinition, ToolRuntime } from "../core/types";
 import type { UiBridge } from "./bridge";
 import { runSessionStore } from "./run_context";
 import type { ServerRuntime } from "./runtime";
-import type { ServerEvent, SessionDetailDTO, SessionSummaryDTO, StatusDTO, Citation } from "./protocol";
+import type { ServerEvent, SessionConfigEvent, SessionDetailDTO, SessionSummaryDTO, StatusDTO, Citation } from "./protocol";
 import { RunOutcomeSchema } from "./protocol";
+import { TaskStore } from "../core/task_store";
+import path from "node:path";
 
 /**
  * 落盘行 citations 的形状校验：JSONL 是无人看守的磁盘格式，手工编辑 / 旧版本 / 写坏的字段
@@ -65,8 +67,11 @@ export class EventHub {
 }
 
 interface SessionEntry {
+  initializing?: Promise<Agent> | undefined;
+  configuring?: boolean;
+  configRevision: number;
   store: SessionStore;
-  /** 懒创建：第一次 sendMessage 才组装（MCP/上下文已在启动期就绪） */
+  /** 懒创建：首次订阅、设置或发送时组装（MCP/上下文已在启动期就绪） */
   agent?: Agent | undefined;
   /** 会话的独立注册表（与 agent 同生命周期；切换沙箱/工具开关时按需重建） */
   registry?: ToolRegistry | undefined;
@@ -95,6 +100,11 @@ export interface SessionManagerOptions {
  */
 export class SessionManager {
   private readonly entries = new Map<string, SessionEntry>();
+  private configRevision = Date.now();
+
+  private nextConfigRevision(): number {
+    return this.configRevision = Math.max(Date.now(), this.configRevision + 1);
+  }
 
   constructor(private readonly options: SessionManagerOptions) {}
 
@@ -105,7 +115,8 @@ export class SessionManager {
 
   /** 是否任意会话都在跑（切换沙箱目录前检查） */
   anyBusy(): boolean {
-    return [...this.entries.values()].some((entry) => entry.controller !== undefined);
+    return [...this.entries.values()].some((entry) =>
+      entry.controller !== undefined || entry.configuring || entry.initializing !== undefined);
   }
 
   /**
@@ -169,25 +180,34 @@ export class SessionManager {
   async applySessionConfig(
     sessionId: string,
     patch: { model?: string; temperature?: number; maxIterations?: number }
-  ): Promise<void> {
+  ): Promise<SessionConfigEvent> {
     const entry = this.entry(sessionId);
-    if (entry.controller !== undefined) throw new Error("当前会话已有任务在运行");
-    const agent = await this.ensureAgent(entry, sessionId);
+    if (entry.controller !== undefined || entry.configuring) throw new Error("当前会话已有任务或配置更新在运行");
+    entry.configuring = true;
+    try {
+      const agent = await this.ensureAgent(entry, sessionId);
 
-    if (patch.model !== undefined && patch.model.trim() !== "" && patch.model.trim() !== agent.model) {
-      agent.setModel(patch.model.trim());
-      await entry.store.recordModel(agent.model);
+      if (patch.model !== undefined && patch.model.trim() !== "" && patch.model.trim() !== agent.model) {
+        await entry.store.recordModel(patch.model.trim());
+        agent.setModel(patch.model.trim());
+      }
+      if (patch.temperature !== undefined) agent.setTemperature(patch.temperature);
+      if (patch.maxIterations !== undefined) agent.setMaxIterations(patch.maxIterations);
+
+      entry.configRevision = this.nextConfigRevision();
+      const applied: SessionConfigEvent = {
+        type: "session_config",
+        configRevision: entry.configRevision,
+        model: agent.model,
+        contextWindow: contextWindowFor(agent.model),
+        temperature: agent.temperature,
+        maxIterations: agent.maxIterations,
+      };
+      this.options.hub.publish(sessionId, applied);
+      return applied;
+    } finally {
+      entry.configuring = false;
     }
-    if (patch.temperature !== undefined) agent.setTemperature(patch.temperature);
-    if (patch.maxIterations !== undefined) agent.setMaxIterations(patch.maxIterations);
-
-    this.options.hub.publish(sessionId, {
-      type: "session_config",
-      model: agent.model,
-      contextWindow: contextWindowFor(agent.model),
-      temperature: agent.temperature,
-      maxIterations: agent.maxIterations,
-    });
   }
 
   async list(): Promise<SessionSummaryDTO[]> {
@@ -232,14 +252,18 @@ export class SessionManager {
         });
       }
     }
-    return { summary: await this.summaryFor(sessionId, messages.length), messages };
+    const task = this.taskStoreFor(entry).current();
+    return { summary: await this.summaryFor(sessionId, messages.length), messages, ...(task ? { task } : {}) };
+  }
+
+  tasks(sessionId: string) {
+    return this.taskStoreFor(this.entry(sessionId)).list();
   }
 
   async status(): Promise<StatusDTO> {
     const { config, skills, sandbox, mcp } = this.options.runtime;
-    const activeModel = [...this.entries.values()].find((entry) => entry.agent !== undefined)?.agent?.model;
     return {
-      model: activeModel ?? config.model,
+      model: config.model,
       summaryModel: config.summaryModel,
       sandbox:
         sandbox.backend === "docker"
@@ -258,19 +282,25 @@ export class SessionManager {
   subscribe(sessionId: string, listener: (event: ServerEvent) => void): () => void {
     this.entry(sessionId);
     const unsubscribe = this.options.hub.subscribe(sessionId, listener);
+    let subscribed = true;
     void this.helloFor(sessionId).then((hello) => {
-      this.options.hub.publish(sessionId, hello);
+      if (!subscribed) return;
+      listener(hello);
+      const task = this.taskStoreFor(this.entry(sessionId)).current();
+      if (task) listener({ type: "task_update", task });
       for (const event of this.options.bridge.pendingEventsFor(sessionId)) {
-        this.options.hub.publish(sessionId, event);
+        listener(event);
       }
+    }).catch((error: unknown) => {
+      if (subscribed) listener({ type: "error", message: error instanceof Error ? error.message : String(error) });
     });
-    return unsubscribe;
+    return () => { subscribed = false; unsubscribe(); };
   }
 
   /** 跑一个回合；该会话忙时抛错（HTTP 层映射 409）。事件全程经 hub 推给订阅者。 */
   async sendMessage(sessionId: string, text: string): Promise<void> {
     const entry = this.entry(sessionId);
-    if (entry.controller !== undefined) throw new Error("当前会话已有任务在运行");
+    if (entry.controller !== undefined || entry.configuring) throw new Error("当前会话已有任务或配置更新在运行");
     const controller = new AbortController();
     entry.controller = controller;
     try {
@@ -295,10 +325,15 @@ export class SessionManager {
 
   // ---------- 内部 ----------
 
+  private taskStoreFor(entry: SessionEntry): TaskStore {
+    return entry.agent?.taskStore ?? new TaskStore(path.join(entry.store.dir, "tasks", `${path.basename(entry.store.filePath, ".jsonl")}.sqlite`));
+  }
+
   private entry(sessionId: string): SessionEntry {
     let entry = this.entries.get(sessionId);
     if (!entry) {
-      entry = { store: new SessionStore({ dir: this.options.sessionDir, sessionId }), needsName: false };
+      entry = { store: new SessionStore({ dir: this.options.sessionDir, sessionId }), needsName: false,
+        configRevision: this.nextConfigRevision() };
       this.entries.set(sessionId, entry);
     }
     return entry;
@@ -306,11 +341,13 @@ export class SessionManager {
 
   private async helloFor(sessionId: string): Promise<ServerEvent> {
     const status = await this.status();
-    const agent = this.entries.get(sessionId)?.agent;
-    const model = agent?.model ?? status.model;
+    const entry = this.entry(sessionId);
+    const agent = await this.ensureAgent(entry, sessionId);
+    const model = agent.model;
     return {
       type: "hello",
       model,
+      configRevision: entry.configRevision,
       summaryModel: status.summaryModel,
       sandbox: status.sandbox,
       sandboxRoot: this.options.runtime.sandboxRoot,
@@ -341,6 +378,18 @@ export class SessionManager {
 
   private async ensureAgent(entry: SessionEntry, sessionId: string): Promise<Agent> {
     if (entry.agent !== undefined) return entry.agent;
+    // 首次订阅与设置请求可能并发抵达，必须共享同一个初始化结果。
+    if (entry.initializing) return entry.initializing;
+    const pending = this.createAgent(entry, sessionId);
+    entry.initializing = pending;
+    try {
+      return await pending;
+    } finally {
+      entry.initializing = undefined;
+    }
+  }
+
+  private async createAgent(entry: SessionEntry, sessionId: string): Promise<Agent> {
     const { config, registry: sharedRegistry, skills, sandbox, sandboxRoot } = this.options.runtime;
     const startup = await entry.store.load();
     entry.needsName = startup.messages.length === 0;
@@ -375,6 +424,7 @@ export class SessionManager {
         : {}),
       tools: registry,
       planStore,
+      verificationRoot: sandboxRoot,
       stream: config.stream,
     });
     this.attachEventRelay(agent, sessionId);
@@ -387,6 +437,7 @@ export class SessionManager {
   /** Agent 事件总线 → 协议事件转发（run_end 由 runTurn 从结果发布，带 finalAnswer） */
   private attachEventRelay(agent: Agent, sessionId: string): void {
     const hub = this.options.hub;
+    agent.events.on("task_update", ({ task }) => hub.publish(sessionId, { type: "task_update", task }));
     agent.events.on("token", ({ delta }) => {
       hub.publish(sessionId, { type: "token", delta });
     });
@@ -458,6 +509,10 @@ export class SessionManager {
       stopReason: result.stopReason,
       finishReason: result.finishReason,
       refusal: result.refusal,
+      ...(result.taskId ? { taskId: result.taskId } : {}),
+      ...(result.runId ? { runId: result.runId } : {}),
+      ...(result.verification ? { verification: result.verification } : {}),
+      ...(result.task ? { task: result.task } : {}),
       ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
       ...(result.finalAnswer !== null ? { finalAnswer: result.finalAnswer } : {}),
       totalTokens: result.totalTokens,
@@ -469,7 +524,8 @@ export class SessionManager {
     });
 
     // 会话命名：与 REPL 的 createSessionNamer 同语义——只对第一个成功的回合尝试一次
-    if (entry.needsName && result.success && result.finalAnswer !== null && !signal.aborted) {
+    if (entry.needsName && result.success && result.finalAnswer !== null && !signal.aborted &&
+        text !== "/task" && !text.startsWith("/task status") && !text.startsWith("/task resolve")) {
       entry.needsName = false;
       const name = await agent.summarizeSessionName(text, result.finalAnswer, { signal });
       if (name !== undefined) {

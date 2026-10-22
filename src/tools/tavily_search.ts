@@ -16,6 +16,7 @@ export function createSearchWebTool(): ToolDefinition {
       "Search for time-sensitive information on the web if your pretained knowledge isn't sufficient.",
     schema: SearchParamsSchema,
     parallelSafe: true,
+    needsReconciliation: false,
     execute: async (validated, runtime) => {
       const data = await tavilySearch({
         query: validated.query,

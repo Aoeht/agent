@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { applyEvent, historyToItems, type SessionUIState } from "../src/state/store";
 import { runOutcome } from "../../src/core/run_outcome";
 import type { ServerEvent } from "../../src/server/protocol";
+import { TaskStore } from "../../src/core/task_store";
 
 const citation = { index: 1, title: "已采集页面", url: "https://example.test/", tool: "inspect_link" };
 function state(): SessionUIState {
@@ -61,4 +62,34 @@ test("历史恢复空过滤结果时保留原因和引用，兼容旧记录", ()
   expect(items.some((it) => it.kind === "assistant" && it.text === "旧版回答")).toBe(true);
   expect(items.some((it) => it.kind === "assistant" && it.citations?.length === 1)).toBe(true);
   expect(items.some((it) => it.kind === "notice" && it.text.includes("内容被过滤"))).toBe(true);
+});
+
+test("验收通过和失败分别显示实测结果，普通回答不冒充验收", () => {
+  const verified = applyEvent(state(), { ...end("verified_answer", "报告已保存"), type: "run_end", success: true,
+    totalTokens: 10, toolCallsCount: 1, iterations: 2,
+    verification: { status: "passed", checks: [{ description: "报告存在", path: "report.txt", passed: true, detail: "实测通过" }] } });
+  expect(verified.stats?.taskStatus).toBe("verified");
+  expect(verified.items.some(it => it.kind === "notice" && it.text.includes("全部通过") && it.tone === "info")).toBe(true);
+  const failed = applyEvent(state(), { ...end("verification_failed", "报告已保存"), type: "run_end", success: false,
+    totalTokens: 10, toolCallsCount: 1, iterations: 2,
+    verification: { status: "failed", checks: [{ description: "报告存在", path: "report.txt", passed: false, detail: "文件不存在" }] } });
+  expect(failed.items.some(it => it.kind === "notice" && it.text.includes("文件不存在"))).toBe(true);
+  expect(applyEvent(state(), end("answer", "普通回答")).stats?.taskStatus).toBe("answered");
+});
+
+test("重连任务快照恢复计划与运行状态，旧快照不覆盖新状态", () => {
+  const store = new TaskStore(); store.begin("生成报告");
+  const task = store.setPlan([{ content: "保存报告", status: "in_progress" }]);
+  const s = applyEvent(state(), { type: "task_update", task });
+  expect(s.status).toBe("running"); expect(s.plan).toEqual(task.plan);
+  const old = { ...task, updatedAt: "2000-01-01", plan: [] };
+  expect(applyEvent(s, { type: "task_update", task: old }).plan).toEqual(task.plan);
+  const ended = store.finish(runOutcome("plan_incomplete"), "部分完成", { status: "not_configured", checks: [] });
+  expect(applyEvent(s, { type: "task_update", task: ended }).status).toBe("idle");
+});
+
+test("历史中的独立验收通过显示为正常通知", () => {
+  const items = historyToItems({ summary: { sessionId: "s", messageCount: 1, lastUpdated: "", firstUserText: "报告" },
+    messages: [{ role: "assistant", content: "结果", outcome: runOutcome("verified_answer") }] });
+  expect(items.some(it => it.kind === "notice" && it.tone === "info" && it.text.includes("验收通过"))).toBe(true);
 });

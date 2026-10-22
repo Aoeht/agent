@@ -321,6 +321,24 @@ export class SessionStore {
   }
 
   /**
+   * 原子重写整个会话文件：先写临时文件、fsync，再 rename。
+   * rename 之前不落到磁盘的话，系统崩溃（断电/内核挂）后可能留下一个已改名但内容为空的文件；
+   * 进程崩溃没这个问题，内核会把缓冲写完——但 compact 是全量重写，不能只防前者。
+   */
+  private async rewrite(records: Message[]): Promise<void> {
+    await fs.mkdir(path.dirname(this.filePath), { recursive: true });
+    const tempPath = `${this.filePath}.${process.pid}.tmp`;
+    const handle = await fs.open(tempPath, "w");
+    try {
+      await handle.writeFile(records.map((message) => `${JSON.stringify(message)}\n`).join(""), "utf-8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await fs.rename(tempPath, this.filePath);
+  }
+
+  /**
    * 原子截断到前 count 条记录（/rewind 的会话恢复）：与 compact 同样的临时文件替换写法，
    * 写到一半不损原会话。count 超过现有条数时不动文件。
    */
@@ -328,10 +346,7 @@ export class SessionStore {
     const records = await SessionStore.readRecords(this.filePath);
     const kept = records.slice(0, Math.max(0, Math.floor(count)));
     if (kept.length === records.length) return;
-    await fs.mkdir(path.dirname(this.filePath), { recursive: true });
-    const tempPath = `${this.filePath}.${process.pid}.tmp`;
-    await fs.writeFile(tempPath, kept.map((message) => `${JSON.stringify(message)}\n`).join(""), "utf-8");
-    await fs.rename(tempPath, this.filePath);
+    await this.rewrite(kept);
   }
 
   /**
@@ -369,10 +384,7 @@ export class SessionStore {
     if (longTermSummary !== undefined) {
       kept.push({ role: "user", content: `${LONG_TERM_SUMMARY_PREFIX}${longTermSummary}` });
     }
-    await fs.mkdir(path.dirname(this.filePath), { recursive: true });
-    const tempPath = `${this.filePath}.${process.pid}.tmp`;
-    await fs.writeFile(tempPath, kept.map((message) => `${JSON.stringify(message)}\n`).join(""), "utf-8");
-    await fs.rename(tempPath, this.filePath);
+    await this.rewrite(kept);
   }
 
   /** 只抽取 user → 无 tool_calls assistant 的完整对话轮，忽略所有工具调用组。 */

@@ -360,7 +360,8 @@ export class MockTransport implements Transport {
   private sessions: SessionDetailDTO[];
   private seq = 0;
   /** 会话级配置（内存态）；applySessionConfig 更新并广播 session_config */
-  private sessionConfig = new Map<string, { model: string; temperature: number; maxIterations: number }>();
+  private sessionConfig = new Map<string, { model: string; temperature: number; maxIterations: number; configRevision: number }>();
+  private configRevision = Date.now();
   private disabledTools = new Map<string, Set<string>>();
   private sandboxRoot = "A:/ai_agent/.mcp-sandbox（演示）";
 
@@ -401,28 +402,32 @@ export class MockTransport implements Transport {
   async applySessionConfig(
     sessionId: string,
     config: { model?: string; temperature?: number; maxIterations?: number }
-  ): Promise<void> {
+  ): Promise<Extract<ServerEvent, { type: "session_config" }>> {
     const current = this.sessionConfig.get(sessionId) ?? {
       model: helloEvent.model,
       temperature: 0.1,
       maxIterations: 8,
     };
     const next = {
+      configRevision: ++this.configRevision,
       model: config.model?.trim() || current.model,
       temperature: config.temperature ?? current.temperature,
       maxIterations: config.maxIterations ?? current.maxIterations,
     };
     this.sessionConfig.set(sessionId, next);
+    const applied = {
+      type: "session_config" as const,
+      configRevision: next.configRevision,
+      model: next.model,
+      contextWindow: mockContextWindow(next.model),
+      temperature: next.temperature,
+      maxIterations: next.maxIterations,
+    };
     // 稍微延迟，走一遍真实的事件路径
     setTimeout(() => {
-      this.emit(sessionId, {
-        type: "session_config",
-        model: next.model,
-        contextWindow: mockContextWindow(next.model),
-        temperature: next.temperature,
-        maxIterations: next.maxIterations,
-      });
+      this.emit(sessionId, applied);
     }, 200);
+    return applied;
   }
 
   async getSettings(): Promise<{ sandboxRoot: string }> {
@@ -462,7 +467,12 @@ export class MockTransport implements Transport {
       this.listeners.set(sessionId, set);
     }
     set.add(onEvent);
-    queueMicrotask(() => onEvent(helloEvent));
+    queueMicrotask(() => {
+      if (!set.has(onEvent)) return;
+      const config = this.sessionConfig.get(sessionId);
+      onEvent({ ...helloEvent, ...config,
+        contextWindow: mockContextWindow(config?.model ?? helloEvent.model) });
+    });
     return () => {
       set.delete(onEvent);
     };

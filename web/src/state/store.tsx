@@ -19,6 +19,7 @@ import type {
 import type { SessionConfigInput, Transport } from "../lib/transport";
 import { MockTransport } from "../lib/mock";
 import { STOP_REASON_LABELS, type RunOutcome } from "../../../src/core/run_outcome";
+import type { TaskRecord } from "../../../src/core/task_types";
 
 // ---------- 会话内的可渲染项 ----------
 
@@ -46,12 +47,14 @@ export type ChatItem =
 export type RunStatus = "idle" | "running" | "awaiting_approval" | "awaiting_input";
 
 export interface SessionUIState {
+  task?: TaskRecord;
   summary?: SessionSummaryDTO;
   items: ChatItem[];
   plan: PlanStep[];
   status: RunStatus;
   /** 会话当前生效的模型（hello / session_config 更新） */
   model?: string;
+  configRevision?: number;
   temperature?: number;
   maxIterations?: number;
   /** 该模型上下文窗口（token）；配合 lastPromptTokens 画上下文占用 */
@@ -117,7 +120,7 @@ function emptySession(): SessionUIState {
 }
 
 export function historyToItems(detail: SessionDetailDTO): ChatItem[] {
-  return detail.messages.flatMap((message): ChatItem[] => {
+  const items = detail.messages.flatMap((message): ChatItem[] => {
     // 历史回放的引用：落盘时随终答消息写入，这里重建可点击的来源卡片
     const citations = message.citations && message.citations.length > 0 ? message.citations : undefined;
     if (message.role === "user") return [{ kind: "user", id: uid(), text: message.content }];
@@ -129,28 +132,46 @@ export function historyToItems(detail: SessionDetailDTO): ChatItem[] {
           ...(citations ? { citations } : {}),
         }] : [];
     if (message.outcome && message.outcome.stopReason !== "answer") {
-      items.push(notice(`⚠️ ${STOP_REASON_LABELS[message.outcome.stopReason]}`, "warn"));
+      items.push(notice(`${message.outcome.taskStatus === "verified" ? "✓" : "⚠️"} ${STOP_REASON_LABELS[message.outcome.stopReason]}`,
+        message.outcome.taskStatus === "verified" ? "info" : "warn"));
     }
     return items;
   });
+  if (detail.task) items.push(...recoveryNotices(detail.task));
+  return items;
+}
+
+function recoveryNotices(task: TaskRecord): ChatItem[] {
+  return task.actions.filter(action => action.state === "unknown").map(action =>
+    notice(`待核对操作 ${action.tool}（${action.id}）：${action.arguments}。检查实际结果后输入 /task resolve ${action.id} applied 核对说明；若确认未执行，用 not_applied。待核对较多时可用 /task resolve all applied 核对说明 一次记录。`, "warn"));
 }
 
 /** 单个 ServerEvent → 会话状态的纯函数迁移（UI 渲染的全部逻辑都在这） */
 export function applyEvent(s: SessionUIState, e: ServerEvent): SessionUIState {
   switch (e.type) {
+    case "task_update":
+      if (s.task && s.task.updatedAt > e.task.updatedAt) return s;
+      return { ...s, task: e.task, plan: e.task.plan,
+        status: e.task.state === "running" ? "running" : e.task.state === "waiting_input" ? "awaiting_input"
+          : e.task.state === "waiting_approval" ? "awaiting_approval" : "idle" };
     case "hello":
       return {
         ...s,
         meta: e,
-        model: e.model,
-        contextWindow: e.contextWindow ?? s.contextWindow,
-        temperature: e.temperature ?? s.temperature,
-        maxIterations: e.maxIterations ?? s.maxIterations,
+        ...((e.configRevision ?? 0) < (s.configRevision ?? 0) ? {} : {
+          model: e.model,
+          configRevision: e.configRevision,
+          contextWindow: e.contextWindow ?? s.contextWindow,
+          temperature: e.temperature ?? s.temperature,
+          maxIterations: e.maxIterations ?? s.maxIterations,
+        }),
       };
     case "session_config":
+      if ((e.configRevision ?? 0) < (s.configRevision ?? 0)) return s;
       return {
         ...s,
         model: e.model,
+        configRevision: e.configRevision,
         contextWindow: e.contextWindow ?? s.contextWindow,
         temperature: e.temperature ?? s.temperature,
         maxIterations: e.maxIterations ?? s.maxIterations,
@@ -270,8 +291,16 @@ export function applyEvent(s: SessionUIState, e: ServerEvent): SessionUIState {
         );
       }
       if (e.errorMessage) items.push(notice(`详情：${e.errorMessage}`, "error"));
+      if (e.task) items.push(...recoveryNotices(e.task));
+      if (e.verification?.status === "passed") items.push(notice("✓ 已独立检查所列验收条件，全部通过。"));
+      if (e.verification?.status === "failed") {
+        for (const check of e.verification.checks.filter(check => !check.passed)) {
+          items.push(notice(`验收失败：${check.description}（${check.path}）：${check.detail}`, "warn"));
+        }
+      }
       return {
         ...s,
+        ...(e.task ? { task: e.task, plan: e.task.plan } : {}),
         items,
         status: "idle",
         pendingApproval: undefined,
@@ -284,6 +313,9 @@ export function applyEvent(s: SessionUIState, e: ServerEvent): SessionUIState {
           stopReason: e.stopReason,
           finishReason: e.finishReason,
           refusal: e.refusal,
+          taskId: e.taskId,
+          runId: e.runId,
+          verification: e.verification,
           totalTokens: e.totalTokens,
           toolCallsCount: e.toolCallsCount,
           iterations: e.iterations,
@@ -343,7 +375,8 @@ function reducer(state: AppState, action: Action): AppState {
       const merged: SessionUIState =
         existing.items.length > 0
           ? { ...existing, summary: action.detail.summary }
-          : { ...existing, summary: action.detail.summary, items: historyToItems(action.detail) };
+          : { ...existing, summary: action.detail.summary, items: historyToItems(action.detail),
+            ...(action.detail.task ? { task: action.detail.task, plan: action.detail.task.plan } : {}) };
       return { ...state, byId: { ...state.byId, [action.detail.summary.sessionId]: merged } };
     }
     case "select":
@@ -532,7 +565,9 @@ export function StoreProvider({
       async applySessionConfig(config: SessionConfigInput) {
         const id = stateRef.current.currentId;
         if (!id) return;
-        await resolvedTransport.applySessionConfig(id, config);
+        const applied = await resolvedTransport.applySessionConfig(id, config);
+        // HTTP 应答也是权威配置；无需等待 SSE 建连或再次选择。
+        dispatch({ type: "event", id, event: applied });
       },
       async setSandboxRoot(dir: string) {
         await resolvedTransport.setSandboxRoot(dir);

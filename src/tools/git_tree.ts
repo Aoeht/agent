@@ -159,6 +159,7 @@ export function createGitTreeTool(options: { repoRoot?: string } = {}): ToolDefi
     name: "git_tree",
     schema: GitTreeParamsSchema,
     parallelSafe: true,
+    needsReconciliation: false,
     description:
       "查看当前项目的 git 仓库结构或提交历史（只读，无需确认）。" +
       "mode=tree（默认）：渲染目录树，包含 git 已跟踪与未被 .gitignore 忽略的未跟踪文件；path 限定子目录，depth 限制展开深度。" +

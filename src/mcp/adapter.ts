@@ -224,6 +224,11 @@ export class McpAdapter {
     return annotations?.readOnlyHint === true && annotations?.destructiveHint !== true;
   }
 
+  /** 只读或声明幂等的 MCP 工具，中断后没有需要人工核对的外部影响 */
+  private static needsReconciliation(annotations?: ToolAnnotationsLite): boolean {
+    return !McpAdapter.isParallelSafe(annotations) && annotations?.idempotentHint !== true;
+  }
+
   /**
    * 路径守卫：把参数里的路径解析成绝对路径后校验是否落在白名单内。
    * 相对路径按第一个白名单根目录解析（与 filesystem server 的行为一致），
@@ -386,6 +391,7 @@ export class McpAdapter {
       description: `[MCP ${serverId}] ${readable}`.slice(0, MAX_DESCRIPTION_LENGTH),
       parameters: tool.inputSchema as Record<string, unknown>,
       parallelSafe: McpAdapter.isParallelSafe(annotations),
+      needsReconciliation: McpAdapter.needsReconciliation(annotations),
 
       execute: async (args: unknown, runtime?: ToolRuntime) => {
         const rawArgs = (args ?? {}) as Record<string, unknown>;

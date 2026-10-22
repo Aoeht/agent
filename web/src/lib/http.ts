@@ -2,6 +2,7 @@
 import type {
   ApprovalDecisionBody,
   ServerEvent,
+  SessionConfigEvent,
   SessionDetailDTO,
   SessionSummaryDTO,
 } from "@protocol";
@@ -45,12 +46,12 @@ export class HttpTransport implements Transport {
     return (await this.request("/models")).json();
   }
 
-  async applySessionConfig(sessionId: string, config: SessionConfigInput): Promise<void> {
-    await this.request(`/sessions/${encodeURIComponent(sessionId)}/config`, {
+  async applySessionConfig(sessionId: string, config: SessionConfigInput): Promise<SessionConfigEvent> {
+    return (await this.request(`/sessions/${encodeURIComponent(sessionId)}/config`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(config),
-    });
+    })).json();
   }
 
   async getSettings(): Promise<{ sandboxRoot: string }> {

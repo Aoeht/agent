@@ -2,8 +2,7 @@
 /**
  * 任务计划的状态仓：update_plan 工具是唯一的写入端，Agent 是唯一的消费端。
  *
- * 生命周期与单次 run 绑定：runLoop 开始时 reset，计划块只注入消息、不落会话历史
- * （与工具消息同待遇）——新任务就是新计划，跨 run 续聊不该幽灵般带回上一任务的清单。
+ * Agent 从持久化 TaskStore 恢复计划；同一任务跨 run 保留，显式新任务才清空。
  */
 export type PlanStepStatus = "pending" | "in_progress" | "completed";
 

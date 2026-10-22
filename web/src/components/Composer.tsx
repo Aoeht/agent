@@ -9,6 +9,7 @@ export interface ComposerConfig {
 }
 
 export function Composer({
+  sessionId,
   running,
   disabled,
   models,
@@ -17,13 +18,14 @@ export function Composer({
   onCancel,
   onApplyConfig,
 }: {
+  sessionId: string | null;
   running: boolean;
   disabled: boolean;
   models: string[];
   config: ComposerConfig;
   onSend: (text: string) => void;
   onCancel: () => void;
-  onApplyConfig: (config: SessionConfigInput) => void;
+  onApplyConfig: (config: SessionConfigInput) => Promise<void>;
 }) {
   const [text, setText] = useState("");
   const [panelOpen, setPanelOpen] = useState(false);
@@ -34,15 +36,27 @@ export function Composer({
   });
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+  const draftDirty = useRef(new Set<keyof ComposerConfig>());
+  const activeSession = useRef(sessionId);
+  activeSession.current = sessionId;
+  const [applying, setApplying] = useState(false);
+  const [configError, setConfigError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setPanelOpen(false);
+    setConfigError(null);
+    setApplying(false);
+    draftDirty.current.clear();
+  }, [sessionId]);
 
   // 打开面板时用当前生效值填充草稿
   useEffect(() => {
     if (panelOpen) {
-      setDraft({
-        model: config.model ?? models[0] ?? "",
-        temperature: String(config.temperature ?? 0.1),
-        maxIterations: String(config.maxIterations ?? 8),
-      });
+      setDraft(current => ({
+        model: draftDirty.current.has("model") ? current.model : config.model ?? models[0] ?? "",
+        temperature: draftDirty.current.has("temperature") ? current.temperature : String(config.temperature ?? 0.1),
+        maxIterations: draftDirty.current.has("maxIterations") ? current.maxIterations : String(config.maxIterations ?? 8),
+      }));
     }
   }, [panelOpen, config.model, config.temperature, config.maxIterations, models]);
 
@@ -72,19 +86,31 @@ export function Composer({
     }
   };
 
-  const applyConfig = () => {
+  const applyConfig = async () => {
+    if (applying) return;
+    const requestedSession = sessionId;
     const payload: SessionConfigInput = {};
-    if (draft.model && draft.model !== config.model) payload.model = draft.model;
+    if (draftDirty.current.has("model") && draft.model && draft.model !== config.model) payload.model = draft.model;
     const temperature = Number.parseFloat(draft.temperature);
-    if (Number.isFinite(temperature) && temperature !== (config.temperature ?? 0.1)) {
+    if (draftDirty.current.has("temperature") && Number.isFinite(temperature) && temperature !== (config.temperature ?? 0.1)) {
       payload.temperature = temperature;
     }
     const maxIterations = Number.parseInt(draft.maxIterations, 10);
-    if (Number.isInteger(maxIterations) && maxIterations !== (config.maxIterations ?? 8)) {
+    if (draftDirty.current.has("maxIterations") && Number.isInteger(maxIterations) && maxIterations !== (config.maxIterations ?? 8)) {
       payload.maxIterations = maxIterations;
     }
-    if (Object.keys(payload).length > 0) onApplyConfig(payload);
-    setPanelOpen(false);
+    setApplying(true);
+    setConfigError(null);
+    try {
+      if (Object.keys(payload).length > 0) await onApplyConfig(payload);
+      if (activeSession.current === requestedSession) setPanelOpen(false);
+    } catch (error) {
+      if (activeSession.current === requestedSession) {
+        setConfigError(error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      if (activeSession.current === requestedSession) setApplying(false);
+    }
   };
 
   return (
@@ -101,7 +127,8 @@ export function Composer({
               <span className="text-xs text-ink-600">模型</span>
               <select
                 value={draft.model}
-                onChange={(e) => setDraft((d) => ({ ...d, model: e.target.value }))}
+                disabled={applying}
+                onChange={(e) => { draftDirty.current.add("model"); setDraft((d) => ({ ...d, model: e.target.value })); }}
                 className="mt-1 w-full rounded-xl border border-cream-300 bg-white/70 px-3 py-2 font-mono text-xs outline-none focus:border-clay-500"
               >
                 {models.map((model) => (
@@ -120,7 +147,8 @@ export function Composer({
                   min="0"
                   max="2"
                   value={draft.temperature}
-                  onChange={(e) => setDraft((d) => ({ ...d, temperature: e.target.value }))}
+                  disabled={applying}
+                  onChange={(e) => { draftDirty.current.add("temperature"); setDraft((d) => ({ ...d, temperature: e.target.value })); }}
                   className="mt-1 w-full rounded-xl border border-cream-300 bg-white/70 px-3 py-2 text-sm outline-none focus:border-clay-500"
                 />
               </label>
@@ -131,7 +159,8 @@ export function Composer({
                   min="1"
                   max="50"
                   value={draft.maxIterations}
-                  onChange={(e) => setDraft((d) => ({ ...d, maxIterations: e.target.value }))}
+                  disabled={applying}
+                  onChange={(e) => { draftDirty.current.add("maxIterations"); setDraft((d) => ({ ...d, maxIterations: e.target.value })); }}
                   className="mt-1 w-full rounded-xl border border-cream-300 bg-white/70 px-3 py-2 text-sm outline-none focus:border-clay-500"
                 />
               </label>
@@ -139,13 +168,14 @@ export function Composer({
             <p className="mt-2 text-[11px] leading-4 text-ink-400">
               模型切换会随会话保存；温度与迭代上限仅当前运行有效。
             </p>
+            {configError && <p role="alert" className="mt-2 text-xs text-terra-500">{configError}</p>}
             <div className="mt-3 flex justify-end">
               <button
-                onClick={applyConfig}
-                disabled={running}
+                onClick={() => void applyConfig()}
+                disabled={running || applying}
                 className="rounded-full bg-clay-600 px-4 py-1.5 text-xs font-medium text-cream-50 transition hover:bg-clay-500 disabled:opacity-40"
               >
-                应用
+                {applying ? "应用中…" : "应用"}
               </button>
             </div>
           </div>
@@ -153,8 +183,11 @@ export function Composer({
 
         <div className="flex items-end gap-2 rounded-2xl border border-cream-300 bg-cream-50 p-2 shadow-sm transition focus-within:border-clay-500/50">
           <button
-            onClick={() => setPanelOpen((open) => !open)}
-            disabled={disabled}
+            onClick={() => {
+              if (!panelOpen) { draftDirty.current.clear(); setConfigError(null); }
+              setPanelOpen((open) => !open);
+            }}
+            disabled={disabled || !config.model || applying}
             title="模型与参数"
             className="shrink-0 rounded-full bg-cream-200 px-3 py-2 text-xs font-medium text-ink-600 transition hover:bg-cream-300 disabled:opacity-40"
           >

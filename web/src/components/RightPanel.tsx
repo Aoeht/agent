@@ -4,6 +4,7 @@ import { useStore, type SessionUIState } from "../state/store";
 import { PlanPanel } from "./PlanPanel";
 import { SandboxModal } from "./Modals";
 import { STOP_REASON_LABELS } from "../../../src/core/run_outcome";
+import { TASK_STATE_LABELS } from "../../../src/core/task_types";
 
 /** 工具开关面板：折叠框，勾选 = 启用；下一轮迭代立即生效 */
 function ToolToggles({ session }: { session: SessionUIState | null }) {
@@ -227,6 +228,30 @@ export function RightPanel() {
   return (
     <aside className="hidden w-80 shrink-0 flex-col gap-4 overflow-y-auto border-l border-cream-300 bg-cream-200/40 p-4 xl:flex">
       <Card title="任务计划">
+        {current?.task && (
+          <div className="mb-3 space-y-2 text-xs leading-5 text-ink-600">
+            <p className="font-medium">{TASK_STATE_LABELS[current.task.state]}</p>
+            <p>{current.task.goal}</p>
+            <p className="text-ink-400">已保存 · {current.task.runs.length} 次运行 · {current.task.actions.length} 次工具操作</p>
+            {current.task.criteria.map((criterion, index) => (
+              <p key={index}>验收：{criterion.description}（{criterion.path}）</p>
+            ))}
+            {current.task.verification.checks.map((check, index) => (
+              <p key={index} className={check.passed ? "text-sage-500" : "text-terra-500"}>
+                {check.passed ? "✓" : "!"} {check.description}：{check.detail}
+              </p>
+            ))}
+            {current.task.actions.filter(action => action.state === "unknown").map(action => (
+              <div key={action.id} className="break-all rounded border border-cream-300 p-2">
+                <p>待核对：{action.tool}</p>
+                <p>{action.arguments}</p>
+                <p>核对后在聊天中输入：/task resolve {action.id} applied 核对说明</p>
+                <p>若确认未执行，将 applied 换成 not_applied。待核对较多时可用 /task resolve all applied 核对说明 一次记录。</p>
+              </div>
+            ))}
+            <p className="text-ink-400">继续发送消息会接续未完成任务。切换目标：/task new 新任务目标</p>
+          </div>
+        )}
         <PlanPanel plan={current?.plan ?? []} />
       </Card>
       <Card

@@ -3,6 +3,7 @@ import OpenAI from "openai";
 import type { BudgetStopReason } from "./run_budget";
 import type { Citation } from "./citations";
 import type { RunOutcome } from "./run_outcome";
+import type { AcceptanceCriterion, TaskRecord } from "./task_types";
 
 // 直接使用官方定义的类型
 // type Message = OpenAI.Chat.Completions.ChatCompletionMessageParam;
@@ -12,6 +13,9 @@ type ContentPart = OpenAI.Chat.Completions.ChatCompletionContentPart;
 
 // 工具运行时上下文：目前只有取消信号，MCP 调用会一路透传下去
 export interface ToolRuntime {
+  /** Host-bound task controller; tools cannot set their own verification result. */
+  setAcceptanceCriteria?: (criteria: AcceptanceCriterion[]) => Promise<void>;
+  readTaskState?: (offset: number, limit: number) => unknown;
   signal?: AbortSignal;
   /** 本地可信工具提供的图片附件；不经 JSON 文本或 trace 传递。 */
   emitImage?: (image: { dataUrl: string; label: string }) => void;
@@ -46,6 +50,12 @@ export interface ToolDefinition {
    * （如 rag_search，缓存写入走跨进程文件锁 + 进程内写链，见 knowledge_store.withLock）。
    */
   parallelSafe?: boolean;
+  /**
+   * 该调用结果不可确认时，是否需要人工核对它对真实世界的影响（缺省按需要，最保守）。
+   * 和 parallelSafe 是两回事：后者问"能不能并发"，这里问"要不要人工核对"。
+   * 只读工具、以及只写自有幂等存储（检索索引、任务账本、计划）的工具设为 false。
+   */
+  needsReconciliation?: boolean;
   execute: (args: unknown, runtime?: ToolRuntime) => Promise<unknown>;
 }
 
@@ -69,6 +79,7 @@ export function defineTool<T extends z.ZodType>(config: {
   description: string;
   schema: T;
   parallelSafe?: boolean;
+  needsReconciliation?: boolean;
   execute: (args: z.output<T>, runtime?: ToolRuntime) => Promise<unknown>;
 }): ToolDefinition {
   return {
@@ -76,6 +87,7 @@ export function defineTool<T extends z.ZodType>(config: {
     description: config.description,
     parameters: z.toJSONSchema(config.schema, { io: "input" }) as Record<string, unknown>,
     ...(config.parallelSafe !== undefined ? { parallelSafe: config.parallelSafe } : {}),
+    ...(config.needsReconciliation !== undefined ? { needsReconciliation: config.needsReconciliation } : {}),
     // async 包装：校验失败必须以 rejected promise 形式抛出（契约是 Promise<unknown>），
     // 否则直连 execute 的调用方会在拿到 Promise 之前遭遇同步异常
     execute: async (args: unknown, runtime?: ToolRuntime): Promise<unknown> => {
@@ -128,6 +140,7 @@ export interface StepInfo {
 
 // ✅ Agent 运行结果
 export interface AgentResult extends RunOutcome {
+  task?: TaskRecord;
   success: boolean;
   messages: Message[];
   finalAnswer: string | null;

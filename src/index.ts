@@ -140,7 +140,7 @@ type SessionNamer = (
 function createSessionNamer(store: SessionStore, hasHistory: boolean): SessionNamer {
   let pending = !hasHistory;
   return async (agent, userInput, result, signal) => {
-    if (!pending) return;
+    if (!pending || userInput === "/task" || userInput.startsWith("/task status") || userInput.startsWith("/task resolve")) return;
     const answer = result.finalAnswer?.trim();
     if (!answer) return; // 本回合没拿到最终回答（取消/预算越线）：留给下一个成功的回合
     pending = false; // 只尝试一次，避免每轮都追问模型要标题
@@ -185,6 +185,17 @@ async function runTurn(
   );
   console.log(`\n${result.success ? "📝" : "⚠️"} ${STOP_REASON_LABELS[result.stopReason]}${result.budgetStopped ? `（${result.budgetStopped}）` : ""}`);
   if (result.errorMessage) console.log(`详情：${result.errorMessage}`);
+  if (result.task) console.log(`任务 ${result.task.id} · 已保存 ${result.task.runs.length} 次运行`);
+  for (const check of result.verification?.checks ?? []) {
+    console.log(`  ${check.passed ? "✓" : "✗"} ${check.description}（${check.path}）：${check.detail}`);
+  }
+  const pendingActions = result.task?.actions.filter(action => action.state === "unknown") ?? [];
+  for (const action of pendingActions) {
+    console.log(`待核对操作 ${action.id}: ${action.tool}(${action.arguments})`);
+  }
+  if (pendingActions.length > 0) {
+    console.log("核对后输入 /task resolve 操作ID applied 核对说明（未执行则用 not_applied）；逐条确认麻烦时用 /task resolve all applied 同一句说明一次收口。");
+  }
   if (nameSession) await nameSession(agent, input, result, signal);
   return result;
 }
@@ -451,6 +462,7 @@ async function main() {
       temperature: config.temperature,
       maxHistoryTurns: config.maxHistoryTurns,
       sessionStore: session.store,
+      verificationRoot: stack.sandboxRoot,
       summaryModel: config.summaryModel,
       // 外部资源走「不可信数据」通道；用户在 REPL 里 /prompt 选中的模板走 promptTemplate 通道
       ...(untrustedContext ? { untrustedContext } : {}),

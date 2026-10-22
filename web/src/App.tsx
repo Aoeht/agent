@@ -49,6 +49,7 @@ export default function App() {
         <ChatPanel items={current?.items ?? []} status={current?.status ?? "idle"} />
 
         <Composer
+          sessionId={state.currentId}
           running={busy === true}
           disabled={!current}
           models={state.models}
@@ -59,7 +60,7 @@ export default function App() {
           }}
           onSend={(text) => void actions.send(text)}
           onCancel={() => void actions.cancel()}
-          onApplyConfig={(config) => void actions.applySessionConfig(config)}
+          onApplyConfig={actions.applySessionConfig}
         />
       </main>
 

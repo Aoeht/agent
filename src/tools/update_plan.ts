@@ -36,6 +36,8 @@ export function createUpdatePlanTool(store: PlanStore): ToolDefinition {
     schema: UpdatePlanParamsSchema,
     // 写共享状态且结果决定"下一步做什么"，不允许与同批工具并发
     parallelSafe: false,
+    // 只改任务账本里的计划，不动用户工作区，中断后无需人工核对
+    needsReconciliation: false,
     description:
       "创建或更新当前任务的结构化执行计划（步骤清单 + 状态）。" +
       "多步任务（预计 3 次以上工具调用或分多个阶段）开始时先调用它列出计划，再按计划逐步执行；" +

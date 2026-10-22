@@ -2,6 +2,7 @@
 import type {
   ApprovalDecisionBody,
   ServerEvent,
+  SessionConfigEvent,
   SessionDetailDTO,
   SessionSummaryDTO,
 } from "@protocol";
@@ -32,7 +33,7 @@ export interface Transport {
   /** 可选模型清单（服务商实时清单 + env 前置合并） */
   listModels(): Promise<string[]>;
   /** 应用会话级配置；成功后服务器广播 session_config 事件 */
-  applySessionConfig(sessionId: string, config: SessionConfigInput): Promise<void>;
+  applySessionConfig(sessionId: string, config: SessionConfigInput): Promise<SessionConfigEvent>;
   getSettings(): Promise<{ sandboxRoot: string }>;
   /** 切换沙箱根目录（服务器整栈重建；有在飞回合时抛错） */
   setSandboxRoot(dir: string): Promise<void>;

@@ -108,6 +108,11 @@ async function route(
       return json(await sessions.history(decodeURIComponent(historyMatch[1]!)));
     }
 
+    const tasksMatch = /^\/sessions\/([^/]+)\/tasks$/.exec(pathname);
+    if (tasksMatch && method === "GET") {
+      return json(sessions.tasks(decodeURIComponent(tasksMatch[1]!)));
+    }
+
     const eventsMatch = /^\/sessions\/([^/]+)\/events$/.exec(pathname);
     if (eventsMatch && method === "GET") {
       return sseResponse(req, decodeURIComponent(eventsMatch[1]!), sessions);
@@ -168,12 +173,11 @@ async function route(
       if (typeof body.maxIterations === "number") patch.maxIterations = body.maxIterations;
       if (Object.keys(patch).length === 0) return json({ error: "没有可应用的配置" }, 400);
       try {
-        await sessions.applySessionConfig(decodeURIComponent(configMatch[1]!), patch);
+        return json(await sessions.applySessionConfig(decodeURIComponent(configMatch[1]!), patch));
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         return json({ error: message }, message.includes("已有任务") ? 409 : 400);
       }
-      return new Response(null, { status: 204 });
     }
 
     // 工具开关：读取清单 + 本会话关闭集合

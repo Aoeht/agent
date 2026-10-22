@@ -4,6 +4,7 @@ import type { BudgetStopReason } from "./run_budget";
 import type { PlanStep } from "./plan_store";
 import type { StepInfo } from "./types";
 import type { RunOutcome } from "./run_outcome";
+import type { TaskRecord } from "./task_types";
 
 export interface RunStartEvent {
   userMessage: string;
@@ -16,6 +17,7 @@ export interface RunStartEvent {
 }
 
 export interface RunEndEvent extends RunOutcome {
+  task?: TaskRecord;
   success: boolean;
   totalTokens: number;
   toolCallsCount: number;
@@ -65,6 +67,7 @@ export interface CompactEvent {
 }
 
 export interface AgentEventMap {
+  task_update: { task: TaskRecord };
   run_start: RunStartEvent;
   step: StepEvent;
   token: TokenEvent;

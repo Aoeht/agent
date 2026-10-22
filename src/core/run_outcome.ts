@@ -1,14 +1,19 @@
+import type { Verification } from "./task_types";
 /** 运行正常结束不等于任务经过验收。answered 只表示已给出完整回答。 */
 export const STOP_REASONS = [
   "answer", "plan_incomplete", "empty_response", "model_refusal", "content_filter",
   "output_truncated", "incomplete_stream", "budget_exceeded", "iteration_limit",
   "cancelled", "error",
+  "verified_answer", "verification_failed", "recovery_required",
 ] as const;
 export type StopReason = typeof STOP_REASONS[number];
 
 export interface RunOutcome {
   runStatus: "completed" | "stopped" | "failed";
-  taskStatus: "answered" | "incomplete" | "blocked";
+  taskStatus: "answered" | "verified" | "incomplete" | "blocked";
+  taskId?: string | undefined;
+  runId?: string | undefined;
+  verification?: Verification | undefined;
   stopReason: StopReason;
   finishReason: string | null;
   refusal: string | null;
@@ -16,6 +21,9 @@ export interface RunOutcome {
 }
 
 export const STOP_REASON_LABELS: Record<StopReason, string> = {
+  verified_answer: "验收通过（已独立检查所列条件）",
+  verification_failed: "验收未通过",
+  recovery_required: "中断操作待核对，尚未继续执行",
   answer: "已回答（未独立验收）",
   plan_incomplete: "计划仍有未完成步骤",
   empty_response: "模型返回空内容",
@@ -34,10 +42,10 @@ export function runOutcome(
   response?: { finishReason: string | null; refusal: string | null },
 ): RunOutcome & { success: boolean } {
   return {
-    success: stopReason === "answer",
+    success: stopReason === "answer" || stopReason === "verified_answer",
     runStatus: stopReason === "error" ? "failed"
-      : stopReason === "answer" || stopReason === "plan_incomplete" ? "completed" : "stopped",
-    taskStatus: stopReason === "answer" ? "answered"
+      : ["answer", "verified_answer", "verification_failed", "plan_incomplete"].includes(stopReason) ? "completed" : "stopped",
+    taskStatus: stopReason === "verified_answer" ? "verified" : stopReason === "answer" ? "answered"
       : stopReason === "model_refusal" || stopReason === "content_filter" ? "blocked" : "incomplete",
     stopReason,
     finishReason: response?.finishReason ?? null,

@@ -9,13 +9,16 @@ import { ContextManager } from "./context_manager";
 import { SessionStore, normalizeSessionName } from "./session_store";
 import { RunBudget, RunBudgetLimits, BudgetStopReason } from "./run_budget";
 import { wrapUntrustedData, wrapSummaryBlock } from "./untrusted";
-import type { PlanStore } from "./plan_store";
+import { PlanStore } from "./plan_store";
 import { systemPromptFingerprint } from "./trace";
 import { contextWindowFor } from "../utils/model_registry";
 import { CommercialTokenCounter } from "../utils/token_counter";
 import { processToolOutput } from "./tool_outputs";
 import { LONGTERM_FRESH_PROMPT, LONGTERM_MERGE_PROMPT } from "./summary_prompts";
 import { runOutcome, responseStopReason, isContentPolicyError, type RunOutcome, type StopReason } from "./run_outcome";
+import { TaskStore } from "./task_store";
+import { AcceptanceCriteriaSchema, TASK_STATE_LABELS, type AcceptanceCriterion, type TaskRecord, type Verification } from "./task_types";
+import { validateAcceptancePaths, verifyTask } from "./task_verifier";
 
 /** 宿主选定的提示模板：保留 Server 给的 role，system 角色的约束不能被降级到 user 层 */
 export interface PromptTemplateInjection {
@@ -58,6 +61,11 @@ function stripPersistedCitations(message: Message): Message {
 }
 
 interface AgentConfig {
+  taskStore?: TaskStore;
+  /** Absolute workspace permitted for independent read-only acceptance checks. */
+  verificationRoot?: string;
+  /** Host-defined criteria take precedence over model declarations. */
+  acceptanceCriteria?: AcceptanceCriterion[];
   model: string;
   systemPrompt: string;
   maxIterations?: number;
@@ -118,7 +126,7 @@ interface AgentConfig {
   /**
    * 任务计划状态仓：传入后开启"先规划再执行"——注册方应同时把
    * createUpdatePlanTool(store) 挂进工具注册表（入口显式组装，Agent 不代注册）。
-   * Agent 负责：run 开始清场、模型更新计划后把最新计划块钉进上下文（压缩不折叠）、
+   * Agent 负责：从持久化任务恢复计划、模型更新计划后把最新计划块钉进上下文（压缩不折叠）、
    * 广播 plan_update 事件。不传则工具与提示词里的计划纪律都不生效。
    */
   planStore?: PlanStore;
@@ -199,6 +207,9 @@ export class Agent {
           | "toolResultOffloadTokens"
           | "planStore"
           | "onTurnStart"
+          | "taskStore"
+          | "verificationRoot"
+          | "acceptanceCriteria"
         >
       >;
   private contextManager: ContextManager;
@@ -228,11 +239,16 @@ export class Agent {
    * 此时 runLoop 会按会话记录恢复；显式切换优先于会话记录，也优先于配置默认值。
    */
   private modelOverride: string | undefined;
+  readonly taskStore: TaskStore;
+  private activeTask: TaskRecord | undefined;
+  private running = false;
 
   /** 本轮 system prompt 的指纹：改提示词改坏了可以靠它在 trace 里定位是哪一版 */
   readonly systemPromptHash: string;
 
   constructor(config: AgentConfig) {
+    this.taskStore = config.taskStore ?? new TaskStore(config.sessionStore
+      ? path.join(config.sessionStore.dir, "tasks", `${path.basename(config.sessionStore.filePath, ".jsonl")}.sqlite`) : undefined);
     // 优先使用外部注入的 client；自建时 maxRetries: 0 —— 关掉 SDK 内置重试，统一由 complete() 重试
     this.client = config.client ?? new OpenAI({ maxRetries: 0 });
     this.tools = config.tools ?? new ToolRegistry();
@@ -241,6 +257,7 @@ export class Agent {
     const { promptTemplate, ...rest } = config;
     this.promptTemplate = promptTemplate;
     this.config = {
+      planStore: new PlanStore(),
       maxIterations: 10,
       maxHistoryTurns: 20,
       temperature: 0.1,
@@ -351,18 +368,82 @@ export class Agent {
 
   /** 所有终止路径都发布 run_end；调用方通过结果状态区分回答、拒绝和失败。 */
   async run(userMessage: string, runtime?: ToolRuntime): Promise<AgentResult> {
+    if (this.running) throw new Error("当前 Agent 已有任务在运行");
+    this.running = true;
+    try { return await this.runManaged(userMessage, runtime); }
+    finally {
+      if (this.activeTask) this.taskStore.release(this.activeTask.runs.at(-1)!.id);
+      this.running = false; this.activeTask = undefined;
+    }
+  }
+
+  private async runManaged(userMessage: string, runtime?: ToolRuntime): Promise<AgentResult> {
     this.runCitations = [];
     this.events.emit("run_start", { userMessage, promptHash: this.systemPromptHash });
     // 上一轮的后台记忆更新先落地再开新轮：钉住前缀要读到最新长期摘要；
     // 其 token 成本在本轮总账里补记（后台化只是挪了支付时间，不是免单）
     let result: AgentResult;
     try {
+      if (userMessage === "/task" || userMessage === "/task status") {
+        const task = this.taskStore.current();
+        if (task) this.events.emit("task_update", { task });
+        const reply: AgentResult = { ...runOutcome("answer"), finalAnswer: task
+          ? `任务：${task.goal}\n状态：${TASK_STATE_LABELS[task.state]}\nID：${task.id}\n验收条件：${task.criteria.length} 项\n使用 /task new 新目标 开始独立任务。`
+          : "还没有任务。直接输入目标即可开始。", messages: [], steps: [], totalTokens: 0, toolCallsCount: 0, citations: [], ...(task ? { task } : {}) };
+        this.events.emit("run_end", { ...runOutcome("answer"), totalTokens: 0, toolCallsCount: 0, iterations: 0, ...(task ? { task } : {}) });
+        return reply;
+      }
+      if (userMessage.startsWith("/task resolve ")) {
+        const match = /^\/task resolve (\S+) (applied|not_applied) (.+)$/s.exec(userMessage);
+        if (!match) throw new Error("格式：/task resolve 操作ID|all applied|not_applied 核对说明");
+        const task = this.taskStore.resolveAction(match[1]!, match[2] as "applied" | "not_applied", match[3]!);
+        this.events.emit("task_update", { task });
+        const reply: AgentResult = { ...runOutcome("answer"), finalAnswer: "已记录人工核对结果。发送继续可恢复任务。",
+          messages: [], steps: [], totalTokens: 0, toolCallsCount: 0, citations: [], task };
+        this.events.emit("run_end", { ...runOutcome("answer"), totalTokens: 0, toolCallsCount: 0, iterations: 0, task });
+        return reply;
+      }
+      const fresh = userMessage.startsWith("/task new ");
+      if (fresh) userMessage = userMessage.slice("/task new ".length).trim();
+      if (!userMessage || userMessage === "/task new") throw new Error("请在 /task new 后填写新任务目标");
+      this.activeTask = this.taskStore.begin(userMessage, {
+        fresh, ...(this.config.verificationRoot ? { workspace: this.config.verificationRoot } : {}),
+        ...(this.config.acceptanceCriteria ? { criteria: AcceptanceCriteriaSchema.parse(this.config.acceptanceCriteria) } : {}),
+      });
+      this.config.planStore?.replace(this.activeTask.plan);
+      this.events.emit("task_update", { task: this.activeTask });
       if (this.pendingSummary) {
         const pending = this.pendingSummary;
         this.pendingSummary = null;
         this.deferredSummaryTokens += await pending;
       }
-      result = await this.runLoop(userMessage, { ...runtime, browserFailures: new Set<string>() });
+      const wrapHuman = (kind: "input" | "approval", callback: NonNullable<ToolRuntime["askUser"]>) =>
+        async (prompt: string, signal: AbortSignal) => {
+          this.activeTask = this.taskStore.setWaiting({ kind, prompt });
+          this.events.emit("task_update", { task: this.activeTask });
+          try { return await callback(prompt, signal); }
+          finally {
+            this.activeTask = this.taskStore.setWaiting();
+            this.events.emit("task_update", { task: this.activeTask });
+          }
+        };
+      result = await this.runLoop(userMessage, { ...runtime, browserFailures: new Set<string>(),
+        readTaskState: (offset, limit) => {
+          const task = this.taskStore.current()!;
+          return { id: task.id, goal: task.goal, plan: task.plan, criteria: task.criteria, verification: task.verification,
+            runs: task.runs.slice(offset, offset + limit), actions: task.actions.slice(offset, offset + limit),
+            totalRuns: task.runs.length, totalActions: task.actions.length,
+            nextOffset: offset + limit < Math.max(task.runs.length, task.actions.length) ? offset + limit : null };
+        },
+        ...(runtime?.askUser ? { askUser: wrapHuman("input", runtime.askUser) } : {}),
+        ...(runtime?.requestHuman ? { requestHuman: wrapHuman("approval", runtime.requestHuman) } : {}),
+        setAcceptanceCriteria: async (criteria) => {
+          if (!this.config.verificationRoot) throw new Error("宿主未配置验收工作区");
+          validateAcceptancePaths(this.config.verificationRoot, criteria);
+          this.activeTask = this.taskStore.setCriteria(criteria);
+          this.events.emit("task_update", { task: this.activeTask });
+        },
+      });
     } catch (error) {
       result = {
         ...runOutcome(runtime?.signal?.aborted ? "cancelled" : isContentPolicyError(error) ? "content_filter" : "error"),
@@ -370,6 +451,49 @@ export class Agent {
         messages: [], finalAnswer: null, toolCallsCount: 0, totalTokens: 0, steps: [],
         citations: this.runCitations,
       };
+    }
+    if (this.activeTask) {
+      let verification: Verification = { status: this.activeTask.criteria.length ? "pending" : "not_configured", checks: [] };
+      try {
+        this.activeTask = this.taskStore.setPlan(this.config.planStore?.getSteps() ?? []);
+        if (runtime?.signal?.aborted && result.stopReason === "answer") Object.assign(result, runOutcome("cancelled", result));
+        if (result.stopReason === "answer" && this.activeTask.criteria.length && this.config.verificationRoot) {
+          verification = await verifyTask(this.config.verificationRoot, this.activeTask.criteria, runtime?.signal);
+          Object.assign(result, runOutcome(runtime?.signal?.aborted ? "cancelled"
+            : verification.status === "passed" ? "verified_answer" : "verification_failed", result));
+        }
+        result.taskId = this.activeTask.id;
+        result.runId = this.activeTask.runs.at(-1)!.id;
+        result.verification = verification;
+      } catch (error) {
+        Object.assign(result, runOutcome("error"), { errorMessage: `任务状态保存失败：${error instanceof Error ? error.message : String(error)}` });
+        // Keep the durable owner/action records if persistence failed; never report success.
+      }
+      const { runStatus, taskStatus, stopReason, finishReason, refusal, taskId, runId, verification: checked } = result;
+      const outcome: RunOutcome = { runStatus, taskStatus, stopReason, finishReason, refusal,
+        ...(taskId ? { taskId } : {}), ...(runId ? { runId } : {}), ...(checked ? { verification: checked } : {}),
+        ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}) };
+      const lastMessage = result.messages.at(-1) as PersistedAssistantMessage | undefined;
+      if (lastMessage?.role === "assistant" && !lastMessage.tool_calls) lastMessage.outcome = outcome;
+      try {
+        await this.persist({ role: "assistant", content: result.finalAnswer ?? "", outcome,
+          ...(result.citations.length ? { citations: result.citations } : {}) } as PersistedAssistantMessage);
+        await this.compactHistory();
+      } catch (error) {
+        Object.assign(result, runOutcome("error"), { errorMessage: `会话保存失败：${error instanceof Error ? error.message : String(error)}` });
+      }
+      try {
+        result.task = this.taskStore.finish(result, result.finalAnswer, verification);
+        this.events.emit("task_update", { task: result.task });
+      } catch (error) {
+        Object.assign(result, runOutcome("error"), { errorMessage: `任务状态保存失败：${error instanceof Error ? error.message : String(error)}` });
+      }
+    } else {
+      const task = this.taskStore.current();
+      if (task?.actions.some(a => a.state === "unknown")) {
+        Object.assign(result, runOutcome("recovery_required"), { task });
+        this.events.emit("task_update", { task });
+      }
     }
     result.totalTokens += this.deferredSummaryTokens;
     this.deferredSummaryTokens = 0;
@@ -383,6 +507,10 @@ export class Agent {
       stopReason: result.stopReason,
       finishReason: result.finishReason,
       refusal: result.refusal,
+      ...(result.taskId ? { taskId: result.taskId } : {}),
+      ...(result.runId ? { runId: result.runId } : {}),
+      ...(result.verification ? { verification: result.verification } : {}),
+      ...(result.task ? { task: result.task } : {}),
       ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
       totalTokens: result.totalTokens,
       toolCallsCount: result.toolCallsCount,
@@ -433,21 +561,35 @@ export class Agent {
           { role: "assistant", content: "收到，我已了解以上长期记忆摘要。" },
         ]
       : [];
-    this.contextManager.setPinnedPrefix(longTermBlock);
+    // Fresh plain chat has no task state worth injecting. Include actual work or
+    // resumed durable instructions, without repeating the very first user message.
+    const needsTaskContext = this.activeTask && (this.activeTask.criteria.length || this.activeTask.plan.length ||
+      this.activeTask.actions.length || ((this.config.sessionStore || this.config.taskStore) && this.activeTask.runs.length > 1));
+    const taskBlock: Message[] = this.activeTask && needsTaskContext ? [
+      { role: "user", content: wrapUntrustedData("持久化任务记录（已返回的操作不要盲目重放；按现状核对后继续）", JSON.stringify({
+        id: this.activeTask.id, goal: this.activeTask.goal, criteria: this.activeTask.criteria,
+        plan: this.activeTask.plan, verification: this.activeTask.verification,
+        recentInstructions: this.activeTask.runs.slice(-10).map(run => run.input),
+        historyAccess: "更早的指令和操作可用 read_task_state 分页读取",
+        actions: this.activeTask.actions.slice(-20),
+      })) },
+      { role: "assistant", content: "我会按当前用户目标核对已有进度；工具返回不等于验收通过。" },
+    ] : [];
+    this.contextManager.setPinnedPrefix([...longTermBlock, ...taskBlock]);
     this.sessionLongTermSummary = stored?.longTermSummary;
     this.lastRunObservations = [];
-    // 新任务新计划：上一回合的计划块没进会话历史，内存态也要一起清，
-    // 否则续聊第一个 run 会看到上一任务的清单
-    this.config.planStore?.reset();
+    // The plan is restored from the task record by runManaged, including across restarts.
 
     const userMsg: Message = { role: "user", content: userMessage };
+    const injected = this.injectedMessages();
 
     const messages: Message[] = [
       { role: "system", content: this.config.systemPrompt },
-      // 长期摘要块在最前（钉住），其后是注入块（外部数据 + 选定的提示模板），都在 history 之前：
-      // 注入块每轮现拼、不落库，放 history 之后会被滚动摘要折叠进"历史"里，下轮就变了味。
+      ...injected.filter(message => message.role === "system"),
+      // Templates retain system priority ahead of task data and conversation.
       ...longTermBlock,
-      ...this.injectedMessages(),
+      ...taskBlock,
+      ...injected.filter(message => message.role !== "system"),
       ...history,
       userMsg,
     ];
@@ -462,6 +604,7 @@ export class Agent {
     const imageMessages = new Set<Message>();
     let budgetStopped: BudgetStopReason | undefined;
     let lastCompletion: CompletionResult | undefined;
+    let attemptedVerificationRepair = false;
     const finish = async (reason: StopReason, completion?: CompletionResult): Promise<AgentResult> => {
       const outcome = runOutcome(reason, completion);
       const finalAnswer = completion?.content?.trim()
@@ -471,8 +614,7 @@ export class Agent {
         ...(this.runCitations.length ? { citations: this.runCitations } : {}),
       };
       messages.push(finalMessage);
-      await this.persist(finalMessage);
-      await this.compactHistory();
+      // Persist once in runManaged, after independent verification has completed.
       return {
         ...outcome, messages, finalAnswer, toolCallsCount,
         totalTokens: totalTokens + summaryTokens, steps, budgetStopped, citations: this.runCitations,
@@ -546,6 +688,18 @@ export class Agent {
             : responseStop ?? (!llmContent?.trim() ? "empty_response"
               : this.config.planStore?.getSteps().some((step) => step.status !== "completed")
                 ? "plan_incomplete" : "answer");
+          // One bounded repair attempt; final acceptance rereads after all tools stop.
+          if (reason === "answer" && !attemptedVerificationRepair && this.activeTask?.criteria.length &&
+              this.config.verificationRoot && iterations < this.config.maxIterations && !budget.check()) {
+            const checked = await verifyTask(this.config.verificationRoot, this.activeTask.criteria, runtime?.signal);
+            if (checked.status === "failed" && !runtime?.signal?.aborted) {
+              attemptedVerificationRepair = true;
+              messages.push({ role: "assistant", content: llmContent });
+              messages.push({ role: "user", content: "独立验收尚未通过。请修复实际产物，不能降低验收条件；无法修复时说明未完成原因。\n" +
+                wrapUntrustedData("程序实测结果", JSON.stringify(checked)) });
+              continue;
+            }
+          }
           return await finish(reason, completion);
         }
 
@@ -564,9 +718,12 @@ export class Agent {
         // parallelToolCalls=false 时按序串行——请求已带 parallel_tool_calls=false，这里兜底忽略它的服务端。
         // 落盘仍按序逐条 append，保证历史里 tool 消息顺序与 tool_calls 一一对应
         const attachments: Message[] = [];
-        const runToolCall = (toolCall: ToolCall) => {
+        const runToolCall = async (toolCall: ToolCall) => {
+          runtime?.signal?.throwIfAborted();
+          const actionId = this.taskStore.startAction(toolCall.function.name, toolCall.function.arguments,
+            this.tools.get(toolCall.function.name)?.needsReconciliation !== false);
           toolCallsCount++;
-          return this.executeToolCall(toolCall, {
+          const returned = await this.executeToolCall(toolCall, {
             ...runtime,
             emitImage: ({ dataUrl, label }) => {
               attachments.push({ role: "user", content: [
@@ -575,6 +732,10 @@ export class Agent {
               ] });
             },
           });
+          this.taskStore.endAction(actionId, returned.toolResult, runtime?.signal?.aborted === true);
+          this.activeTask = this.taskStore.setPlan(this.config.planStore?.getSteps() ?? []);
+          this.events.emit("task_update", { task: this.activeTask });
+          return returned;
         };
 
         // 先按计划顺序做预算裁决：超限的调用不执行，但补一条错误 tool 观测，保证 tool_calls 与响应成对
@@ -601,8 +762,12 @@ export class Agent {
             executed.set(toolCall.id, toolResult);
           }
         } else {
-          const results = await Promise.all(allowedToolCalls.map(runToolCall));
-          for (const { toolCall, toolResult } of results) executed.set(toolCall.id, toolResult);
+          const results = await Promise.allSettled(allowedToolCalls.map(runToolCall));
+          for (const returned of results) {
+            if (returned.status === "fulfilled") executed.set(returned.value.toolCall.id, returned.value.toolResult);
+          }
+          const failed = results.find(returned => returned.status === "rejected");
+          if (failed?.status === "rejected") throw failed.reason;
         }
 
         const toolResults = planned.map((p) => ({
@@ -657,7 +822,7 @@ export class Agent {
             { role: "assistant", content: "收到，我已了解当前任务计划，将按计划推进并保持各步状态更新。" },
           ];
           messages.push(...planBlock);
-          this.contextManager.setPinnedPrefix([...longTermBlock, ...planBlock]);
+          this.contextManager.setPinnedPrefix([...longTermBlock, ...taskBlock, ...planBlock]);
           this.events.emit("plan_update", { steps: planStore.getSteps() });
         }
 
@@ -765,11 +930,7 @@ export class Agent {
       const outcome = { ...runOutcome(reason, lastCompletion),
         errorMessage: error instanceof Error ? error.message : String(error) };
       const finalAnswer = lastCompletion?.content ?? lastCompletion?.refusal ?? null;
-      // 写盘本身失败时不能再次抛错、丢掉已经收集的运行结果。
-      try {
-        await this.persist({ role: "assistant", content: finalAnswer ?? "", outcome,
-          citations: this.runCitations } as PersistedAssistantMessage);
-      } catch { /* 返回态和 run_end 仍保留失败详情。 */ }
+      // The outer task runner persists the final outcome once.
       return {
         ...outcome, messages, finalAnswer,
         toolCallsCount, totalTokens: totalTokens + summaryTokens, steps, budgetStopped,
@@ -1170,7 +1331,7 @@ export class Agent {
     return injected;
   }
 
-  /** 逐条落盘；写失败只告警不中断对话（丢历史比打断 run 代价小） */
+  /** Compaction is optional; appending the actual turn must succeed. */
   private async compactHistory(): Promise<void> {
     const store = this.config.sessionStore;
     if (!store) return;
@@ -1184,10 +1345,6 @@ export class Agent {
   private async persist(message: Message): Promise<void> {
     const store = this.config.sessionStore;
     if (!store) return;
-    try {
-      await store.append(message);
-    } catch (error) {
-      console.warn("[Session] 历史写入失败，本次运行继续:", error instanceof Error ? error.message : error);
-    }
+    await store.append(message);
   }
 }

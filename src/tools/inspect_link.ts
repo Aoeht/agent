@@ -47,6 +47,8 @@ export function createInspectLinkTool(options: InspectLinkOptions & {
       mode: z.enum(["auto", "http", "browser"]).default(process.env.INSPECT_BROWSER_ENABLED === "1" ? "auto" : "http"),
     }),
     parallelSafe: false,
+    // 只采证据、不改工作区；浏览器模式里的人工操作由用户自己负责，工具本身无可核对的外部写入
+    needsReconciliation: false,
     execute: async (params, runtime) => {
       // 归一化提到最前面：后面 http 采证、浏览器采证、失败去重键都用同一个规范 URL，
       // 也让"非法输入"在两条路径上给出同一句人话（过去 browser 路径在这里抛裸 TypeError）
@@ -1096,6 +1098,7 @@ export function createHttpInspectLinkTool(options: InspectLinkOptions = {}): Too
         .describe("最多跟随的跳转次数"),
     }),
     parallelSafe: true,
+    needsReconciliation: false,
     execute: async (params, runtime) => {
       let start: URL;
       try {

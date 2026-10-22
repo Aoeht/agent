@@ -31,6 +31,8 @@ export function createAskUserTool(): ToolDefinition {
     schema: AskUserParamsSchema,
     // 阻塞等待用户输入，不允许与同批工具并发
     parallelSafe: false,
+    // 只是问一句话，中断后外部世界没有任何变化
+    needsReconciliation: false,
     description:
       "向用户提出一个问题并等待一段自由文本回答（主动澄清）。" +
       "仅在任务信息确实缺失、缺了它无法正确继续、且靠搜索/现有工具查不到时使用；" +
