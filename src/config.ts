@@ -50,6 +50,8 @@ export interface AgentRunConfig {
   sandbox: SandboxConfig;
   /** 回合级回滚检查点（/rewind）：开启后每轮对话开始前快照工作区与会话边界 */
   checkpointsEnabled: boolean;
+  /** 验收绿灯只认宿主设定的条件：模型自设条件实测全部通过也只记「已回答，未验收」 */
+  requireHostAcceptanceCriteria: boolean;
   budget: RunBudgetLimits;
 }
 
@@ -100,6 +102,7 @@ export function loadAgentConfig(): AgentRunConfig {
       network: process.env.AGENT_SANDBOX_NET?.trim().toLowerCase() === "bridge" ? "bridge" : "none",
     },
     checkpointsEnabled: boolEnv("AGENT_CHECKPOINTS", true),
+    requireHostAcceptanceCriteria: boolEnv("AGENT_REQUIRE_HOST_CRITERIA", false),
     budget: {
       ...(maxTotalTokens !== undefined ? { maxTotalTokens } : {}),
       ...(maxToolCalls !== undefined ? { maxToolCalls } : {}),

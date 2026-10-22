@@ -186,6 +186,9 @@ async function runTurn(
   console.log(`\n${result.success ? "📝" : "⚠️"} ${STOP_REASON_LABELS[result.stopReason]}${result.budgetStopped ? `（${result.budgetStopped}）` : ""}`);
   if (result.errorMessage) console.log(`详情：${result.errorMessage}`);
   if (result.task) console.log(`任务 ${result.task.id} · 已保存 ${result.task.runs.length} 次运行`);
+  if (result.task?.criteria.length) {
+    console.log(`  验收条件来源：${result.task.criteriaSource === "host" ? "宿主设定" : "模型自设（标准由模型提出）"}`);
+  }
   for (const check of result.verification?.checks ?? []) {
     console.log(`  ${check.passed ? "✓" : "✗"} ${check.description}（${check.path}）：${check.detail}`);
   }
@@ -450,6 +453,9 @@ async function main() {
     if (checkpoints) {
       console.log("⏪ 回滚检查点: 开启（每轮开始前自动快照工作区；/rewind 回滚）");
     }
+    if (config.requireHostAcceptanceCriteria) {
+      console.log("🔒 验收口径: 只采信宿主设定的条件；模型自设条件即使实测全部通过，也只记「已回答，未验收」");
+    }
 
     // 流式增量实时输出由 token 事件驱动；runTurn 依据 streamState 补换行、避免与最终回答重复打印
     const streamState = { active: false };
@@ -463,6 +469,7 @@ async function main() {
       maxHistoryTurns: config.maxHistoryTurns,
       sessionStore: session.store,
       verificationRoot: stack.sandboxRoot,
+      requireHostAcceptanceCriteria: config.requireHostAcceptanceCriteria,
       summaryModel: config.summaryModel,
       // 外部资源走「不可信数据」通道；用户在 REPL 里 /prompt 选中的模板走 promptTemplate 通道
       ...(untrustedContext ? { untrustedContext } : {}),

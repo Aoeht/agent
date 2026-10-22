@@ -233,6 +233,11 @@ export function RightPanel() {
             <p className="font-medium">{TASK_STATE_LABELS[current.task.state]}</p>
             <p>{current.task.goal}</p>
             <p className="text-ink-400">已保存 · {current.task.runs.length} 次运行 · {current.task.actions.length} 次工具操作</p>
+            {current.task.criteria.length > 0 && (
+              <p className={current.task.criteriaSource === "host" ? "text-ink-400" : "text-terra-500"}>
+                验收条件来源：{current.task.criteriaSource === "host" ? "宿主设定" : "模型自设（标准由模型提出）"}
+              </p>
+            )}
             {current.task.criteria.map((criterion, index) => (
               <p key={index}>验收：{criterion.description}（{criterion.path}）</p>
             ))}

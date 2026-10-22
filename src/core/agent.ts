@@ -66,6 +66,11 @@ interface AgentConfig {
   verificationRoot?: string;
   /** Host-defined criteria take precedence over model declarations. */
   acceptanceCriteria?: AcceptanceCriterion[];
+  /**
+   * 只采信宿主提供的验收条件：模型用 set_acceptance_criteria 自设的条件即使实测全部通过，
+   * 也只记「已回答，未验收」，实测结果照常保留。防的是模型挑一条宽松条件自己拿绿灯。
+   */
+  requireHostAcceptanceCriteria?: boolean;
   model: string;
   systemPrompt: string;
   maxIterations?: number;
@@ -210,6 +215,7 @@ export class Agent {
           | "taskStore"
           | "verificationRoot"
           | "acceptanceCriteria"
+          | "requireHostAcceptanceCriteria"
         >
       >;
   private contextManager: ContextManager;
@@ -454,13 +460,21 @@ export class Agent {
     }
     if (this.activeTask) {
       let verification: Verification = { status: this.activeTask.criteria.length ? "pending" : "not_configured", checks: [] };
+      let measured = false;
       try {
         this.activeTask = this.taskStore.setPlan(this.config.planStore?.getSteps() ?? []);
         if (runtime?.signal?.aborted && result.stopReason === "answer") Object.assign(result, runOutcome("cancelled", result));
-        if (result.stopReason === "answer" && this.activeTask.criteria.length && this.config.verificationRoot) {
-          verification = await verifyTask(this.config.verificationRoot, this.activeTask.criteria, runtime?.signal);
-          Object.assign(result, runOutcome(runtime?.signal?.aborted ? "cancelled"
-            : verification.status === "passed" ? "verified_answer" : "verification_failed", result));
+        // 任何收尾都实测一次：未完成、超预算、拒绝时，用户同样需要知道文件到底存不存在。
+        // 取消的那条路径不读盘——verifyTask 会把 AbortError 记成「实测不符合」，那是假证据。
+        if (this.activeTask.criteria.length && this.config.verificationRoot && !runtime?.signal?.aborted) {
+          verification = await verifyTask(this.config.verificationRoot, this.activeTask.criteria);
+          measured = true;
+        }
+        if (measured && result.stopReason === "answer") {
+          // 模型自设的宽松条件不能自己拿绿灯：宿主策略下照常保留实测，但不记验收通过
+          const credited = !this.config.requireHostAcceptanceCriteria || this.activeTask.criteriaSource === "host";
+          Object.assign(result, runOutcome(verification.status === "failed" ? "verification_failed"
+            : verification.status === "passed" && credited ? "verified_answer" : "answer", result));
         }
         result.taskId = this.activeTask.id;
         result.runId = this.activeTask.runs.at(-1)!.id;

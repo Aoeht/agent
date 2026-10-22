@@ -292,7 +292,11 @@ export function applyEvent(s: SessionUIState, e: ServerEvent): SessionUIState {
       }
       if (e.errorMessage) items.push(notice(`详情：${e.errorMessage}`, "error"));
       if (e.task) items.push(...recoveryNotices(e.task));
-      if (e.verification?.status === "passed") items.push(notice("✓ 已独立检查所列验收条件，全部通过。"));
+      if (e.verification?.status === "passed") {
+        items.push(notice(e.task && e.task.criteriaSource !== "host"
+          ? "✓ 已实测模型自设的验收条件，全部通过（标准由模型提出，请自行判断它是否覆盖你的要求）。"
+          : "✓ 已独立检查所列验收条件，全部通过。"));
+      }
       if (e.verification?.status === "failed") {
         for (const check of e.verification.checks.filter(check => !check.passed)) {
           items.push(notice(`验收失败：${check.description}（${check.path}）：${check.detail}`, "warn"));

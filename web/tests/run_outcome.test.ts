@@ -77,6 +77,18 @@ test("验收通过和失败分别显示实测结果，普通回答不冒充验�
   expect(applyEvent(state(), end("answer", "普通回答")).stats?.taskStatus).toBe("answered");
 });
 
+test("模型自设条件实测通过时，通知点明标准由模型提出", () => {
+  const store = new TaskStore(); store.begin("生成报告", { workspace: "A:/one" });
+  const task = store.setCriteria([{ kind: "file_exists", path: "report.txt", description: "报告存在", minBytes: 1 }]);
+  const passed = { status: "passed" as const, checks: [{ description: "报告存在", path: "report.txt", passed: true, detail: "实测通过" }] };
+  const selfGraded = applyEvent(state(), { ...end("answer", "报告已保存"), type: "run_end", success: true,
+    totalTokens: 10, toolCallsCount: 1, iterations: 2, verification: passed, task });
+  expect(selfGraded.items.some(it => it.kind === "notice" && it.text.includes("模型自设"))).toBe(true);
+  const hostGraded = applyEvent(state(), { ...end("verified_answer", "报告已保存"), type: "run_end", success: true,
+    totalTokens: 10, toolCallsCount: 1, iterations: 2, verification: passed, task: { ...task, criteriaSource: "host" as const } });
+  expect(hostGraded.items.some(it => it.kind === "notice" && it.text.includes("全部通过") && !it.text.includes("模型自设"))).toBe(true);
+});
+
 test("重连任务快照恢复计划与运行状态，旧快照不覆盖新状态", () => {
   const store = new TaskStore(); store.begin("生成报告");
   const task = store.setPlan([{ content: "保存报告", status: "in_progress" }]);

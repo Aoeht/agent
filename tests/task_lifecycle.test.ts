@@ -268,7 +268,32 @@ describe("durable tasks and recovery", () => {
     const { agent } = setup([call("write")], { tools, verificationRoot: root, acceptanceCriteria: [criterion] });
     const result = await agent.run("工作", { signal: controller.signal });
     expect(result.stopReason).toBe("cancelled"); expect(result.task?.state).toBe("interrupted");
-    expect(result.verification?.status).not.toBe("passed");
+    expect(result.verification?.status).toBe("pending");
+  });
+  test("measured evidence survives endings that are not answers", async () => {
+    const root = await fixture(); await fs.writeFile(path.join(root, "report.txt"), "verified content");
+    const planStore = new PlanStore(); const tools = new ToolRegistry(); tools.register(createUpdatePlanTool(planStore));
+    const { agent } = setup([call("update_plan", { steps: [{ content: "报告", status: "pending" }] }), reply()],
+      { tools, planStore, verificationRoot: root, acceptanceCriteria: [criterion] });
+    const result = await agent.run("生成报告");
+    expect(result.stopReason).toBe("plan_incomplete");
+    expect(result.verification?.status).toBe("passed");
+    expect(result.task?.state).toBe("incomplete");
+    expect(result.task?.verification.checks[0]?.sha256).toBe(createHash("sha256").update("verified content").digest("hex"));
+  });
+  test("host policy refuses to certify criteria the model wrote itself", async () => {
+    const root = await fixture(); await fs.writeFile(path.join(root, "report.txt"), "verified content");
+    const lenient: AcceptanceCriterion = { kind: "file_exists", path: "report.txt", description: "文件存在即可", minBytes: 1 };
+    const tools = new ToolRegistry(); tools.register(createSetAcceptanceCriteriaTool());
+    const selfGraded = setup([call("set_acceptance_criteria", { criteria: [lenient] }), reply()],
+      { tools, verificationRoot: root, requireHostAcceptanceCriteria: true });
+    const result = await selfGraded.agent.run("生成报告");
+    expect(result.verification?.status).toBe("passed");
+    expect(result.task?.criteriaSource).toBe("agent");
+    expect(result.taskStatus).toBe("answered");
+    expect(result.task?.state).toBe("answered");
+    const hostGraded = setup([reply()], { verificationRoot: root, requireHostAcceptanceCriteria: true, acceptanceCriteria: [lenient] });
+    expect((await hostGraded.agent.run("生成报告")).task?.state).toBe("completed");
   });
   test("cancelling a side-effect-free tool settles without asking for reconciliation", async () => {
     const root = await fixture(); const controller = new AbortController(); const tools = new ToolRegistry();
