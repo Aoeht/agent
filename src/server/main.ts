@@ -7,17 +7,25 @@
  *   由 vite.config.ts 的代理转发到本服务，两者都只监听 127.0.0.1；
  * - 模型选择清单：AGENT_UI_MODELS（逗号分隔）；缺省只给主模型 + 摘要模型；
  * - run_script 的宿主机后端是任意代码执行，**这个服务器 + 审批桥就是安全边界**：
- *   只绑回环地址，未决审批超时自动拒绝，不要把 AGENT_UI_HOST 改成 0.0.0.0 暴露到局域网。
+ *   缺省只绑回环，未决审批超时自动拒绝。
+ * - 要从外网访问（方案 A）：保持 AGENT_UI_HOST=127.0.0.1，用 Tailscale 或
+ *   Cloudflare Tunnel + Access 把回环端口带出去，再设 AGENT_UI_TOKEN（≥32 位随机串）
+ *   让本服务自己也验一道（隧道配错时不至于裸奔）；同时开
+ *   AGENT_UI_REMOTE_HARDENING=1 摘掉 run_script 并要求容器沙箱——
+ *   审批桥拦不住已经拿到口令的人（批准执行只是一个同源 POST），能力必须自己收。
+ * - 绑非回环又没设口令 = 直接拒绝启动，不给你误配的机会。
  */
 import path from "node:path";
 import OpenAI from "openai";
 import { UiBridge } from "./bridge";
+import { AuthGate, assertUsableToken, bindRefusal, sandboxRefusal } from "./auth";
 import { createServerRuntime, rebuildRuntimeWithSandboxRoot, type ServerRuntime } from "./runtime";
 import { EventHub, SessionManager } from "./sessions";
 import type { ServerEvent } from "./protocol";
 
 const PORT = intEnv("AGENT_UI_PORT", 8787);
 const HOST = process.env.AGENT_UI_HOST?.trim() || "127.0.0.1";
+const REMOTE_HARDENING = boolEnv("AGENT_UI_REMOTE_HARDENING", false);
 const APPROVAL_TIMEOUT_MS = intEnv("AGENT_UI_APPROVAL_TIMEOUT_MS", 120_000);
 const SESSION_DIR = process.env.AGENT_SESSION_DIR ?? path.join(process.cwd(), ".agent-sessions");
 const TRACE_DIR = process.env.AGENT_TRACE_DIR ?? path.join(process.cwd(), ".traces");
@@ -26,6 +34,17 @@ const DIST_DIR = path.resolve(import.meta.dir, "../../web/dist");
 function intEnv(name: string, fallback: number): number {
   const value = Number.parseInt(process.env[name] ?? "", 10);
   return Number.isFinite(value) ? value : fallback;
+}
+
+function boolEnv(name: string, fallback: boolean): boolean {
+  const raw = process.env[name]?.trim().toLowerCase();
+  if (raw === undefined || raw === "") return fallback;
+  return !["0", "false", "off", "no"].includes(raw);
+}
+
+function refuse(startup: string): never {
+  console.error(`❌ [UI] ${startup}`);
+  process.exit(1);
 }
 
 const MIME: Record<string, string> = {
@@ -41,10 +60,31 @@ const MIME: Record<string, string> = {
 };
 
 async function main(): Promise<void> {
+  let token: string | undefined;
+  try {
+    token = assertUsableToken(process.env.AGENT_UI_TOKEN);
+  } catch (error) {
+    refuse(error instanceof Error ? error.message : String(error));
+  }
+  const gate = new AuthGate(token);
+  const bindProblem = bindRefusal({ host: HOST, token, hardening: REMOTE_HARDENING });
+  if (bindProblem !== undefined) refuse(bindProblem);
+
   const hub = new EventHub();
   const bridge = new UiBridge(hub.publish, APPROVAL_TIMEOUT_MS);
   console.log(`⚙️  [UI] 审批超时: ${APPROVAL_TIMEOUT_MS}ms（超时自动拒绝）`);
-  const runtime = await createServerRuntime({ bridge });
+  const runtime = await createServerRuntime({ bridge, disableRunScript: REMOTE_HARDENING });
+  const sandboxProblem = sandboxRefusal({ hardening: REMOTE_HARDENING, backend: runtime.sandbox.backend });
+  if (sandboxProblem !== undefined) {
+    await runtime.mcp.closeAll();
+    refuse(sandboxProblem);
+  }
+  if (gate.enabled) {
+    console.log("🔐 [UI] 访问口令已启用：浏览器走 /login 输一次，脚本带 Authorization: Bearer <AGENT_UI_TOKEN>");
+  }
+  if (REMOTE_HARDENING) {
+    console.log("🔒 [UI] 远程收紧: run_script 未注册（含 MCP 侧人工确认那条路），脚本执行只允许容器沙箱");
+  }
   const sessions = new SessionManager({
     hub,
     bridge,
@@ -56,7 +96,7 @@ async function main(): Promise<void> {
   const server = Bun.serve({
     port: PORT,
     hostname: HOST,
-    fetch: (req) => route(req, sessions, bridge, hub, runtime),
+    fetch: (req) => route(req, sessions, bridge, hub, runtime, gate),
   });
   console.log(`🌐 [UI] 工作台已就绪: http://${HOST}:${server.port}/`);
   console.log(`📂 [UI] 会话目录: ${SESSION_DIR}`);
@@ -72,13 +112,19 @@ async function route(
   sessions: SessionManager,
   bridge: UiBridge,
   hub: EventHub,
-  runtime: ServerRuntime
+  runtime: ServerRuntime,
+  gate: AuthGate
 ): Promise<Response> {
   const url = new URL(req.url);
   const pathname = url.pathname;
   const method = req.method;
 
   try {
+    // ---- 访问门禁 ----
+    // /login 自己免检（不然进不去）；其余一律先验凭据，静态资源与 SSE 也不例外
+    if (pathname === "/login") return gate.handleLogin(req);
+    if (!gate.authorize(req)) return gate.challenge(req);
+
     // ---- 会话集合 ----
     if (pathname === "/sessions") {
       if (method === "GET") return json(await sessions.list());

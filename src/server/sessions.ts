@@ -390,7 +390,7 @@ export class SessionManager {
   }
 
   private async createAgent(entry: SessionEntry, sessionId: string): Promise<Agent> {
-    const { config, registry: sharedRegistry, skills, sandbox, sandboxRoot } = this.options.runtime;
+    const { config, registry: sharedRegistry, skills, sandbox, sandboxRoot, disableRunScript } = this.options.runtime;
     const startup = await entry.store.load();
     entry.needsName = startup.messages.length === 0;
 
@@ -401,7 +401,7 @@ export class SessionManager {
     registry.use(createToolEventBridge(this.options.hub, sessionId));
     registry.use(createMcpUseTracker(this.options.bridge, sessionId));
     const planStore = new PlanStore();
-    registerSessionTools(registry, { skills, planStore, sandbox, sandboxRoot });
+    registerSessionTools(registry, { skills, planStore, sandbox, sandboxRoot, disableRunScript });
     copyMcpTools(sharedRegistry, registry);
 
     // 工具开关：快照全量定义（关→开的恢复数据源），再应用本会话的关闭集合
@@ -425,6 +425,7 @@ export class SessionManager {
       tools: registry,
       planStore,
       verificationRoot: sandboxRoot,
+      requireHostAcceptanceCriteria: config.requireHostAcceptanceCriteria,
       stream: config.stream,
     });
     this.attachEventRelay(agent, sessionId);

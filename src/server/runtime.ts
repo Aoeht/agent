@@ -21,16 +21,24 @@ export interface ServerRuntime {
   sandbox: ScriptSandboxResolution;
   /** 当前沙箱根（绝对路径）。UI 切换后整栈重建并更新此字段 */
   sandboxRoot: string;
+  /**
+   * 远程收紧：全栈不注册 run_script（共享栈与每会话注册表同一份清单）。
+   * 由 main.ts 依 AGENT_UI_REMOTE_HARDENING 设定；切换沙箱根重建时原样带上，
+   * 否则重建会把任意代码执行又塞回工具清单。
+   */
+  disableRunScript: boolean;
   /** MCP 资源注入的不可信上下文（随栈重建刷新；空串表示无资源） */
   untrustedContext?: string | undefined;
 }
 
 export async function createServerRuntime(options: {
   bridge: UiBridge;
+  disableRunScript?: boolean;
 }): Promise<ServerRuntime> {
   const stack = await createAgentStack({
     confirmer: options.bridge.confirmer,
     logPrefix: "[UI] ",
+    disableRunScript: options.disableRunScript === true,
   });
 
   return {
@@ -40,6 +48,7 @@ export async function createServerRuntime(options: {
     skills: stack.skills,
     sandbox: stack.sandbox,
     sandboxRoot: stack.sandboxRoot,
+    disableRunScript: options.disableRunScript === true,
     ...(stack.untrustedContext !== "" ? { untrustedContext: stack.untrustedContext } : {}),
   };
 }
@@ -59,6 +68,7 @@ export async function rebuildRuntimeWithSandboxRoot(
     confirmer: bridge.confirmer,
     logPrefix: "[UI] ",
     sandboxRoot,
+    disableRunScript: runtime.disableRunScript,
   });
   const previousMcp = runtime.mcp;
   runtime.registry = next.registry;

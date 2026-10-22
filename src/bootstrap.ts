@@ -43,6 +43,11 @@ export interface AgentStackOptions {
    * 缺省 MCP_SANDBOX_DIR（env 可改）。UI 服务器的「切换沙箱目录」用不同的值重建整栈。
    */
   sandboxRoot?: string;
+  /**
+   * 远程收紧：不注册 run_script。公网入口下的 Web UI 要用它——审批桥拦不住拿到口令的人
+   * （批准执行只是一个同源 POST），所以得把任意代码执行这个能力本身摘掉。
+   */
+  disableRunScript?: boolean;
 }
 
 export interface AgentStack {
@@ -71,6 +76,8 @@ export function registerSessionTools(
     sandboxRoot?: string;
     /** run_script 执行后端（bootstrap 解析好的结果原样传入） */
     sandbox: ScriptSandboxResolution;
+    /** 远程收紧：跳过 run_script 注册（工具清单的唯一事实来源，会话与共享栈一致） */
+    disableRunScript?: boolean;
   }
 ): void {
   const sandboxRoot = options.sandboxRoot ?? MCP_SANDBOX_DIR;
@@ -88,16 +95,19 @@ export function registerSessionTools(
   if (options.skills.length > 0) registry.register(createLoadSkillTool(options.skills));
   // 沙箱脚本执行器：技能脚本（load_skill 物化到 .skills/）与模型自写脚本共用的唯一执行面；
   // 执行后端由 AGENT_SANDBOX 解析结果决定（宿主机进程或一次性容器），
-  // 两种后端每次执行都经 requestHuman 人工确认，不依赖技能是否安装
-  registry.register(
-    createRunScriptTool({
-      sandboxRoot,
-      backend:
-        options.sandbox.backend === "docker"
-          ? { kind: "docker", image: options.sandbox.image, network: options.sandbox.network }
-          : { kind: "host" },
-    })
-  );
+  // 两种后端每次执行都经 requestHuman 人工确认，不依赖技能是否安装。
+  // 远程收紧时这条整块不注册：摘掉能力，比指望审批拦住拿到口令的人可靠
+  if (!options.disableRunScript) {
+    registry.register(
+      createRunScriptTool({
+        sandboxRoot,
+        backend:
+          options.sandbox.backend === "docker"
+            ? { kind: "docker", image: options.sandbox.image, network: options.sandbox.network }
+            : { kind: "host" },
+      })
+    );
+  }
 }
 
 /**
@@ -156,7 +166,13 @@ export async function createAgentStack(options: AgentStackOptions = {}): Promise
   for (const middleware of options.extraMiddleware ?? []) registry.use(middleware);
   // 计划状态仓与工具分开各持一半：仓由 Agent 消费（pin 上下文 + 事件），工具只做校验写入
   const planStore = new PlanStore();
-  registerSessionTools(registry, { skills, planStore, sandbox, sandboxRoot });
+  registerSessionTools(registry, {
+    skills,
+    planStore,
+    sandbox,
+    sandboxRoot,
+    disableRunScript: options.disableRunScript === true,
+  });
 
   // 3. MCP：白名单根目录 + 请求超时都在 adapter 上统一声明
   const adapter = new McpAdapter({

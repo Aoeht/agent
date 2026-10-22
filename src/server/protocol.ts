@@ -21,6 +21,11 @@
  *   POST   /approvals/:id             body ApprovalDecisionBody → 204；未知/已过期 404/410
  *   POST   /inputs/:id                body { text } → 204（human_input_request 的应答）
  *   GET    /status                    → StatusDTO
+ *
+ * 访问门禁（设了 AGENT_UI_TOKEN 时；见 src/server/auth.ts）：
+ *   GET    /login                     → 口令登录页
+ *   POST   /login                     body { token } → 302 + HttpOnly cookie；口令不对 401
+ *   其余端点（含 SSE 与静态资源）无凭据时：浏览器导航回登录页，API 回 401
  */
 
 import { z } from "zod";

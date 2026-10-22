@@ -17,6 +17,11 @@ export class HttpTransport implements Transport {
 
   private async request(pathname: string, init?: RequestInit): Promise<Response> {
     const resp = await fetch(`${base}${pathname}`, init);
+    // 口令换过或 cookie 过期后 SPA 会一路 401：同源部署时直接回登录页，别让人对着报错文案猜
+    if (resp.status === 401) {
+      if (base === "") window.location.assign("/login");
+      throw new Error("需要登录");
+    }
     if (!resp.ok) {
       let detail = `HTTP ${resp.status}`;
       try {
