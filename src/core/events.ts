@@ -55,6 +55,7 @@ export interface CompactEvent {
     | "stub_tool_outputs" /** 旧工具输出替换为占位符（保留调用与参数） */
     | "drop_tool_history" /** 旧工具组整体移出请求 */
     | "fold_summary" /** 旧对话轮折叠进滚动摘要 */
+    | "stage3_clip" /** 阶梯 3 表示仍超预算：裁剪最新工具输出 / 丢弃更早的未折叠对话 */
     | "summary_failed" /** 摘要调用失败（已降级，不中断 run） */
     | "hard_truncate" /** 摘要不可用时的最后兜底：硬截断更早对话 */
     | "emergency" /** API 报上下文超限后的强制压缩重试 */

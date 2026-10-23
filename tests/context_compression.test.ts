@@ -18,6 +18,7 @@ import { defineTool } from "../src/core/types";
 import { processToolOutput } from "../src/core/tool_outputs";
 import { renderCitationBlock } from "../src/core/citations";
 import type { Message } from "../src/core/types";
+import type { CompactEvent } from "../src/core/events";
 
 async function tempDir(prefix: string): Promise<string> {
   return fs.mkdtemp(path.join(tmpdir(), prefix));
@@ -259,6 +260,85 @@ describe("ContextManager", () => {
     expect(textOf(result[1])).toContain("长期记忆摘要");
     expect(textOf(result[2])).toContain("收到，我已了解");
     expect(textOf(result[3])).toContain("历史上下文摘要"); // 摘要块跟在钉住前缀后
+  });
+
+  test("阶梯 3 复核：最新工具组自己超预算时裁输出，头尾保留且不改原消息", async () => {
+    const { client } = makeSummaryClient();
+    const cm = makeManager(client, 500);
+    const events: CompactEvent[] = [];
+    cm.onCompact = (event) => events.push(event);
+    const raw = `HEAD_START。${longText("大输出", 200)}TAIL_END`;
+    const toolMsg: Message = { role: "tool", tool_call_id: "c1", content: raw };
+    const messages: Message[] = [
+      { role: "system", content: "系统规则" },
+      { role: "user", content: "当前问题：查一下" },
+      toolCallMessage("c1"),
+      toolMsg,
+    ];
+
+    const result = await cm.compress(messages);
+
+    const clipped = result.find((m) => m.role === "tool")!;
+    const clippedText = textOf(clipped);
+    expect(clippedText.length).toBeLessThan(raw.length);
+    expect(clippedText.startsWith("HEAD_START")).toBe(true);
+    expect(clippedText.endsWith("TAIL_END")).toBe(true);
+    expect(clippedText).toContain("此处省略约");
+    // 只改本次表示：append-only 的历史消息不能被就地截断
+    expect(toolMsg.content).toBe(raw);
+    // 当前问题与调用仍完整保留
+    expect(result.map(textOf).join("")).toContain("当前问题");
+    const clipEvent = events.find((e) => e.action === "stage3_clip");
+    expect(clipEvent?.detail).toContain("裁剪 1 条最新工具输出");
+    expect(clipEvent!.tokens).toBeGreaterThan(0);
+  });
+
+  test("阶梯 3 复核：裁完工具仍超预算时从旧到新丢未折叠对话，最近问题保留", async () => {
+    const { client } = makeSummaryClient();
+    const cm = makeManager(client, 500);
+    const events: CompactEvent[] = [];
+    cm.onCompact = (event) => events.push(event);
+    const pinned: Message[] = [
+      { role: "user", content: `【长期记忆摘要】${longText("长期记忆", 120)}` },
+      { role: "assistant", content: "收到，我已了解以上长期记忆摘要。" },
+    ];
+    cm.setPinnedPrefix(pinned);
+    const toolMsg: Message = {
+      role: "tool",
+      tool_call_id: "z1",
+      content: `最新工具输出。${longText("大输出", 150)}`,
+    };
+    const messages: Message[] = [
+      { role: "system", content: "系统规则" },
+      ...pinned,
+      { role: "user", content: `旧问题：${longText("旧背景", 150)}` },
+      { role: "user", content: "中间问题：简短" },
+      { role: "user", content: "最近问题：简短" },
+      toolCallMessage("z1"),
+      toolMsg,
+    ];
+
+    const result = await cm.compress(messages);
+    const joined = result.map(textOf).join("");
+
+    expect(joined).toContain("长期记忆摘要");
+    expect(joined).toContain("最近问题");
+    expect(joined).not.toContain("中间问题"); // 最新的未折叠轮之外都被丢掉
+    expect(joined).not.toContain("旧问题");
+    expect(textOf(result.find((m) => m.role === "tool"))).toContain("此处省略约");
+    expect(toolMsg.content).not.toContain("此处省略约");
+    const clipEvent = events.find((e) => e.action === "stage3_clip")!;
+    expect(clipEvent.detail).toContain("丢弃 1 条更早对话");
+    expect(clipEvent.messages).toBe(1);
+  });
+
+  test("阶梯 3 表示装得下时不发 stage3_clip", async () => {
+    const { client } = makeSummaryClient();
+    const cm = makeManager(client, 500);
+    const events: CompactEvent[] = [];
+    cm.onCompact = (event) => events.push(event);
+    await cm.compress(overloadedMessages());
+    expect(events.some((e) => e.action === "stage3_clip")).toBe(false);
   });
 
   test("摘要调用失败不抛错也不丢消息：返回阶梯 2 的无损表示，连续失败后硬截断兜底", async () => {

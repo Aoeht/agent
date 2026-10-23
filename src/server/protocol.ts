@@ -155,6 +155,7 @@ export const ServerEventSchema = z.discriminatedUnion("type", [
       "stub_tool_outputs",
       "drop_tool_history",
       "fold_summary",
+      "stage3_clip",
       "summary_failed",
       "hard_truncate",
       "emergency",

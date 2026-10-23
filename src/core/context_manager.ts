@@ -27,6 +27,9 @@ const MAX_SUMMARY_FAILURES = 3;
 /** 摘要输入 token 上限：折叠量极大时先中段截断，别让摘要调用自己先爆上下文 */
 const SUMMARY_INPUT_TOKEN_CAP = 20_000;
 
+/** 阶梯 3 复核裁剪时，单条最新工具输出至少保留的 token（低于它等于没留观察） */
+const MIN_TOOL_OUTPUT_TOKENS = 120;
+
 /** 一次工具组的定位：[start, end) 是它在 messages 里的下标区间（含 owner assistant）。 */
 interface ToolGroupSpan {
   start: number;
@@ -364,7 +367,7 @@ export class ContextManager {
       return this.hardTruncate(messages, { systemMsgs, pinned, conv, groups });
     }
 
-    return this.stage3Representation(messages, { systemMsgs, pinned, conv, groups });
+    return this.stage3Representation(messages, { systemMsgs, pinned, conv, groups }, budget);
   }
 
   /** 阶梯 1/2 的估算值：不物化数组，直接在原估算上做增减（groups > 1 时才有意义） */
@@ -445,24 +448,107 @@ export class ContextManager {
     return out.length > 8 ? [...out.slice(-8), `（更早的 ${out.length - 8} 条工具观察已省略）`] : out;
   }
 
-  /** 阶梯 3 表示：「system + 钉住前缀 + 摘要块 + 未折叠对话 + 最新工具组」 */
-  private stage3Representation(
-    messages: Message[],
-    parts: { systemMsgs: Message[]; pinned: Message[]; conv: Message[]; groups: ToolGroupSpan[] }
-  ): Message[] {
-    const out: Message[] = [...parts.systemMsgs, ...parts.pinned];
+  /**
+   * 阶梯 3 表示：「system + 钉住前缀 + 摘要块 + 未折叠对话 + 最新工具组」。
+   * 这一层也可能超预算：最新工具组不受阶梯 2 约束，摘要块与钉住前缀又没有上限。
+   * 出手前复核一次尺寸：先按体积裁最新工具输出（保头留尾），再从旧到新丢未折叠对话。
+   * 只改本次请求的表示，不动 foldedCount——被丢的对话仍留给后续折叠进摘要。
+   */
+  private stage3Representation(messages: Message[], parts: MessageAnalysis, budget: number): Message[] {
+    const head: Message[] = [...parts.systemMsgs, ...parts.pinned];
     if (this.rollingSummary !== null) {
-      out.push(
+      head.push(
         ...(this.summaryBlock ?? (this.summaryBlock = [
           { role: "user", content: wrapSummaryBlock("历史上下文摘要", this.rollingSummary) },
           { role: "assistant", content: "收到，我已了解以上历史摘要。" },
         ]))
       );
     }
-    out.push(...parts.conv.slice(this.foldedCount));
-    const latest = parts.groups[parts.groups.length - 1];
-    if (latest) out.push(...messages.slice(latest.start, latest.end));
-    return out;
+    let convGroups = this.conversationGroups(parts.conv.slice(this.foldedCount));
+    const latestSpan = parts.groups[parts.groups.length - 1];
+    const latest = latestSpan ? messages.slice(latestSpan.start, latestSpan.end) : [];
+    const compose = (): Message[] => [...head, ...convGroups.flat(), ...latest];
+
+    let result = compose();
+    const initial = this.effectiveTokens(this.estimateTokens(result));
+    if (initial <= budget) return result;
+
+    // 1) 最新工具输出从大到小裁到预算内（同一组里先裁最占地方的那条）
+    const toolOutputs: Array<{ index: number; tokens: number }> = [];
+    latest.forEach((message, index) => {
+      if (message.role === "tool") {
+        toolOutputs.push({ index, tokens: this.tokenCounter.estimateText(message.content, this.config.modelName) });
+      }
+    });
+    toolOutputs.sort((a, b) => b.tokens - a.tokens);
+    let clipped = 0;
+    let size = initial;
+    for (const { index, tokens } of toolOutputs) {
+      if (size <= budget) break;
+      const message = latest[index]!;
+      if (message.role !== "tool" || tokens <= MIN_TOOL_OUTPUT_TOKENS) continue;
+      const rawExcess = Math.ceil((size - budget) / this.calibrationRatio);
+      const keep = Math.max(MIN_TOOL_OUTPUT_TOKENS, tokens - rawExcess);
+      if (keep >= tokens) continue;
+      latest[index] = { ...message, content: this.clipToTokens(message.content, keep) };
+      result = compose();
+      size = this.effectiveTokens(this.estimateTokens(result));
+      clipped++;
+    }
+
+    // 2) 仍超预算：从最旧的未折叠轮开始丢，至少留下最近一轮（当前问题）
+    let droppedMessages = 0;
+    while (size > budget && convGroups.length > 1) {
+      droppedMessages += convGroups[0]!.length;
+      convGroups = convGroups.slice(1);
+      result = compose();
+      size = this.effectiveTokens(this.estimateTokens(result));
+    }
+
+    if (clipped > 0 || droppedMessages > 0) {
+      this.onCompact?.({
+        action: "stage3_clip",
+        messages: droppedMessages,
+        tokens: Math.max(0, initial - size),
+        detail: `阶梯 3 表示仍超预算：裁剪 ${clipped} 条最新工具输出${droppedMessages ? `，丢弃 ${droppedMessages} 条更早对话` : ""}`,
+      });
+    }
+    return result;
+  }
+
+  /** 按 token 预算保头留尾、掐掉中段；给阶梯 3 复核裁剪最新工具输出用 */
+  private clipToTokens(text: string, tokenCap: number): string {
+    const total = this.tokenCounter.estimateText(text, this.config.modelName);
+    if (total <= tokenCap) return text;
+    const headCap = Math.floor(tokenCap * 0.3);
+    const head = this.takeTokenPrefix(text, headCap);
+    const tail = this.takeTokenSuffix(text, tokenCap - headCap);
+    return `${head}\n…[此处省略约 ${Math.max(1, total - tokenCap)} tokens 以适应上下文]…\n${tail}`;
+  }
+
+  /** 二分找最长前缀：token 数随前缀长度近似单调，头尾各探 O(log n) 次 */
+  private takeTokenPrefix(text: string, cap: number): string {
+    if (cap <= 0) return "";
+    let lo = 0;
+    let hi = text.length;
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2);
+      if (this.tokenCounter.estimateText(text.slice(0, mid), this.config.modelName) <= cap) lo = mid;
+      else hi = mid - 1;
+    }
+    return text.slice(0, lo);
+  }
+
+  private takeTokenSuffix(text: string, cap: number): string {
+    if (cap <= 0) return "";
+    let lo = 0;
+    let hi = text.length;
+    while (lo < hi) {
+      const mid = Math.floor((lo + hi) / 2);
+      if (this.tokenCounter.estimateText(text.slice(mid), this.config.modelName) <= cap) hi = mid;
+      else lo = mid + 1;
+    }
+    return text.slice(lo);
   }
 
   /** 最后兜底：摘要不可用时按轮硬截断，只保留预算 25% 内的最近对话 + 最新工具组 */
@@ -485,7 +571,7 @@ export class ContextManager {
       messages: start,
       detail: "摘要不可用，更早的普通对话已被直接丢弃",
     });
-    return this.stage3Representation(messages, parts);
+    return this.stage3Representation(messages, parts, budget);
   }
 
   private notifyStage(stage: number, event: CompactEvent): void {
