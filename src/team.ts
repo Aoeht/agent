@@ -4,8 +4,21 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import OpenAI from "openai";
 import { createAgentStack } from "./bootstrap";
-import { TeamCoordinator, type TeamEvent } from "./core/team_coordinator";
+import { TeamCoordinator, TeamReport, type TeamEvent } from "./core/team_coordinator";
 import { createTeamChildFactory, loadTeamOptions, TEAM_CAPABILITIES } from "./team_runtime";
+import type { ChildRecord } from "./core/team_scheduler";
+
+/** 运行收尾的任务/token 小表：每次工作与复核尝试的状态和消耗一目了然。 */
+export function renderTeamCostTable(report: TeamReport): string {
+  const row = (record: ChildRecord) =>
+    `${record.mode.padEnd(6)} r${String(record.round).padEnd(5)} ${record.task.id.slice(0, 15).padEnd(16)}` +
+    `${record.state.padEnd(10)} ${String(record.result?.totalTokens ?? 0).padStart(7)} tok` +
+    (record.reason ? `  ${record.reason.slice(0, 40)}` : "");
+  const header = `mode   round  task            state      tokens`;
+  return [header, ...[...report.tasks, ...report.reviews].map(row),
+    `合计 ${report.tasks.length + report.reviews.length} 次运行，${report.totalTokens} tokens` +
+    (report.coordinationUsageEstimated ? "（含估算）" : "")].join("\n");
+}
 
 export async function main(args = process.argv.slice(2)): Promise<void> {
   if (args.includes("--help") || args.includes("-h")) {
@@ -44,7 +57,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     });
     const report = await coordinator.run(goal, { signal: controller.signal, runId });
     await fs.writeFile(path.join(runDirectory, "result.json"), JSON.stringify(report, null, 2), "utf8");
-    console.log(`\n${report.finalAnswer}\n\n状态：${report.status}；复核：${report.reviewStatus}；补查轮数：${report.reworkRounds}；累计 token：${report.totalTokens}`);
+    console.log(`\n${report.finalAnswer}\n\n状态：${report.status}；复核：${report.reviewStatus}；补查轮数：${report.reworkRounds}；累计 token：${report.totalTokens}\n\n${renderTeamCostTable(report)}`);
     if (report.status !== "answered") process.exitCode = report.status === "cancelled" ? 130 : 1;
   } finally {
     process.off("SIGINT", cancel);

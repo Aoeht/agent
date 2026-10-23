@@ -161,7 +161,12 @@ export class AgentScheduler {
           round: record.round, mode: record.mode,
           ...(context.find(item => item.task.id === record.task.id)
             ? { previous: context.find(item => item.task.id === record.task.id)! } : {}),
-          feedback: structuredClone((input.feedback ?? []).filter(check => check.taskId === record.task.id)),
+          // 自己的未通过检查项在前；被返工的直接依赖的检查项附在后（taskId 标注来源），下游据此知道要重新核对什么。
+          feedback: structuredClone([
+            ...(input.feedback ?? []).filter(check => check.taskId === record.task.id),
+            ...(input.feedback ?? []).filter(check => check.taskId !== record.task.id
+              && record.task.dependsOn.includes(check.taskId)),
+          ]),
           reviewTargets: record.mode === "review" ? context : [],
         };
         child = this.createChild(execution);

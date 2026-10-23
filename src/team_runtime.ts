@@ -70,7 +70,9 @@ export function createTeamChildFactory(stack: AgentStack, options: {
             "不要调用任何工具、不要重新收集资料；只依据上一次的回答内容输出修正后的完整 JSON 对象，不要添加解释或 Markdown 围栏。"
           : "") +
         (execution.round > 0 && execution.mode === "work" && !repairing
-          ? "\n这是定向补查：保留原始交付和检查标准，针对反馈补充证据并返回完整的新结果；如果依赖结果改变，需要重新核对自己的结论。" : ""),
+          ? "\n这是定向补查：保留原始交付和检查标准，针对反馈补充证据并返回完整的新结果；如果依赖结果改变，需要重新核对自己的结论。" +
+            "反馈按 taskId 标注来源：自己的检查项之外，还可能附带被返工的直接依赖的检查项——它们说明上游结论为何不可靠，请据此重新核对自己的相关结论。"
+          : ""),
       untrustedContext: [stack.untrustedContext, JSON.stringify({
         dependencies: execution.dependencies.map(projectChild),
         previous: execution.previous ? projectChild(execution.previous) : undefined,
@@ -104,6 +106,7 @@ export function loadTeamOptions(env: NodeJS.ProcessEnv = process.env): TeamOptio
     AGENT_TEAM_TIMEOUT_MS: "timeoutMs",
     AGENT_TEAM_MAX_REWORK_ROUNDS: "maxReworkRounds",
     AGENT_TEAM_CHILD_TIMEOUT_MS: "childTimeoutMs",
+    AGENT_TEAM_COORDINATION_MAX_TOKENS: "coordinationMaxTokens",
   } as const;
   const input: Partial<TeamOptions> = {};
   for (const [name, key] of Object.entries(fields)) {

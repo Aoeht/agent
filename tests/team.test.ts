@@ -13,7 +13,8 @@ import { ToolRegistry } from "../src/core/registry";
 import { PlanStore } from "../src/core/plan_store";
 import { runOutcome, type StopReason } from "../src/core/run_outcome";
 import type { AgentResult } from "../src/core/types";
-import type { Submission, TeamReview } from "../src/core/team_contracts";
+import type { Submission, TeamReview, ReviewCheck } from "../src/core/team_contracts";
+import { renderTeamCostTable } from "../src/team";
 
 const task = (id: string, dependsOn: string[] = []): TeamTask => ({ id, role: "analyst", goal: `分析 ${id}`, dependsOn,
   deliverables: ["分析结论"], checks: [{ id: "c1", description: "有证据支持结论" }] });
@@ -463,6 +464,54 @@ describe("协调模型协议", () => {
     }
   });
 
+  test("计划占用保留名 team-review 会被拒绝并带反馈重试", async () => {
+    const planRequests: any[] = [];
+    let planCalls = 0;
+    const client = clientWith(async request => {
+      if (!request.response_format) return reply("汇总");
+      planCalls++;
+      planRequests.push(request);
+      return planCalls === 1 ? reply(JSON.stringify({ tasks: [task("team-review")] })) : reply(JSON.stringify({ tasks: [task("a")] }));
+    });
+    const report = await new TeamCoordinator({ model: "test", client, createChild: instant, capabilities: "只读" })
+      .run("test");
+    expect(report.status).toBe("answered");
+    expect(planCalls).toBe(2);
+    expect(planRequests[1]!.messages[1]!.content).toContain("保留");
+    expect(report.plan!.tasks[0]!.id).toBe("a");
+  });
+
+  test("协调输出的 max_tokens 上限可配置", async () => {
+    for (const [options, expected] of [[{}, 4096], [{ coordinationMaxTokens: 8192 }, 8192]] as const) {
+      const planRequests: any[] = [];
+      const client = clientWith(async request => {
+        if (request.response_format) planRequests.push(request);
+        return request.response_format ? reply(JSON.stringify({ tasks: [task("a")] })) : reply("汇总");
+      });
+      await new TeamCoordinator({ model: "test", client, createChild: instant, capabilities: "只读", options })
+        .run("test");
+      expect(planRequests[0]!.max_tokens).toBe(expected);
+    }
+  });
+
+  test("补查时下游任务附带依赖任务的未通过检查项，无关任务不受影响", async () => {
+    const checks: ReviewCheck[] = [
+      { taskId: "a", checkId: "c1", verdict: "needs_work", rationale: "缺证据", evidenceRefs: [], followUp: "补充来源" },
+      { taskId: "x", checkId: "c1", verdict: "needs_work", rationale: "无关分支", evidenceRefs: [], followUp: "补充" },
+    ];
+    const feedbacks = new Map<string, ReviewCheck[]>();
+    const scheduler = new AgentScheduler(schedulerOptions, execution => {
+      feedbacks.set(execution.task.id, execution.feedback);
+      return { run: async () => result(execution.task.id), shutdown: async () => {} };
+    });
+    await scheduler.run({ parentRunId: "root", userGoal: "test",
+      plan: { tasks: [task("a"), task("b", ["a"]), task("c")] }, budget: new TeamTokenBudget(1000),
+      signal: signal(), round: 1, feedback: checks });
+    expect(feedbacks.get("a")!.map(check => check.taskId)).toEqual(["a"]);
+    expect(feedbacks.get("b")!.map(check => check.taskId)).toEqual(["a"]); // 附带直接依赖 a 的检查项
+    expect(feedbacks.get("c")).toEqual([]);
+  });
+
   test("汇总失败保留子任务结论；部分失败不会被汇总文本变成成功", async () => {
     let calls = 0;
     const report = await new TeamCoordinator({ model: "test", capabilities: "只读", createChild: instant,
@@ -556,14 +605,35 @@ describe("真实 Agent 接入", () => {
   test("配置拒绝非法并发和预算；help 不初始化网络服务", async () => {
     expect(loadTeamOptions({}).concurrency).toBe(2);
     expect(loadTeamOptions({}).childTimeoutMs).toBe(0);
+    expect(loadTeamOptions({}).coordinationMaxTokens).toBe(4_096);
     expect(loadTeamOptions({ AGENT_TEAM_CHILD_TIMEOUT_MS: "30000" }).childTimeoutMs).toBe(30_000);
+    expect(loadTeamOptions({ AGENT_TEAM_COORDINATION_MAX_TOKENS: "8192" }).coordinationMaxTokens).toBe(8_192);
     expect(() => loadTeamOptions({ AGENT_TEAM_CHILD_TIMEOUT_MS: "-1" })).toThrow();
+    expect(() => loadTeamOptions({ AGENT_TEAM_COORDINATION_MAX_TOKENS: "100" })).toThrow();
     expect(() => loadTeamOptions({ AGENT_TEAM_CONCURRENCY: "0" })).toThrow();
     expect(() => loadTeamOptions({ AGENT_TEAM_CONCURRENCY: "2x" })).toThrow();
     expect(() => loadTeamOptions({ AGENT_TEAM_TOTAL_TOKENS: "100" })).toThrow();
     const process = Bun.spawn(["bun", "run", "src/team.ts", "--help"], { stdout: "pipe", stderr: "pipe" });
     expect(await new Response(process.stdout).text()).toContain("协调规划");
     expect(await process.exited).toBe(0);
+  });
+
+  test("收尾小表列出每次运行的状态、token 与失败原因", () => {
+    const work: ChildRecord = { parentRunId: "p", task: task("analyze-code"), state: "answered", round: 0, mode: "work",
+      result: { ...result("done"), totalTokens: 1234 } };
+    const failed: ChildRecord = { parentRunId: "p", task: task("slow"), state: "failed", round: 1, mode: "work",
+      result: { ...result("x"), totalTokens: 99 }, reason: "预算不足" };
+    const review: ChildRecord = { parentRunId: "p", task: task("rev"), state: "answered", round: 1, mode: "review",
+      result: { ...result("ok"), totalTokens: 55 } };
+    const table = renderTeamCostTable({ runId: "r", goal: "g", status: "incomplete", tasks: [work, failed],
+      reviews: [review], reworkRounds: 1, reviewStatus: "needs_work", finalAnswer: "答案",
+      totalTokens: 1388, coordinationUsageEstimated: true });
+    expect(table).toContain("analyze-code");
+    expect(table).toContain("answered");
+    expect(table).toContain("预算不足");
+    expect(table).toContain("review");
+    expect(table).toContain("1388 tokens");
+    expect(table).toContain("（含估算）");
   });
 
   test("复核子 Agent 可配置独立模型，工作任务仍用主模型", async () => {

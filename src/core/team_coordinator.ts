@@ -20,6 +20,8 @@ export const TeamOptionsSchema = z.object({
   retryBaseDelayMs: z.number().int().min(0).max(60_000).default(500),
   /** 单个子任务的墙钟上限（毫秒）；0 表示不设固定值，仅受团队剩余时间约束。 */
   childTimeoutMs: z.number().int().min(0).max(3_600_000).default(0),
+  /** 协调调用（规划/汇总）单次输出的 max_tokens 上限；服务商支持更大输出时可调高。 */
+  coordinationMaxTokens: z.number().int().min(256).max(32_768).default(4_096),
 }).strict().refine(value => value.totalTokens >= 2 * value.childTokens + 2 * value.coordinationTokens,
   "总预算至少要容纳规划、汇总、一个子任务和独立复核");
 export type TeamOptions = z.infer<typeof TeamOptionsSchema>;
@@ -48,6 +50,9 @@ export type TeamEvent =
   | { type: "team_end"; runId: string; report: TeamReport };
 
 /** Only task conclusions and source references cross context boundaries. */
+/** 宿主独立复核任务使用的保留 ID；计划任务不得占用，避免事件与账本混淆。 */
+export const TEAM_REVIEW_TASK_ID = "team-review";
+
 export function projectChild(record: ChildRecord) {
   return {
     id: record.task.id, role: record.task.role, goal: record.task.goal, state: record.state,
@@ -208,7 +213,7 @@ export class TeamCoordinator {
           try {
             controller.signal.throwIfAborted();
             promptTokens = counter.estimateText(system + user, this.config.model) + 100;
-            const maxTokens = Math.min(4096, this.options.coordinationTokens - promptTokens);
+            const maxTokens = Math.min(this.options.coordinationMaxTokens, this.options.coordinationTokens - promptTokens);
             if (maxTokens < 256) throw new Error("协调上下文超出预留预算");
             attempted = true;
             const response = await this.config.client.chat.completions.create({
@@ -260,13 +265,19 @@ export class TeamCoordinator {
       const planningSystem =
         `你是任务协调者。把用户目标拆成 1 到 ${this.options.maxTasks} 个必要的子任务，简单目标只拆一个。` +
         "只输出 JSON 对象，格式为 {\"tasks\":[{\"id\":\"research\",\"role\":\"researcher\",\"goal\":\"任务说明\",\"dependsOn\":[],\"deliverables\":[\"交付内容\"],\"checks\":[{\"id\":\"c1\",\"description\":\"可据证据核对的完成要求\"]}]}]}。" +
-        "role 只能是 researcher、analyst、reviewer，id 只能是小写字母开头的字母、数字、下划线或连字符，最多 40 字符。" +
+        "role 只能是 researcher、analyst、reviewer，id 只能是小写字母开头的字母、数字、下划线或连字符，最多 40 字符，且不能使用保留名 team-review。" +
         "每个任务说明最多 4000 字符，依赖必须引用本计划里的 ID，不能循环。子任务只看到原始目标、自己的任务和直接依赖的结论。" +
         "需要已有结果的复核任务必须声明依赖。不能自行创建更多 Agent 或指定模型、权限、预算。" +
         "每个任务必须列出 1–6 个交付项和 1–6 个检查项，每项最多 500 字符，检查项 ID 在任务内唯一。" +
         "检查项应覆盖用户实际要求；宿主会另外安排独立复核和最多两轮定向补查。" +
         "任务必须符合宿主能力；用户目标超出能力时安排分析可行方案并说明限制，不能声称已执行。\n宿主能力：" + this.config.capabilities;
-      const parsePlan = (text: string) => validateTeamPlan(JSON.parse(extractJsonObject(text)), this.options.maxTasks);
+      const parsePlan = (text: string) => {
+        const plan = validateTeamPlan(JSON.parse(extractJsonObject(text)), this.options.maxTasks);
+        if (plan.tasks.some(task => task.id === TEAM_REVIEW_TASK_ID)) {
+          throw new Error(`任务 ID ${TEAM_REVIEW_TASK_ID} 为宿主独立复核保留，请换一个 ID`);
+        }
+        return plan;
+      };
       // 请求层失败（含传输重试耗尽、拒绝、截断）直接结束运行；只有解析/校验失败才值得带反馈重试一次。
       const planText = await request(planningSystem, goal, true, releasePlan);
       try {
@@ -307,7 +318,7 @@ export class TeamCoordinator {
         // 复核是质量闭环的枢纽：失败先原样重试一次（预算允许），两次都失败才判 failed。
         for (let attempt = 0; ; attempt++) {
           const reviewRecords = await scheduler.run({ parentRunId: runId, userGoal: goal, budget, round, mode: "review",
-            plan: { tasks: [{ id: "team-review", role: "reviewer", goal: "独立核对所有原始任务的交付要求和检查项，指出具体缺口及补查问题。",
+            plan: { tasks: [{ id: TEAM_REVIEW_TASK_ID, role: "reviewer", goal: "独立核对所有原始任务的交付要求和检查项，指出具体缺口及补查问题。",
               dependsOn: [], deliverables: ["逐项复核报告"], checks: [{ id: "review", description: "覆盖全部原始检查项" }] }] },
             context: report.plan.tasks.map(task => latest.get(task.id)!), signal: controller.signal, onTask, remainingTeamMs });
           reviewed = reviewRecords[0]!;

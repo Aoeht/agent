@@ -140,7 +140,9 @@ describe("独立复核与最多两轮定向补查", () => {
     expect(reruns[0]!.feedback[0]!.followUp).toContain("撤销逻辑");
     expect(reruns[0]!.previous!.result!.submission!.summary).toBe("auth-round-0");
     expect(reruns[1]!.dependencies[0]!.result!.submission!.summary).toBe("auth-round-1");
-    expect(reruns[1]!.feedback).toEqual([]); // Downstream is invalidated even though review passed it earlier.
+    // 下游虽自身通过，但会附带被返工依赖 auth 的未通过检查项，知道要重新核对什么
+    expect(reruns[1]!.feedback.map(check => check.taskId)).toEqual(["auth"]);
+    expect(reruns[1]!.feedback[0]!.followUp).toContain("撤销逻辑");
     expect(h.closed()).toBe(7);
     expect(h.events.filter(e => e.type === "team_rework")).toHaveLength(1);
   });
