@@ -10,7 +10,7 @@ import { createTeamChildFactory, loadTeamOptions, TEAM_CAPABILITIES } from "./te
 export async function main(args = process.argv.slice(2)): Promise<void> {
   if (args.includes("--help") || args.includes("-h")) {
     console.log('用法：bun run team "任务目标"\n或：echo "任务目标" | bun run team\n' +
-      '第一版：协调规划 → 独立只读子 Agent 按依赖执行 → 汇总。配置和边界见 docs/子Agent运行时.md。');
+      '协调规划 → 结构化交付 → 独立复核 → 最多两轮定向补查 → 汇总。配置和边界见 docs/子Agent运行时.md。');
     return;
   }
   const goal = args.length ? args.join(" ").trim() : process.stdin.isTTY ? "" : (await Bun.stdin.text()).trim();
@@ -31,7 +31,9 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     const onEvent = (event: TeamEvent) => {
       appendFileSync(path.join(runDirectory, "events.jsonl"), JSON.stringify({ at: new Date().toISOString(), ...event }) + "\n");
       if (event.type === "team_plan") console.log(`计划：${event.plan.tasks.length} 个子任务，并发 ${options.concurrency}`);
-      if (event.type === "team_task") console.log(`[${event.task.task.id}] ${event.task.state}${event.task.reason ? ` · ${event.task.reason}` : ""}`);
+      if (event.type === "team_task") console.log(`[${event.task.mode}/r${event.task.round}/${event.task.task.id}] ${event.task.state}${event.task.reason ? ` · ${event.task.reason}` : ""}`);
+      if (event.type === "team_review") console.log(`第 ${event.round + 1} 次复核：${event.task.result?.review?.summary ?? event.task.reason ?? event.task.state}`);
+      if (event.type === "team_rework") console.log(`第 ${event.round} 轮定向补查：${event.taskIds.join("、")}`);
       if (event.type === "team_summary") console.log("正在汇总子任务结果…");
     };
     console.log(`团队运行记录：${runDirectory}`);
@@ -41,7 +43,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     });
     const report = await coordinator.run(goal, { signal: controller.signal, runId });
     await fs.writeFile(path.join(runDirectory, "result.json"), JSON.stringify(report, null, 2), "utf8");
-    console.log(`\n${report.finalAnswer}\n\n状态：${report.status}；累计 token：${report.totalTokens}`);
+    console.log(`\n${report.finalAnswer}\n\n状态：${report.status}；复核：${report.reviewStatus}；补查轮数：${report.reworkRounds}；累计 token：${report.totalTokens}`);
     if (report.status !== "answered") process.exitCode = report.status === "cancelled" ? 130 : 1;
   } finally {
     process.off("SIGINT", cancel);

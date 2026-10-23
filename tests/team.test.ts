@@ -13,10 +13,20 @@ import { ToolRegistry } from "../src/core/registry";
 import { PlanStore } from "../src/core/plan_store";
 import { runOutcome, type StopReason } from "../src/core/run_outcome";
 import type { AgentResult } from "../src/core/types";
+import type { Submission, TeamReview } from "../src/core/team_contracts";
 
-const task = (id: string, dependsOn: string[] = []): TeamTask => ({ id, role: "analyst", goal: `分析 ${id}`, dependsOn });
+const task = (id: string, dependsOn: string[] = []): TeamTask => ({ id, role: "analyst", goal: `分析 ${id}`, dependsOn,
+  deliverables: ["分析结论"], checks: [{ id: "c1", description: "有证据支持结论" }] });
+const submission = (summary: string): Submission => ({ summary, deliverables: [{ index: 0, content: summary }],
+  findings: [{ id: "f1", claim: summary, evidenceIds: ["e1"] }],
+  evidence: [{ id: "e1", source: "src/example.ts:1", excerpt: "source" }],
+  coverage: [{ checkId: "c1", status: "covered", findingIds: ["f1"], note: "已核对" }], unresolved: [] });
+const review = (tasks: TeamTask[]): TeamReview => ({ summary: "逐项核对完成", checks: tasks.flatMap(task => task.checks.map(check => ({
+  taskId: task.id, checkId: check.id, verdict: "pass" as const, rationale: "已核对原始来源", followUp: "",
+  evidenceRefs: [{ taskId: task.id, evidenceId: "e1" }],
+}))) });
 const result = (answer: string, tokens = 10, reason: StopReason = "answer"): AgentResult => ({
-  ...runOutcome(reason), finalAnswer: answer, totalTokens: tokens, toolCallsCount: 0,
+  ...runOutcome(reason), finalAnswer: JSON.stringify(submission(answer || "未完成")), totalTokens: tokens, toolCallsCount: 0,
   messages: [], steps: [], citations: [],
 });
 const schedulerOptions = { concurrency: 2, maxTasks: 6, childTokens: 100, childToolCalls: 5 };
@@ -34,7 +44,9 @@ const reply = (content: string, finish_reason = "stop", usage: object | undefine
 function clientWith(fn: (request: any, options: any) => Promise<any>): OpenAI {
   return { chat: { completions: { create: fn } } } as unknown as OpenAI;
 }
-const instant: ChildFactory = execution => ({ run: async () => result(execution.task.id), shutdown: async () => {} });
+const instant: ChildFactory = execution => ({ run: async () => execution.mode === "review"
+  ? { ...result("review"), finalAnswer: JSON.stringify(review(execution.reviewTargets.map(target => target.task))) }
+  : result(execution.task.id), shutdown: async () => {} });
 
 describe("团队计划与运行时调度", () => {
   test("完整校验 DAG：重复 ID、缺失依赖、自依赖、循环、越权字段、超量任务均拒绝", () => {
@@ -72,7 +84,7 @@ describe("团队计划与运行时调度", () => {
     await until(() => started.length === 3);
     expect(started[2]!.task.id).toBe("c"); // b still running: no wave barrier.
     expect(started[2]!.dependencies.map(dep => dep.task.id)).toEqual(["a"]);
-    expect(started[2]!.dependencies[0]!.result!.finalAnswer).toBe("A result");
+    expect(started[2]!.dependencies[0]!.result!.submission!.summary).toBe("A result");
     finishes.get("c")!(result("C result"));
     finishes.get("b")!(result("B result"));
     await until(() => started.length === 4);
@@ -162,11 +174,12 @@ describe("协调模型协议", () => {
       onEvent: event => events.push(event) });
     const report = await coordinator.run("分析项目", { runId: "parent" });
     expect(report.status).toBe("answered");
-    expect(report.totalTokens).toBe(40);
+    expect(report.totalTokens).toBe(50);
     expect(report.finalAnswer).toBe("最终结论");
     expect(requests[1].messages[1].content).toContain("<UNTRUSTED_MCP_DATA>");
     expect(events.map(event => event.type)).toEqual([
-      "team_start", "team_plan", "team_task", "team_task", "team_task", "team_task", "team_summary", "team_end",
+      "team_start", "team_plan", "team_task", "team_task", "team_task", "team_task",
+      "team_task", "team_task", "team_review", "team_summary", "team_end",
     ]);
   });
 
@@ -250,7 +263,8 @@ describe("真实 Agent 接入", () => {
           return { ...reply("", "tool_calls"), choices: [{ finish_reason: "tool_calls", message: { content: null,
             tool_calls: [{ id: "read", type: "function", function: { name: "filesystem__read_text_file", arguments: "{}" } }] } }] };
         }
-        return reply("已读取资料的结论");
+        return reply(JSON.stringify(request.messages[0].content.includes("你是独立复核者")
+          ? review([task("a"), task("b", ["a"])]) : submission("已读取资料的结论")));
       });
       const stack = { registry: source, config: { ...loadAgentConfig(), model: "test", summaryModel: "test" },
         sandboxRoot: dir, untrustedContext: "" } as AgentStack;
@@ -258,14 +272,14 @@ describe("真实 Agent 接入", () => {
         createChild: createTeamChildFactory(stack, { client, runDirectory: dir }),
       }).run("分析项目");
       expect(report.status).toBe("answered");
-      expect(reads).toBe(2);
-      expect(report.totalTokens).toBe(60);
+      expect(reads).toBe(3);
+      expect(report.totalTokens).toBe(80);
       expect(report.tasks[0]!.result!.taskId).not.toBe(report.tasks[1]!.result!.taskId);
       const bInitial = childRequests[2];
       expect(JSON.stringify(bInitial)).toContain("已读取资料的结论");
       expect(JSON.stringify(bInitial)).not.toContain("PRIVATE_TOOL_DETAIL");
-      expect((await fs.readdir(path.join(dir, "tasks"))).sort()).toEqual(["a.sqlite", "b.sqlite"]);
-      expect(await fs.readdir(path.join(dir, "traces"))).toHaveLength(2);
+      expect((await fs.readdir(path.join(dir, "tasks"))).sort()).toEqual(["review-r0-team-review.sqlite", "work-r0-a.sqlite", "work-r0-b.sqlite"]);
+      expect(await fs.readdir(path.join(dir, "traces"))).toHaveLength(3);
     } finally { await fs.rm(dir, { recursive: true, force: true }); }
   });
 

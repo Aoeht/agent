@@ -1,35 +1,33 @@
-import { z } from "zod";
+import { TeamPlanSchema, parseSubmission, parseReview, type Submission, type TeamReview,
+  type ReviewCheck, type TeamPlan, type TeamTask } from "./team_contracts";
+export { TeamPlanSchema } from "./team_contracts";
+export type { TeamPlan, TeamTask } from "./team_contracts";
 import type { AgentResult, ToolRuntime } from "./types";
 import type { RunBudgetLimits } from "./run_budget";
 import type { RunOutcome } from "./run_outcome";
 import type { Citation } from "./citations";
 
-const taskSchema = z.object({
-  id: z.string().regex(/^[a-z][a-z0-9_-]{0,39}$/),
-  role: z.enum(["researcher", "analyst", "reviewer"]),
-  goal: z.string().trim().min(1).max(4000),
-  dependsOn: z.array(z.string()).max(8),
-}).strict();
-export const TeamPlanSchema = z.object({ tasks: z.array(taskSchema).min(1).max(8) }).strict();
-export type TeamPlan = z.infer<typeof TeamPlanSchema>;
-export type TeamTask = TeamPlan["tasks"][number];
 export type ChildState = "pending" | "running" | "answered" | "failed" | "skipped" | "cancelled";
 export interface ChildResult extends RunOutcome {
   finalAnswer: string | null;
   totalTokens: number;
   toolCallsCount: number;
   citations: Citation[];
+  submission?: Submission;
+  review?: TeamReview;
 }
 export interface ChildRecord {
   parentRunId: string;
   task: TeamTask;
   state: ChildState;
+  round: number;
+  mode: "work" | "review";
   result?: ChildResult;
   reason?: string;
 }
 
 /** Validate the entire DAG before creating even one child. */
-export function validateTeamPlan(input: unknown, maxTasks = 6): TeamPlan {
+export function validateTeamPlan(input: unknown, maxTasks = 6, externalIds: ReadonlySet<string> = new Set()): TeamPlan {
   const plan = TeamPlanSchema.parse(input);
   if (plan.tasks.length > maxTasks) throw new Error(`子任务数量不能超过 ${maxTasks}`);
   const byId = new Map(plan.tasks.map(task => [task.id, task]));
@@ -40,7 +38,11 @@ export function validateTeamPlan(input: unknown, maxTasks = 6): TeamPlan {
     if (visiting.has(id)) throw new Error("任务依赖存在循环");
     if (visited.has(id)) return;
     const task = byId.get(id);
-    if (!task) throw new Error(`任务依赖不存在：${id}`);
+    if (!task) {
+      if (externalIds.has(id)) return;
+      throw new Error(`任务依赖不存在：${id}`);
+    }
+    if (new Set(task.checks.map(check => check.id)).size !== task.checks.length) throw new Error(`任务 ${id} 的检查项 ID 重复`);
     if (new Set(task.dependsOn).size !== task.dependsOn.length) throw new Error(`任务 ${id} 的依赖重复`);
     visiting.add(id);
     for (const dependency of task.dependsOn) visit(dependency);
@@ -81,6 +83,11 @@ export interface ChildExecution {
   dependencies: ChildRecord[];
   budget: RunBudgetLimits;
   runtime: ToolRuntime;
+  round: number;
+  mode: "work" | "review";
+  previous?: ChildRecord;
+  feedback: ReviewCheck[];
+  reviewTargets: ChildRecord[];
 }
 export interface ChildRunner {
   run(): Promise<AgentResult>;
@@ -96,7 +103,8 @@ export interface SchedulerOptions {
 
 export class AgentScheduler {
   constructor(private readonly options: SchedulerOptions, private readonly createChild: ChildFactory) {
-    for (const [key, value] of Object.entries(options)) {
+    for (const key of ["concurrency", "maxTasks", "childTokens", "childToolCalls"] as const) {
+      const value = options[key];
       if (!Number.isSafeInteger(value) || value < 1) throw new Error(`${key} 必须是正整数`);
     }
     if (options.concurrency > 8 || options.maxTasks > 8) throw new Error("第一版最多支持 8 个任务/并发槽位");
@@ -109,10 +117,16 @@ export class AgentScheduler {
     budget: TeamTokenBudget;
     signal: AbortSignal;
     onTask?: (record: ChildRecord) => void;
+    round?: number;
+    mode?: "work" | "review";
+    context?: ChildRecord[];
+    feedback?: ReviewCheck[];
   }): Promise<ChildRecord[]> {
-    const plan = validateTeamPlan(input.plan, this.options.maxTasks);
-    const records: ChildRecord[] = plan.tasks.map(task => ({ parentRunId: input.parentRunId, task, state: "pending" }));
-    const byId = new Map(records.map(record => [record.task.id, record]));
+    const context = structuredClone(input.context ?? []);
+    const plan = validateTeamPlan(input.plan, this.options.maxTasks, new Set(context.map(record => record.task.id)));
+    const records: ChildRecord[] = plan.tasks.map(task => ({ parentRunId: input.parentRunId, task, state: "pending",
+      round: input.round ?? 0, mode: input.mode ?? "work" }));
+    const byId = new Map([...context, ...records].map(record => [record.task.id, record]));
     const active = new Map<string, Promise<void>>();
     const notify = (record: ChildRecord) => input.onTask?.(structuredClone(record));
     const execute = async (record: ChildRecord, settle: (actual: number) => void) => {
@@ -127,6 +141,11 @@ export class AgentScheduler {
             maxToolCallsPerName: Math.min(12, this.options.childToolCalls) },
           // Do not leak parent task controllers or budget-extension callbacks to children.
           runtime: { signal: input.signal },
+          round: record.round, mode: record.mode,
+          ...(context.find(item => item.task.id === record.task.id)
+            ? { previous: context.find(item => item.task.id === record.task.id)! } : {}),
+          feedback: structuredClone((input.feedback ?? []).filter(check => check.taskId === record.task.id)),
+          reviewTargets: record.mode === "review" ? context : [],
         });
         const result = await child.run();
         actual = result.totalTokens;
@@ -138,6 +157,10 @@ export class AgentScheduler {
           : runStatus === "completed" && ["answered", "verified"].includes(taskStatus) && finalAnswer?.trim()
             ? "answered" : "failed";
         if (record.state !== "answered") record.reason = errorMessage ?? stopReason;
+        if (record.state === "answered") {
+          if (record.mode === "review") record.result.review = parseReview(finalAnswer!, context);
+          else record.result.submission = parseSubmission(finalAnswer!, record.task);
+        }
       } catch (error) {
         record.state = input.signal.aborted ? "cancelled" : "failed";
         record.reason = error instanceof Error ? error.message : String(error);
