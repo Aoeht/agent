@@ -298,18 +298,25 @@ export class TeamCoordinator {
         for (const record of batch) latest.set(record.task.id, record);
         releaseReview(0); releaseReview = undefined;
         controller.signal.throwIfAborted();
-        const reviewRecords = await scheduler.run({ parentRunId: runId, userGoal: goal, budget, round, mode: "review",
-          plan: { tasks: [{ id: "team-review", role: "reviewer", goal: "独立核对所有原始任务的交付要求和检查项，指出具体缺口及补查问题。",
-            dependsOn: [], deliverables: ["逐项复核报告"], checks: [{ id: "review", description: "覆盖全部原始检查项" }] }] },
-          context: report.plan.tasks.map(task => latest.get(task.id)!), signal: controller.signal, onTask });
-        const reviewed = reviewRecords[0]!;
-        report.reviews.push(reviewed);
-        emit({ type: "team_review", runId, round, task: reviewed });
+        let review: TeamReview | undefined;
+        let reviewed: ChildRecord | undefined;
+        // 复核是质量闭环的枢纽：失败先原样重试一次（预算允许），两次都失败才判 failed。
+        for (let attempt = 0; ; attempt++) {
+          const reviewRecords = await scheduler.run({ parentRunId: runId, userGoal: goal, budget, round, mode: "review",
+            plan: { tasks: [{ id: "team-review", role: "reviewer", goal: "独立核对所有原始任务的交付要求和检查项，指出具体缺口及补查问题。",
+              dependsOn: [], deliverables: ["逐项复核报告"], checks: [{ id: "review", description: "覆盖全部原始检查项" }] }] },
+            context: report.plan.tasks.map(task => latest.get(task.id)!), signal: controller.signal, onTask });
+          reviewed = reviewRecords[0]!;
+          report.reviews.push(reviewed);
+          emit({ type: "team_review", runId, round, task: reviewed });
+          review = reviewed.result?.review;
+          if (reviewed.state === "answered" && review) break;
+          if (attempt > 0 || controller.signal.aborted || budget.available < this.options.childTokens) break;
+        }
         controller.signal.throwIfAborted();
-        const review = reviewed.result?.review;
-        if (reviewed.state !== "answered" || !review) {
+        if (reviewed!.state !== "answered" || !review) {
           report.reviewStatus = "failed";
-          report.error = `独立复核未完成：${reviewed.reason ?? reviewed.state}`;
+          report.error = `独立复核未完成：${reviewed!.reason ?? reviewed!.state}`;
           break;
         }
         if (review.checks.every(check => check.verdict === "pass")) {

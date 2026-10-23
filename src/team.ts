@@ -37,9 +37,10 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       if (event.type === "team_summary") console.log("正在汇总子任务结果…");
     };
     console.log(`团队运行记录：${runDirectory}`);
+    const reviewModel = process.env.AGENT_TEAM_REVIEW_MODEL?.trim() || undefined;
     const coordinator = new TeamCoordinator({ model: stack.config.model, client, options, onEvent,
       capabilities: TEAM_CAPABILITIES + "\n当前已挂载工具会由宿主白名单筛选。",
-      createChild: createTeamChildFactory(stack, { client, runDirectory }),
+      createChild: createTeamChildFactory(stack, { client, runDirectory, ...(reviewModel ? { reviewModel } : {}) }),
     });
     const report = await coordinator.run(goal, { signal: controller.signal, runId });
     await fs.writeFile(path.join(runDirectory, "result.json"), JSON.stringify(report, null, 2), "utf8");

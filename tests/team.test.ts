@@ -517,4 +517,23 @@ describe("真实 Agent 接入", () => {
     expect(await new Response(process.stdout).text()).toContain("协调规划");
     expect(await process.exited).toBe(0);
   });
+
+  test("复核子 Agent 可配置独立模型，工作任务仍用主模型", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "team-model-"));
+    try {
+      const source = new ToolRegistry();
+      const usedModels: string[] = [];
+      const client = clientWith(async request => { usedModels.push(request.model); return reply("文本回答"); });
+      const stack = { registry: source, config: { ...loadAgentConfig(), model: "main-model", summaryModel: "main-model" },
+        sandboxRoot: dir, untrustedContext: "" } as AgentStack;
+      const factory = createTeamChildFactory(stack, { client, reviewModel: "review-model" });
+      const execution = (mode: "work" | "review"): ChildExecution => ({
+        parentRunId: "p", userGoal: "g", task: task("a"), dependencies: [], budget: { maxTotalTokens: 1000 },
+        runtime: { signal: new AbortController().signal }, round: 0, mode, feedback: [], reviewTargets: [],
+      });
+      await factory(execution("work")).run();
+      await factory(execution("review")).run();
+      expect(usedModels).toEqual(["main-model", "review-model"]);
+    } finally { await fs.rm(dir, { recursive: true, force: true }); }
+  });
 });

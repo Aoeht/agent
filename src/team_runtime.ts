@@ -41,6 +41,8 @@ export function createTeamRegistry(source: ToolRegistry, planStore: PlanStore, i
 export function createTeamChildFactory(stack: AgentStack, options: {
   client: OpenAI;
   runDirectory?: string;
+  /** 独立复核（含其格式修复）使用的模型；缺省与工作任务相同。配置不同模型可获得跨模型独立性。 */
+  reviewModel?: string;
 }): ChildFactory {
   return execution => {
     const repairing = Boolean(execution.repair);
@@ -50,7 +52,8 @@ export function createTeamChildFactory(stack: AgentStack, options: {
     const taskStore = new TaskStore(options.runDirectory
       ? path.join(options.runDirectory, "tasks", `${attemptId}.sqlite`) : undefined);
     const agent = new Agent({
-      model: stack.config.model, client: options.client, summaryModel: stack.config.summaryModel,
+      model: execution.mode === "review" ? (options.reviewModel ?? stack.config.model) : stack.config.model,
+      client: options.client, summaryModel: stack.config.summaryModel,
       temperature: stack.config.temperature,
       maxIterations: repairing ? 3
         : stack.config.maxIterations > 0 ? Math.min(stack.config.maxIterations, 24) : 24,

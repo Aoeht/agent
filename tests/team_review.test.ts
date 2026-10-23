@@ -215,6 +215,40 @@ describe("独立复核与最多两轮定向补查", () => {
     const report = await h.coordinator.run("test");
     expect(report.reviewStatus).toBe("failed"); expect(report.status).toBe("incomplete");
     expect(report.reworkRounds).toBe(0); expect(report.tasks).toHaveLength(1);
+    expect(report.reviews).toHaveLength(2); // 失败先原样重试一次，两次都失败才判 failed
+    expect(report.reviews.every(review => review.state === "failed")).toBe(true);
+  });
+
+  test("复核首次失败重试成功则闭环继续，保留两份复核记录", async () => {
+    const tasks = [task("auth")];
+    let attempts = 0;
+    const h = harness(tasks, e => {
+      if (e.mode !== "review") return answer(submission());
+      if (e.repair) return answer({ summary: "修复也失败", checks: [] });
+      attempts++;
+      return attempts === 1 ? answer({ summary: "首次复核坏格式", checks: [] }) : answer(review(tasks));
+    });
+    const report = await h.coordinator.run("test");
+    expect(report.status).toBe("answered");
+    expect(report.reviewStatus).toBe("passed");
+    expect(attempts).toBe(2);
+    expect(report.reviews.map(review => review.state)).toEqual(["failed", "answered"]);
+  });
+
+  test("复核重试受预算约束，余额不足时只跑一次", async () => {
+    const tasks = [task("auth")];
+    let attempts = 0;
+    const h = harness(tasks, e => {
+      if (e.mode !== "review") return answer(submission(), 10);
+      if (e.repair) return answer({ summary: "修复也失败", checks: [] }, 10);
+      attempts++;
+      return answer({ summary: "坏格式", checks: [] }, 2060); // 消耗掉几乎全部预算
+    }, { totalTokens: 2_100, childTokens: 50, coordinationTokens: 1_000 });
+    const report = await h.coordinator.run("test");
+    expect(report.reviewStatus).toBe("failed");
+    expect(report.status).toBe("incomplete");
+    expect(attempts).toBe(1);
+    expect(report.reviews).toHaveLength(1);
   });
 
   test("最终汇总只收到最新版本与最终反馈，不能混用旧结果", async () => {
