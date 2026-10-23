@@ -60,3 +60,6 @@ benchmarks/gaia-runs
 
 # Obsidian 编辑器本地配置（workspace.json 每次开笔记都会变）
 docs/.obsidian/
+
+# 模型观测本地数据库（257MB 二进制数据，不入库）
+docs/observations.sqlite3

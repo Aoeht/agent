@@ -1,0 +1,62 @@
+{
+  "meta": {
+    "date": "2026-10-20",
+    "host": "ly534-Precision-3660 (192.168.3.159)",
+    "gpu": "NVIDIA RTX A5000 24GB",
+    "driver": "595.99.02",
+    "cuda_driver": "13.2",
+    "model": "Qwen3.5-4B",
+    "dtype": "bfloat16",
+    "prompt_tokens": 322,
+    "max_tokens": 256,
+    "temperature": 0.0,
+    "ignore_eos": true,
+    "mem_fraction": 0.55,
+    "sglang": {"version": "0.5.16", "torch": "2.11.0+cu130", "backend": "flashinfer"},
+    "vllm": {"version": "0.18.1", "torch": "2.10.0+cu128", "backend": "FLASH_ATTN + torch.compile + full cudagraph"}
+  },
+  "runs": [
+    {
+      "framework": "sglang", "context_len": 8192, "startup_s": 34,
+      "single": {"concurrency": 1, "requests": 5, "failed": 0, "wall_s": 44.9,
+                 "ttft_ms_avg": 161.9, "ttft_ms_p50": 73.6,
+                 "per_req_tok_s_avg": 28.57, "per_req_tok_s_p50": 29.22, "agg_tok_s": 28.51},
+      "concurrent": {"concurrency": 8, "requests": 24, "failed": 0, "wall_s": 35.9,
+                     "ttft_ms_avg": 2325.2, "ttft_ms_p50": 83.6,
+                     "per_req_tok_s_avg": 24.97, "per_req_tok_s_p50": 28.5, "agg_tok_s": 171.15}
+    },
+    {
+      "framework": "vllm", "context_len": 8192, "startup_s": 123,
+      "single": {"concurrency": 1, "requests": 5, "failed": 0, "wall_s": 191.9,
+                 "ttft_ms_avg": 2801.8, "ttft_ms_p50": 415.4,
+                 "per_req_tok_s_avg": 6.7, "per_req_tok_s_p50": 6.87, "agg_tok_s": 6.67},
+      "concurrent": {"concurrency": 8, "requests": 24, "failed": 0, "wall_s": 127.76,
+                     "ttft_ms_avg": 1562.4, "ttft_ms_p50": 1810.2,
+                     "per_req_tok_s_avg": 6.01, "per_req_tok_s_p50": 6.01, "agg_tok_s": 48.09}
+    },
+    {
+      "framework": "sglang", "context_len": 4096,
+      "single": {"concurrency": 1, "requests": 5, "failed": 0, "wall_s": 46.49,
+                 "ttft_ms_avg": 98.3, "ttft_ms_p50": 77.7,
+                 "per_req_tok_s_avg": 27.53, "per_req_tok_s_p50": 27.57, "agg_tok_s": 27.53},
+      "concurrent": {"concurrency": 8, "requests": 24, "failed": 0, "wall_s": 38.45,
+                     "ttft_ms_avg": 2484.8, "ttft_ms_p50": 89.5,
+                     "per_req_tok_s_avg": 23.33, "per_req_tok_s_p50": 26.52, "agg_tok_s": 159.81}
+    },
+    {
+      "framework": "vllm", "context_len": 4096,
+      "single": {"concurrency": 1, "requests": 5, "failed": 0, "wall_s": 51.09,
+                 "ttft_ms_avg": 966.7, "ttft_ms_p50": 174.8,
+                 "per_req_tok_s_avg": 25.53, "per_req_tok_s_p50": 27.04, "agg_tok_s": 25.05},
+      "concurrent": {"concurrency": 8, "requests": 24, "failed": 0, "wall_s": 33.23,
+                     "ttft_ms_avg": 1057.6, "ttft_ms_p50": 1305.4,
+                     "per_req_tok_s_avg": 23.12, "per_req_tok_s_p50": 23.11, "agg_tok_s": 184.87}
+    }
+  ],
+  "vllm_variant_checks_ctx4096": [
+    {"label": "eager_flashinfer", "flags": ["--enforce-eager", "--attention-backend", "FLASHINFER"],
+     "single_tok_s": 24.45, "ttft_ms_p50": 173.2},
+    {"label": "default", "flags": [],
+     "single_tok_s": 24.42, "ttft_ms_p50": 177.2}
+  ]
+}
