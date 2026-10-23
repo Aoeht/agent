@@ -9,6 +9,9 @@
     "fmt": "bun fmt src/",
     "skill:add": "bunx skills add",
     "rag:ingest": "bun run src/rag/ingest.ts",
+    "rag:cases": "bun run src/rag/ingest_cases.ts",
+    "rag:prune": "bun run src/rag/prune_corpus.ts",
+    "rag:bench": "bun run src/rag/bench_index.ts",
     "rag:migrate-pg": "bun run src/rag/migrate_to_pg.ts",
     "test:rag": "bun run tests/rag.test.ts && bun run tests/rag_ingest.test.ts && bun run tests/rag_ranking.test.ts && bun run tests/rag_vector.test.ts && bun run tests/rag_pg.test.ts",
     "test": "bun  test"
