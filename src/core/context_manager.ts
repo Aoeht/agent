@@ -23,8 +23,41 @@ interface ContextConfig {
 /** 摘要连续失败多少次后放弃 LLM 摘要，改用硬截断兜底 */
 const MAX_SUMMARY_FAILURES = 3;
 
-/** 摘要输入的 token 上限：折叠量极大时先中段截断，别让摘要调用自己先爆上下文 */
+/** 摘要输入 token 上限：折叠量极大时先中段截断，别让摘要调用自己先爆上下文 */
 const SUMMARY_INPUT_TOKEN_CAP = 20_000;
+
+/** 摘要调用瞬时失败（连接/429/5xx）的重试次数，不含首次 */
+const SUMMARY_MAX_RETRIES = 2;
+
+/** 摘要重试的基础退避（指数 + 抖动） */
+const SUMMARY_RETRY_BASE_DELAY_MS = 500;
+
+/** 可重试：连接中断/超时、429 限流、5xx；模型不存在/输入超限等直接换模型 */
+function isRetryableSummaryError(error: unknown): boolean {
+  if (error instanceof OpenAI.APIConnectionError) return true;
+  const status = (error as { status?: unknown } | null)?.status;
+  return status === 429 || (typeof status === "number" && status >= 500);
+}
+
+/** 可被 AbortSignal 打断的退避等待：取消不该卡在重试的 timer 上 */
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error("摘要调用已取消"));
+      return;
+    }
+    let timer: ReturnType<typeof setTimeout>;
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new Error("摘要调用已取消"));
+    };
+    timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
 
 /** 一次工具组的定位：[start, end) 是它在 messages 里的下标区间（含 owner assistant）。 */
 interface ToolGroupSpan {
@@ -521,28 +554,71 @@ export class ContextManager {
     );
     const inputTokens = this.tokenCounter.estimateText(input, this.config.summaryModel);
 
-    const resp = await this.client.chat.completions.create(
-      {
-        model: this.config.summaryModel,
-        messages: [
-          { role: "system", content: previous ? SUMMARY_MERGE_PROMPT : SUMMARY_FRESH_PROMPT },
-          { role: "user", content: input },
-        ],
-        max_tokens: summaryMaxTokensFor(inputTokens),
-        temperature: 0,
-      },
-      signal ? { signal } : {}
+    return this.requestSummary(
+      previous ? SUMMARY_MERGE_PROMPT : SUMMARY_FRESH_PROMPT,
+      input,
+      inputTokens,
+      signal
     );
-    if (resp.usage) {
-      this.onSummaryUsage?.({
-        promptTokens: resp.usage.prompt_tokens ?? 0,
-        completionTokens: resp.usage.completion_tokens ?? 0,
-        totalTokens: resp.usage.total_tokens ?? 0,
-      });
+  }
+
+  /**
+   * 摘要模型调用：连接/429/5xx 退避重试；重试用尽或模型不可用（404、输入超限等）时
+   * 回退主模型一次，避免一次瞬时故障就把本 run 推进硬截断。
+   * 空摘要不重试同一模型（多半是输出格式问题），直接换下一个候选。
+   */
+  private async requestSummary(
+    systemPrompt: string,
+    input: string,
+    inputTokens: number,
+    signal?: AbortSignal
+  ): Promise<string> {
+    const messages = [
+      { role: "system" as const, content: systemPrompt },
+      { role: "user" as const, content: input },
+    ];
+    const candidates = [this.config.summaryModel, this.config.modelName].filter(
+      (model, index, all) => Boolean(model) && all.indexOf(model) === index
+    );
+    let lastError: unknown = new Error("没有可用的摘要模型");
+
+    for (const model of candidates) {
+      const retries = model === this.config.summaryModel ? SUMMARY_MAX_RETRIES : 0;
+      for (let attempt = 0; attempt <= retries; attempt++) {
+        if (signal?.aborted) throw lastError;
+        try {
+          const resp = await this.client.chat.completions.create(
+            {
+              model,
+              messages,
+              max_tokens: summaryMaxTokensFor(inputTokens),
+              temperature: 0,
+            },
+            signal ? { signal } : {}
+          );
+          if (resp.usage) {
+            this.onSummaryUsage?.({
+              promptTokens: resp.usage.prompt_tokens ?? 0,
+              completionTokens: resp.usage.completion_tokens ?? 0,
+              totalTokens: resp.usage.total_tokens ?? 0,
+            });
+          }
+          const content = resp.choices[0]?.message?.content?.trim();
+          if (content) return content;
+          lastError = new Error(`摘要模型 ${model} 返回空内容`);
+          break;
+        } catch (error) {
+          lastError = error;
+          if (signal?.aborted) throw error;
+          if (!isRetryableSummaryError(error) || attempt === retries) break;
+          const delayMs = Math.round(
+            SUMMARY_RETRY_BASE_DELAY_MS * 2 ** attempt + Math.random() * SUMMARY_RETRY_BASE_DELAY_MS
+          );
+          await abortableSleep(delayMs, signal);
+        }
+      }
     }
-    const content = resp.choices[0]?.message?.content?.trim();
-    // 空摘要不能作为折叠结果：水位会前进但内容丢了，必须当作失败走降级
-    if (!content) throw new Error("摘要模型返回空内容");
-    return content;
+
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
 }

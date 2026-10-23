@@ -302,6 +302,60 @@ describe("ContextManager", () => {
     const result = await cm.compress(overloadedMessages());
     expect(textOf(result[1])).toContain("历史上下文摘要");
   });
+
+  test("摘要瞬时失败（429）会退避重试，恢复后不降级", async () => {
+    let attempts = 0;
+    const client: any = {
+      chat: {
+        completions: {
+          create: async (params: any) => {
+            if (!params.tools) {
+              attempts++;
+              if (attempts === 1) throw Object.assign(new Error("rate limited"), { status: 429 });
+              return {
+                choices: [{ message: { content: "## 任务与目标\n重试后的摘要" } }],
+                usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+              };
+            }
+            return { choices: [{ message: { content: "好的" } }] };
+          },
+        },
+      },
+    };
+    const cm = makeManager(client, 500);
+    const result = await cm.compress(overloadedMessages());
+
+    expect(attempts).toBe(2);
+    expect(textOf(result[1])).toContain("重试后的摘要");
+  });
+
+  test("摘要模型不可用（404）时回退主模型一次", async () => {
+    const models: string[] = [];
+    const client: any = {
+      chat: {
+        completions: {
+          create: async (params: any) => {
+            if (!params.tools) {
+              models.push(params.model);
+              if (params.model === "summary-test") {
+                throw Object.assign(new Error("model not found"), { status: 404 });
+              }
+              return {
+                choices: [{ message: { content: "## 任务与目标\n主模型兜底摘要" } }],
+                usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+              };
+            }
+            return { choices: [{ message: { content: "好的" } }] };
+          },
+        },
+      },
+    };
+    const cm = makeManager(client, 500);
+    const result = await cm.compress(overloadedMessages());
+
+    expect(models).toEqual(["summary-test", "glm-4.6"]);
+    expect(textOf(result[1])).toContain("主模型兜底摘要");
+  });
 });
 
 // ───────────────────────── SessionStore 长期摘要 ─────────────────────────
