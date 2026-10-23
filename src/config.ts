@@ -6,7 +6,7 @@
  * 可用环境变量：
  *   AGENT_MODEL                    主模型（默认 glm-5.2）
  *   AGENT_SUMMARY_MODEL            历史压缩摘要用的模型（默认 qwen3.6-plus）
- *   AGENT_MAX_ITERATIONS           单次 run 的最大 ReAct 迭代数（默认 8）
+ *   AGENT_MAX_ITERATIONS           单次 run 的最大 ReAct 迭代数，0/负数表示不限（默认 0）
  *   AGENT_TEMPERATURE              采样温度（默认 0.1）
  *   AGENT_MAX_HISTORY_TURNS        跨进程续聊保留的完整对话轮数（默认 20）
  *   AGENT_MAX_TOTAL_TOKENS         单次 run 的 token 硬预算，<=0 表示不限（默认 500000）
@@ -91,7 +91,8 @@ export function loadAgentConfig(): AgentRunConfig {
   return {
     model: process.env.AGENT_MODEL ?? "glm-5.2",
     summaryModel: process.env.AGENT_SUMMARY_MODEL ?? "qwen3.6-plus",
-    maxIterations: intEnv("AGENT_MAX_ITERATIONS", 8),
+    // 默认不设轮数上限：长任务的完成度优先，花费由 token / 工具次数预算兜底
+    maxIterations: Math.max(0, intEnv("AGENT_MAX_ITERATIONS", 0)),
     temperature: floatEnv("AGENT_TEMPERATURE", 0.1),
     maxHistoryTurns: intEnv("AGENT_MAX_HISTORY_TURNS", 20),
     stream: boolEnv("AGENT_STREAM", true),

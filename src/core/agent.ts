@@ -74,6 +74,7 @@ interface AgentConfig {
   requireHostAcceptanceCriteria?: boolean;
   model: string;
   systemPrompt: string;
+  /** 单次 run 的最大 ReAct 迭代数；<=0 表示不设上限（token / 工具次数预算仍会兜底） */
   maxIterations?: number;
   temperature?: number;
   /** 单次 run 的硬预算（token / 墙钟 / 工具次数），越线时优雅停止并在结果里记 budgetStopped */
@@ -265,7 +266,7 @@ export class Agent {
     this.promptTemplate = promptTemplate;
     this.config = {
       planStore: new PlanStore(),
-      maxIterations: 10,
+      maxIterations: 0,
       maxHistoryTurns: 20,
       temperature: 0.1,
       stream: false,
@@ -334,10 +335,10 @@ export class Agent {
     return this.config.maxIterations;
   }
 
-  /** 调迭代上限：正整数才生效 */
+  /** 调迭代上限：0 表示不限，负数按不限处理；非整数忽略 */
   setMaxIterations(maxIterations: number): void {
-    if (!Number.isInteger(maxIterations) || maxIterations <= 0) return;
-    this.config.maxIterations = maxIterations;
+    if (!Number.isInteger(maxIterations)) return;
+    this.config.maxIterations = Math.max(0, maxIterations);
   }
 
   /**
@@ -637,7 +638,7 @@ export class Agent {
     };
 
     try {
-      while (iterations < this.config.maxIterations) {
+      while (this.config.maxIterations <= 0 || iterations < this.config.maxIterations) {
         // 外部取消：立即结束循环，返回已完成的部分
         if (runtime?.signal?.aborted) {
           return await finish("cancelled");
@@ -705,7 +706,8 @@ export class Agent {
                 ? "plan_incomplete" : "answer");
           // One bounded repair attempt; final acceptance rereads after all tools stop.
           if (reason === "answer" && !attemptedVerificationRepair && this.activeTask?.criteria.length &&
-              this.config.verificationRoot && iterations < this.config.maxIterations && !budget.check()) {
+              this.config.verificationRoot &&
+              (this.config.maxIterations <= 0 || iterations < this.config.maxIterations) && !budget.check()) {
             const checked = await verifyTask(this.config.verificationRoot, this.activeTask.criteria, runtime?.signal);
             if (checked.status === "failed" && !runtime?.signal?.aborted) {
               attemptedVerificationRepair = true;
@@ -864,10 +866,12 @@ export class Agent {
         this.events.emit("step", { step: currentStepInfo });
       }
 
-      // 强制收尾：迭代耗尽且未被取消时，禁用工具再要一次最终答案
+      // 强制收尾：显式迭代上限耗尽或预算越线且未被取消时，禁用工具再要一次最终答案
       // （模型可能一路上都在调用工具，从没机会输出正文；tool_choice:"none" 保证这次只出文本）
-      // 墙钟越线时不再追加收尾调用；token/工具次数越线仍收尾一次以拿到真实答案。
-      if (!runtime?.signal?.aborted && budget.shouldAttemptFinalize(budgetStopped ?? null)) {
+      // 默认不限轮数时这里只有预算越线才会进入；墙钟越线不再追加收尾，token/工具次数越线仍收尾一次。
+      const iterationCapReached = this.config.maxIterations > 0 && iterations >= this.config.maxIterations;
+      if (!runtime?.signal?.aborted && (iterationCapReached || budgetStopped) &&
+          budget.shouldAttemptFinalize(budgetStopped ?? null)) {
         iterations++;
         const forcedNote = budgetStopped
           ? `已触发运行预算上限（${budgetStopped}）。请不要再调用工具，立即基于以上已有信息给出最终答案。`

@@ -412,7 +412,7 @@ function readStdin(): Promise<string> {
 async function main() {
   const config = loadAgentConfig();
   console.log(
-    `⚙️  模型: ${config.model} · 摘要模型: ${config.summaryModel} · 迭代上限: ${config.maxIterations} · 流式: ${config.stream ? "开" : "关"}`
+    `⚙️  模型: ${config.model} · 摘要模型: ${config.summaryModel} · 迭代上限: ${config.maxIterations > 0 ? config.maxIterations : "不限"} · 流式: ${config.stream ? "开" : "关"}`
   );
 
   // 0-3. 技能发现 → 沙箱解析 → 工具注册表 → MCP 挂载 → 资源上下文：
@@ -420,6 +420,8 @@ async function main() {
   //      Confirmer（终端逐个询问 vs UI 审批桥）与日志前缀
   const stack = await createAgentStack({ confirmer: createCliConfirmer(), config });
   const { skills, registry: tools, planStore, mcp, untrustedContext } = stack;
+  // 提示词里的文件操作分工按实际挂载情况生成：server 下线时不再提不存在的工具
+  const filesystemTools = tools.list().map((def) => def.name).filter((name) => name.startsWith("filesystem__"));
 
   try {
     // 4. 多轮会话：先问续聊哪个（回车默认新会话），历史落盘到 .agent-sessions/<sessionId>.jsonl，重启进程后仍带着上文继续
@@ -463,7 +465,7 @@ async function main() {
     // 5. 工具就绪后再初始化 Agent（模型/预算/迭代数来自配置层，工具集为入口组装的实例）
     const agent = new Agent({
       model: startup.model ?? config.model,
-      systemPrompt: buildSystemPrompt(MCP_SANDBOX_DIR, skills),
+      systemPrompt: buildSystemPrompt(MCP_SANDBOX_DIR, skills, { filesystemTools }),
       maxIterations: config.maxIterations,
       temperature: config.temperature,
       maxHistoryTurns: config.maxHistoryTurns,

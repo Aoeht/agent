@@ -43,7 +43,7 @@ const helloEvent: Extract<ServerEvent, { type: "hello" }> = {
   sandboxRoot: "A:/ai_agent/.mcp-sandbox（演示）",
   contextWindow: 200_000,
   temperature: 0.1,
-  maxIterations: 8,
+  maxIterations: 0,
   promptHash: "a3f19c02e4b7",
   skills: ["qianwen-audio-tts", "qianwen-image-generation", "qianwen-video-generation"],
   mcpServers: [
@@ -406,7 +406,7 @@ export class MockTransport implements Transport {
     const current = this.sessionConfig.get(sessionId) ?? {
       model: helloEvent.model,
       temperature: 0.1,
-      maxIterations: 8,
+      maxIterations: 0,
     };
     const next = {
       configRevision: ++this.configRevision,

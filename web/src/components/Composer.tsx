@@ -55,7 +55,9 @@ export function Composer({
       setDraft(current => ({
         model: draftDirty.current.has("model") ? current.model : config.model ?? models[0] ?? "",
         temperature: draftDirty.current.has("temperature") ? current.temperature : String(config.temperature ?? 0.1),
-        maxIterations: draftDirty.current.has("maxIterations") ? current.maxIterations : String(config.maxIterations ?? 8),
+        maxIterations: draftDirty.current.has("maxIterations")
+          ? current.maxIterations
+          : (config.maxIterations ?? 0) > 0 ? String(config.maxIterations) : "",
       }));
     }
   }, [panelOpen, config.model, config.temperature, config.maxIterations, models]);
@@ -95,8 +97,9 @@ export function Composer({
     if (draftDirty.current.has("temperature") && Number.isFinite(temperature) && temperature !== (config.temperature ?? 0.1)) {
       payload.temperature = temperature;
     }
-    const maxIterations = Number.parseInt(draft.maxIterations, 10);
-    if (draftDirty.current.has("maxIterations") && Number.isInteger(maxIterations) && maxIterations !== (config.maxIterations ?? 8)) {
+    const maxIterations = draft.maxIterations.trim() === "" ? 0 : Number.parseInt(draft.maxIterations, 10);
+    if (draftDirty.current.has("maxIterations") && Number.isInteger(maxIterations) && maxIterations >= 0 &&
+        maxIterations !== (config.maxIterations ?? 0)) {
       payload.maxIterations = maxIterations;
     }
     setApplying(true);
@@ -153,11 +156,11 @@ export function Composer({
                 />
               </label>
               <label className="block">
-                <span className="text-xs text-ink-600">迭代上限</span>
+                <span className="text-xs text-ink-600">迭代上限（留空=不限）</span>
                 <input
                   type="number"
-                  min="1"
-                  max="50"
+                  min="0"
+                  placeholder="不限"
                   value={draft.maxIterations}
                   disabled={applying}
                   onChange={(e) => { draftDirty.current.add("maxIterations"); setDraft((d) => ({ ...d, maxIterations: e.target.value })); }}
@@ -166,7 +169,7 @@ export function Composer({
               </label>
             </div>
             <p className="mt-2 text-[11px] leading-4 text-ink-400">
-              模型切换会随会话保存；温度与迭代上限仅当前运行有效。
+              模型切换会随会话保存；温度与迭代上限仅当前运行有效。迭代上限留空表示不限，由 token / 工具次数预算兜底。
             </p>
             {configError && <p role="alert" className="mt-2 text-xs text-terra-500">{configError}</p>}
             <div className="mt-3 flex justify-end">

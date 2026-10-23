@@ -408,11 +408,13 @@ export class SessionManager {
     entry.registry = registry;
     entry.toolDefs = new Map(registry.list().map((def) => [def.name, def]));
     for (const name of entry.disabledTools ?? []) registry.unregister(name);
+    // 提示词里的文件操作分工按本会话实际启用的工具生成
+    const filesystemTools = registry.list().map((def) => def.name).filter((name) => name.startsWith("filesystem__"));
 
     const agent = new Agent({
       model: startup.model ?? config.model,
       // 沙箱根会话级可见（提示词里告诉模型工作区在哪）；切换沙箱后 Agent 整体重建
-      systemPrompt: buildSystemPrompt(sandboxRoot, skills),
+      systemPrompt: buildSystemPrompt(sandboxRoot, skills, { filesystemTools }),
       maxIterations: config.maxIterations,
       temperature: config.temperature,
       maxHistoryTurns: config.maxHistoryTurns,

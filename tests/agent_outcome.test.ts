@@ -90,6 +90,25 @@ describe("任务状态与运行终态", () => {
       success: false, stopReason: "iteration_limit", finalAnswer: "目前发现", totalTokens: 20, toolCallsCount: 1,
     });
   });
+  test("迭代上限为 0 时不设上限，多轮工具调用后仍能完成", async () => {
+    const { agent, requestCount } = setup([
+      reply(null, "tool_calls", { tool_calls: [call] }),
+      reply(null, "tool_calls", { tool_calls: [call] }),
+      reply(null, "tool_calls", { tool_calls: [call] }),
+      reply("完成"),
+    ], { tools: inspectionTool(), maxIterations: 0 });
+    expect(await agent.run("核查")).toMatchObject({
+      success: true, stopReason: "answer", finalAnswer: "完成", toolCallsCount: 3,
+    });
+    expect(requestCount()).toBe(4);
+  });
+  test("迭代上限 setter 接受 0（不限），负数归一为不限", () => {
+    const { agent } = setup([]);
+    agent.setMaxIterations(0);
+    expect(agent.maxIterations).toBe(0);
+    agent.setMaxIterations(-3);
+    expect(agent.maxIterations).toBe(0);
+  });
   test("预算耗尽后收尾仍未完成，保留预算原因", async () => {
     const { agent } = setup([reply(null, "tool_calls", { tool_calls: [call] }), reply("部分结论")],
       { tools: inspectionTool(), budget: { maxToolCalls: 1 } });

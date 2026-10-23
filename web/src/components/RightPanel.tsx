@@ -152,6 +152,8 @@ function Stats({ session }: { session: SessionUIState }) {
 function Env({ session, sandboxRoot, onChangeSandbox }: { session: SessionUIState | null; sandboxRoot?: string; onChangeSandbox: () => void }) {
   const meta = session?.meta;
   if (!meta) return <p className="text-xs text-ink-400">等待连接…</p>;
+  const maxIterations = session?.maxIterations ?? meta.maxIterations;
+  const iterationLabel = maxIterations !== undefined && maxIterations > 0 ? `${maxIterations} 轮` : "不限";
   return (
     <div className="space-y-2 text-sm">
       <div className="flex items-baseline justify-between gap-2">
@@ -168,7 +170,7 @@ function Env({ session, sandboxRoot, onChangeSandbox }: { session: SessionUIStat
         <div className="flex items-baseline justify-between gap-2">
           <span className="text-ink-400">温度 / 迭代</span>
           <span className="font-mono text-xs">
-            {session?.temperature ?? meta.temperature} · {session?.maxIterations ?? meta.maxIterations} 轮
+            {session?.temperature ?? meta.temperature} · {iterationLabel}
           </span>
         </div>
       )}
