@@ -5,6 +5,7 @@
   "private": true,
   "scripts": {
     "start": "bun run src/index.ts",
+    "team": "bun run src/team.ts",
     "typecheck": "tsc --noEmit",
     "fmt": "bun fmt src/",
     "skill:add": "bunx skills add",

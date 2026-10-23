@@ -25,6 +25,7 @@ bun run src/index.ts
 |---|---|
 | [使用说明书](docs/使用说明书.md) | 怎么装、怎么用、每个功能怎么触发、报错怎么办 |
 | [任务持久化与独立验收](docs/任务持久化与独立验收.md) | 跨回合任务与计划、真实文件验收、中断核对、新任务命令 |
+| [子 Agent 运行时](docs/子Agent运行时.md) | 宿主协调规划、按依赖调度独立子 Agent、并发预算、取消和汇总；独立 CLI 第一版 |
 | [现代ReAct入门篇](docs/现代ReAct入门篇.md) | agent 主循环、"想-做-看"、消息与历史管理 |
 | [MCP入门篇](docs/MCP入门篇.md) / [MCP进阶篇](docs/MCP进阶篇.md) | MCP 协议与本站客户端实现：工具/资源/提示模板、能力协商、安全策略 |
 | [现代RAG入门篇](docs/现代RAG入门篇.md) / [现代RAG进阶篇](docs/现代RAG进阶篇.md) | 知识库检索：分词、BM25、切块、混合检索 |
@@ -36,6 +37,7 @@ bun run src/index.ts
 
 ```bash
 bun run src/index.ts              # 交互模式
+bun run team "分析工作区代码并复核结论" # 运行时调度多个只读子 Agent
 echo "任务" | bun run src/index.ts # 单次模式（脚本/CI）
 bun run typecheck                 # 类型检查（改完必跑）
 bun test                          # 全量测试
@@ -48,6 +50,8 @@ bun run benchmarks/gaia_eval.ts --mock  # 评测链路自检（假模型、不�
 ```
 src/
   index.ts            入口：组装工具注册表、挂载 MCP、装配策略、REPL
+  team.ts             团队 CLI：协调规划 → 独立子 Agent 执行 → 汇总
+  team_runtime.ts     子 Agent 组装、工具白名单与团队配置
   config.ts           环境变量 → 运行配置
   core/               内核：Agent 主循环、工具注册表（registry）、上下文压缩、
                       会话存储/选择、运行预算、事件、轨迹、不可信数据围栏（untrusted）
