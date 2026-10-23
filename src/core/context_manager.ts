@@ -3,7 +3,12 @@ import OpenAI from "openai";
 import { Message } from "./types";
 import { CommercialTokenCounter } from "../utils/token_counter";
 import { wrapSummaryBlock } from "./untrusted";
-import { stripCitationPreamble } from "./citations";
+import {
+  stripCitationPreamble,
+  citationPreambleOf,
+  parseCitationLines,
+  renderCitationDigest,
+} from "./citations";
 import { requestSummaryWithRetry } from "./summary_call";
 import type { CompactEvent } from "./events";
 import {
@@ -238,7 +243,9 @@ export class ContextManager {
     const name = call?.function.name ?? "unknown_tool";
     const rawArgs = call?.function.arguments ?? "";
     const argsPreview = rawArgs.length > 120 ? `${rawArgs.slice(0, 120)}…` : rawArgs;
-    entry.stubText = `[工具输出已省略以节省上下文：原约 ${entry.original} tokens。此前调用了 ${name}(${argsPreview})。]`;
+    // 引用块是编号→来源的映射，不随工具正文一起省略；否则模型记忆里的 [n] 会失去出处
+    const preamble = citationPreambleOf(toolMsg.content);
+    entry.stubText = `[工具输出已省略以节省上下文：原约 ${entry.original} tokens。此前调用了 ${name}(${argsPreview})。]${preamble ? `\n\n${preamble}` : ""}`;
     entry.stubTokens = 4 + this.tokenCounter.estimateText(entry.stubText, this.config.modelName);
     return entry;
   }
@@ -392,10 +399,49 @@ export class ContextManager {
         }
       }
     }
+    const digest = this.droppedCitationDigest(messages, groups);
     return {
       stubbedEstimate: base - toolSaved + stubAdded,
-      droppedEstimate: base - groupSaved,
+      droppedEstimate: base - groupSaved + (digest ? this.estimateTokens(this.citationDigestBlock(digest)) : 0),
     };
+  }
+
+  /**
+   * 旧工具组被移出请求后，把其中引用块里的来源行收成一条索引，编号映射不随输出消失。
+   * 最新组仍原样保留在请求里，它的编号不重复列；没有可保留的来源时返回 null。
+   */
+  private droppedCitationDigest(messages: Message[], groups: ToolGroupSpan[]): string | null {
+    if (groups.length <= 1) return null;
+    const latest = groups[groups.length - 1]!;
+    const visible = new Set<number>();
+    for (let i = latest.start + 1; i < latest.end; i++) {
+      const message = messages[i]!;
+      if (message.role !== "tool") continue;
+      for (const entry of parseCitationLines(citationPreambleOf(message.content))) visible.add(entry.index);
+    }
+    const seen = new Set<number>();
+    const lines: string[] = [];
+    for (let g = 0; g < groups.length - 1; g++) {
+      const span = groups[g]!;
+      for (let i = span.start + 1; i < span.end; i++) {
+        const message = messages[i]!;
+        if (message.role !== "tool") continue;
+        for (const entry of parseCitationLines(citationPreambleOf(message.content))) {
+          if (visible.has(entry.index) || seen.has(entry.index)) continue;
+          seen.add(entry.index);
+          lines.push(entry.line);
+        }
+      }
+    }
+    return lines.length ? renderCitationDigest(lines) : null;
+  }
+
+  /** 索引块成对注入，保持 user/assistant 交替，与摘要块同构 */
+  private citationDigestBlock(text: string): Message[] {
+    return [
+      { role: "user", content: text },
+      { role: "assistant", content: "收到，以上来源编号保持不变，我会按编号引用。" },
+    ];
   }
 
   /** 阶梯 1 表示：旧工具组的 tool 输出替换为占位符，assistant 的调用与参数原样保留 */
@@ -412,13 +458,19 @@ export class ContextManager {
     });
   }
 
-  /** 阶梯 2 表示：旧工具组（owner + 响应）整体移出，只留最新一组 */
+  /** 阶梯 2 表示：旧工具组（owner + 响应）整体移出，只留最新一组；引用编号转成索引块留在 system 之后 */
   private buildWithoutOldGroups(messages: Message[], groups: ToolGroupSpan[]): Message[] {
     const dropped = new Set<number>();
     for (let g = 0; g < groups.length - 1; g++) {
       for (let i = groups[g]!.start; i < groups[g]!.end; i++) dropped.add(i);
     }
-    return messages.filter((_, index) => !dropped.has(index));
+    const kept = messages.filter((_, index) => !dropped.has(index));
+    const digest = this.droppedCitationDigest(messages, groups);
+    if (!digest) return kept;
+    let insertAt = 0;
+    while (insertAt < kept.length && kept[insertAt]!.role === "system") insertAt++;
+    kept.splice(insertAt, 0, ...this.citationDigestBlock(digest));
+    return kept;
   }
 
   /**
@@ -464,6 +516,9 @@ export class ContextManager {
         ]))
       );
     }
+    // 旧工具组被移出请求后，编号→来源的映射改由索引块承载
+    const digest = this.droppedCitationDigest(messages, parts.groups);
+    if (digest) head.push(...this.citationDigestBlock(digest));
     let convGroups = this.conversationGroups(parts.conv.slice(this.foldedCount));
     const latestSpan = parts.groups[parts.groups.length - 1];
     const latest = latestSpan ? messages.slice(latestSpan.start, latestSpan.end) : [];
@@ -518,6 +573,19 @@ export class ContextManager {
 
   /** 按 token 预算保头留尾、掐掉中段；给阶梯 3 复核裁剪最新工具输出用 */
   private clipToTokens(text: string, tokenCap: number): string {
+    // 引用块必须整块保留：裁剪后编号仍然要对得上来源，正文才是可以省的部分
+    const preamble = citationPreambleOf(text);
+    if (preamble) {
+      const body = stripCitationPreamble(text);
+      const preambleTokens = this.tokenCounter.estimateText(preamble, this.config.modelName);
+      return body
+        ? `${preamble}\n\n${this.clipPlainToTokens(body, Math.max(MIN_TOOL_OUTPUT_TOKENS, tokenCap - preambleTokens))}`
+        : preamble;
+    }
+    return this.clipPlainToTokens(text, tokenCap);
+  }
+
+  private clipPlainToTokens(text: string, tokenCap: number): string {
     const total = this.tokenCounter.estimateText(text, this.config.modelName);
     if (total <= tokenCap) return text;
     const headCap = Math.floor(tokenCap * 0.3);

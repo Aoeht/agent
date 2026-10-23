@@ -1,4 +1,6 @@
 // src/core/citations.ts
+import { wrapUntrustedData } from "./untrusted";
+
 /**
  * Grounded 引用：把工具结果里的证据来源升级成可溯源的引用。
  *
@@ -77,6 +79,44 @@ export function stripCitationPreamble(text: string): string {
   if (!text.startsWith("【引用来源】")) return text;
   const separator = text.indexOf("\n\n");
   return separator === -1 ? "" : text.slice(separator + 2);
+}
+
+/** 取 tool 消息头部的引用块（不含正文）；没有块返回空串。 */
+export function citationPreambleOf(text: string): string {
+  if (!text.startsWith("【引用来源】")) return "";
+  const separator = text.indexOf("\n\n");
+  return separator === -1 ? text : text.slice(0, separator);
+}
+
+export interface CitationIndexLine {
+  index: number;
+  /** 原样来源行：[n] title（url） */
+  line: string;
+}
+
+/** 从引用块里解析来源行（块由 renderCitationBlock 生成，格式固定） */
+export function parseCitationLines(preamble: string): CitationIndexLine[] {
+  const out: CitationIndexLine[] = [];
+  for (const raw of preamble.split("\n")) {
+    const line = raw.trim();
+    const match = /^\[(\d{1,3})\]\s+(.+)$/.exec(line);
+    if (!match) continue;
+    const index = Number(match[1]);
+    if (Number.isInteger(index) && index > 0) out.push({ index, line });
+  }
+  return out;
+}
+
+/**
+ * 压缩索引：旧工具组被移出请求后，编号→来源的映射不能跟着消失，
+ * 否则模型凭此前印象引用的 [n] 在最终回答里无从核对。编号沿用检索时的分配。
+ */
+export function renderCitationDigest(lines: string[]): string {
+  if (lines.length === 0) return "";
+  return [
+    "【引用来源索引】以下编号此前已分配，压缩后仍然有效；引用时直接使用对应编号，不要重新编号",
+    wrapUntrustedData("压缩前的工具来源清单", lines.join("\n")),
+  ].join("\n");
 }
 
 /** RAG 的证据块使用 Agent 已分配的来源编号，避免每次检索从 1 开始。 */

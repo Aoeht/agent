@@ -341,6 +341,115 @@ describe("ContextManager", () => {
     expect(events.some((e) => e.action === "stage3_clip")).toBe(false);
   });
 
+  test("阶梯 1 占位符保留引用块：旧输出正文省略，编号→来源映射还在", async () => {
+    const { client } = makeSummaryClient();
+    const cm = makeManager(client, 800);
+    const block = renderCitationBlock([{ index: 1, title: "旧来源", url: "https://old.example/", tool: "search_web" }]);
+    const oldBody = longText("旧正文", 120);
+    const messages: Message[] = [
+      { role: "system", content: "系统规则" },
+      { role: "user", content: "问题" },
+      toolCallMessage("s1"),
+      { role: "tool", tool_call_id: "s1", content: `${block}\n\n${oldBody}` },
+      toolCallMessage("s2"),
+      { role: "tool", tool_call_id: "s2", content: "最新输出：很小" },
+    ];
+
+    const result = await cm.compress(messages);
+    const joined = result.map(textOf).join("");
+
+    expect(joined).toContain("工具输出已省略");
+    expect(joined).toContain("[1] 旧来源（https://old.example/）");
+    expect(joined).not.toContain("旧正文第0行"); // 正文确实被省了
+    expect(joined).not.toContain("【引用来源索引】"); // 块还在原位，无需再做索引
+    expect(joined).toContain("最新输出");
+  });
+
+  test("阶梯 2 丢整组后，旧组的引用编号转成索引块保留", async () => {
+    const { client } = makeSummaryClient();
+    const cm = makeManager(client, 600);
+    const block = renderCitationBlock([{ index: 1, title: "旧来源", url: "https://old.example/", tool: "search_web" }]);
+    // 占位符省不掉巨型参数：只有整组丢掉（阶梯 2）才装得下
+    const hugeArgs = JSON.stringify({ q: longText("参数", 120) });
+    const oldOwner: Message = {
+      role: "assistant",
+      content: null,
+      tool_calls: [{ id: "t1", type: "function", function: { name: "search", arguments: hugeArgs } }],
+    };
+    const messages: Message[] = [
+      { role: "system", content: "系统规则" },
+      { role: "user", content: "问题" },
+      oldOwner,
+      { role: "tool", tool_call_id: "t1", content: `${block}\n\n旧输出正文：简短` },
+      toolCallMessage("t2"),
+      { role: "tool", tool_call_id: "t2", content: "最新输出：很小" },
+    ];
+
+    const result = await cm.compress(messages);
+    const joined = result.map(textOf).join("");
+
+    expect(joined).not.toContain("参数第0行");
+    expect(joined).not.toContain("旧输出正文");
+    expect(joined).toContain("【引用来源索引】");
+    expect(joined).toContain("[1] 旧来源（https://old.example/）");
+    expect(joined).toContain("最新输出");
+    // 索引块插在 system 之后、对话之前
+    expect(result[0]!.role).toBe("system");
+    expect(textOf(result[1])).toContain("【引用来源索引】");
+  });
+
+  test("阶梯 3 索引块：只列已不可见的编号，最新组已展示的不重复", async () => {
+    const { client } = makeSummaryClient();
+    const cm = makeManager(client, 500);
+    const oldBlock = renderCitationBlock([
+      { index: 1, title: "旧一", url: "https://old.example/1", tool: "search_web" },
+      { index: 2, title: "旧二", url: "https://old.example/2", tool: "search_web" },
+    ]);
+    const latestBlock = renderCitationBlock([
+      { index: 2, title: "新二", url: "https://old.example/2", tool: "search_web" },
+      { index: 3, title: "新三", url: "https://new.example/3", tool: "search_web" },
+    ]);
+    const messages: Message[] = [
+      { role: "system", content: "系统规则" },
+      { role: "user", content: "问题" },
+      toolCallMessage("g1"),
+      { role: "tool", tool_call_id: "g1", content: `${oldBlock}\n\n旧观察正文：简短` },
+      toolCallMessage("g2"),
+      { role: "tool", tool_call_id: "g2", content: `${latestBlock}\n\n${longText("大输出", 200)}` },
+    ];
+
+    const result = await cm.compress(messages);
+    const digest = result.find((m) => textOf(m).startsWith("【引用来源索引】"));
+
+    expect(digest).toBeDefined();
+    expect(textOf(digest)).toContain("[1] 旧一（https://old.example/1）");
+    expect(textOf(digest)).not.toContain("[2] 旧二"); // 最新组已经展示了 [2]
+    expect(textOf(digest)).not.toContain("[3] 新三"); // 最新组自己带着 [3]
+    expect(result.map(textOf).join("")).not.toContain("旧观察正文");
+  });
+
+  test("阶梯 3 裁剪最新工具输出时整块保留引用块", async () => {
+    const { client } = makeSummaryClient();
+    const cm = makeManager(client, 500);
+    const block = renderCitationBlock([{ index: 1, title: "当前来源", url: "https://now.example/", tool: "search_web" }]);
+    const body = `HEAD_START。${longText("大输出", 200)}TAIL_END`;
+    const messages: Message[] = [
+      { role: "system", content: "系统规则" },
+      { role: "user", content: "当前问题" },
+      toolCallMessage("c1"),
+      { role: "tool", tool_call_id: "c1", content: `${block}\n\n${body}` },
+    ];
+
+    const result = await cm.compress(messages);
+    const tool = result.find((m) => m.role === "tool")!;
+    const content = textOf(tool);
+
+    expect(content.startsWith("【引用来源】")).toBe(true);
+    expect(content).toContain("[1] 当前来源（https://now.example/）");
+    expect(content).toContain("此处省略约");
+    expect(content.endsWith("TAIL_END")).toBe(true);
+  });
+
   test("摘要调用失败不抛错也不丢消息：返回阶梯 2 的无损表示，连续失败后硬截断兜底", async () => {
     const { client } = makeSummaryClient(undefined, { failSummary: true });
     const cm = makeManager(client, 500);
