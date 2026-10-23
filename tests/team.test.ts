@@ -204,6 +204,33 @@ describe("团队计划与运行时调度", () => {
     expect(records[0]!.result!.finalAnswer).toContain("缺少交付");
   });
 
+  test("子任务墙钟上限取固定配置与团队剩余时间的较小值，逐任务现取", async () => {
+    const captured: Array<number | undefined> = [];
+    const launched: string[] = [];
+    const scheduler = new AgentScheduler({ ...schedulerOptions, concurrency: 1, childTimeoutMs: 5_000 }, execution => {
+      launched.push(execution.task.id);
+      captured.push(execution.budget.maxWallClockMs);
+      return { run: async () => result(execution.task.id), shutdown: async () => {} };
+    });
+    await scheduler.run({ parentRunId: "root", userGoal: "test",
+      plan: { tasks: [task("a"), task("b", ["a"])] }, budget: new TeamTokenBudget(1000), signal: signal(),
+      remainingTeamMs: () => (launched.includes("a") ? 3_000 : 12_000) }); // b 启动时团队只剩 3 秒
+    expect(captured).toEqual([5_000, 3_000]);
+  });
+
+  test("未配置固定上限时按团队剩余时间派生；两者都无则不设墙钟", async () => {
+    const captured: Array<number | undefined> = [];
+    const scheduler = new AgentScheduler(schedulerOptions, execution => {
+      captured.push(execution.budget.maxWallClockMs);
+      return { run: async () => result(execution.task.id), shutdown: async () => {} };
+    });
+    await scheduler.run({ parentRunId: "root", userGoal: "test", plan: { tasks: [task("a")] },
+      budget: new TeamTokenBudget(1000), signal: signal(), remainingTeamMs: () => 42_000 });
+    await scheduler.run({ parentRunId: "root", userGoal: "test", plan: { tasks: [task("b")] },
+      budget: new TeamTokenBudget(1000), signal: signal() });
+    expect(captured).toEqual([42_000, undefined]);
+  });
+
   test("复核输出不合法同样先走一次修复", async () => {
     const target: ChildRecord = { parentRunId: "root", task: task("a"), state: "answered", round: 0, mode: "work",
       result: { ...result("A result"), submission: submission("A result") } };
@@ -418,6 +445,24 @@ describe("协调模型协议", () => {
     }
   });
 
+  test("协调器为每个子任务（含复核）按团队剩余时间派生墙钟上限", async () => {
+    const captured: Array<number | undefined> = [];
+    const createChild: ChildFactory = execution => {
+      captured.push(execution.budget.maxWallClockMs);
+      return instant(execution);
+    };
+    const client = clientWith(async request => request.response_format
+      ? reply(JSON.stringify({ tasks: [task("a")] })) : reply("汇总"));
+    const report = await new TeamCoordinator({ model: "test", client, createChild, capabilities: "只读" }).run("test");
+    expect(report.status).toBe("answered");
+    expect(captured).toHaveLength(2); // 工作子任务 + 独立复核
+    for (const value of captured) {
+      expect(typeof value).toBe("number");
+      expect(value!).toBeGreaterThan(0);
+      expect(value!).toBeLessThanOrEqual(600_000);
+    }
+  });
+
   test("汇总失败保留子任务结论；部分失败不会被汇总文本变成成功", async () => {
     let calls = 0;
     const report = await new TeamCoordinator({ model: "test", capabilities: "只读", createChild: instant,
@@ -510,6 +555,9 @@ describe("真实 Agent 接入", () => {
 
   test("配置拒绝非法并发和预算；help 不初始化网络服务", async () => {
     expect(loadTeamOptions({}).concurrency).toBe(2);
+    expect(loadTeamOptions({}).childTimeoutMs).toBe(0);
+    expect(loadTeamOptions({ AGENT_TEAM_CHILD_TIMEOUT_MS: "30000" }).childTimeoutMs).toBe(30_000);
+    expect(() => loadTeamOptions({ AGENT_TEAM_CHILD_TIMEOUT_MS: "-1" })).toThrow();
     expect(() => loadTeamOptions({ AGENT_TEAM_CONCURRENCY: "0" })).toThrow();
     expect(() => loadTeamOptions({ AGENT_TEAM_CONCURRENCY: "2x" })).toThrow();
     expect(() => loadTeamOptions({ AGENT_TEAM_TOTAL_TOKENS: "100" })).toThrow();

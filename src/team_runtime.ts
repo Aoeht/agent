@@ -103,6 +103,7 @@ export function loadTeamOptions(env: NodeJS.ProcessEnv = process.env): TeamOptio
     AGENT_TEAM_CHILD_TOOL_CALLS: "childToolCalls", AGENT_TEAM_COORDINATION_TOKENS: "coordinationTokens",
     AGENT_TEAM_TIMEOUT_MS: "timeoutMs",
     AGENT_TEAM_MAX_REWORK_ROUNDS: "maxReworkRounds",
+    AGENT_TEAM_CHILD_TIMEOUT_MS: "childTimeoutMs",
   } as const;
   const input: Partial<TeamOptions> = {};
   for (const [name, key] of Object.entries(fields)) {

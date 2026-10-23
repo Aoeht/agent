@@ -102,6 +102,8 @@ export interface SchedulerOptions {
   maxTasks: number;
   childTokens: number;
   childToolCalls: number;
+  /** 单个子任务墙钟上限（毫秒）；0 或缺省表示仅按 remainingTeamMs 派生。 */
+  childTimeoutMs?: number;
 }
 
 export class AgentScheduler {
@@ -111,6 +113,9 @@ export class AgentScheduler {
       if (!Number.isSafeInteger(value) || value < 1) throw new Error(`${key} 必须是正整数`);
     }
     if (options.concurrency > 8 || options.maxTasks > 8) throw new Error("第一版最多支持 8 个任务/并发槽位");
+    if (options.childTimeoutMs !== undefined && (!Number.isSafeInteger(options.childTimeoutMs) || options.childTimeoutMs < 0)) {
+      throw new Error("childTimeoutMs 必须是非负整数");
+    }
   }
 
   async run(input: {
@@ -124,6 +129,8 @@ export class AgentScheduler {
     mode?: "work" | "review";
     context?: ChildRecord[];
     feedback?: ReviewCheck[];
+    /** 团队剩余毫秒数；每次启动子任务时现取，用于派生子任务墙钟上限。 */
+    remainingTeamMs?: () => number;
   }): Promise<ChildRecord[]> {
     const context = structuredClone(input.context ?? []);
     const plan = validateTeamPlan(input.plan, this.options.maxTasks, new Set(context.map(record => record.task.id)));
@@ -137,11 +144,18 @@ export class AgentScheduler {
       let actual = this.options.childTokens;
       try {
         input.signal.throwIfAborted();
+        // 每个子任务都带墙钟上限：取固定配置与团队剩余时间的较小值，防止单个慢任务吃满全局超时。
+        const wallClockMs = Math.min(
+          this.options.childTimeoutMs && this.options.childTimeoutMs > 0 ? this.options.childTimeoutMs : Number.POSITIVE_INFINITY,
+          input.remainingTeamMs ? Math.max(1_000, Math.floor(input.remainingTeamMs())) : Number.POSITIVE_INFINITY);
+        const budgetLimits: RunBudgetLimits = { maxTotalTokens: this.options.childTokens,
+          maxToolCalls: this.options.childToolCalls,
+          maxToolCallsPerName: Math.min(12, this.options.childToolCalls) };
+        if (Number.isFinite(wallClockMs)) budgetLimits.maxWallClockMs = wallClockMs;
         const execution: ChildExecution = {
           parentRunId: input.parentRunId, userGoal: input.userGoal, task: structuredClone(record.task),
           dependencies: record.task.dependsOn.map(id => structuredClone(byId.get(id)!)),
-          budget: { maxTotalTokens: this.options.childTokens, maxToolCalls: this.options.childToolCalls,
-            maxToolCallsPerName: Math.min(12, this.options.childToolCalls) },
+          budget: budgetLimits,
           // Do not leak parent task controllers or budget-extension callbacks to children.
           runtime: { signal: input.signal },
           round: record.round, mode: record.mode,

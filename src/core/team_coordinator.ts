@@ -18,6 +18,8 @@ export const TeamOptionsSchema = z.object({
   timeoutMs: z.number().int().min(1).max(3_600_000).default(600_000),
   maxReworkRounds: z.number().int().min(0).max(2).default(2),
   retryBaseDelayMs: z.number().int().min(0).max(60_000).default(500),
+  /** 单个子任务的墙钟上限（毫秒）；0 表示不设固定值，仅受团队剩余时间约束。 */
+  childTimeoutMs: z.number().int().min(0).max(3_600_000).default(0),
 }).strict().refine(value => value.totalTokens >= 2 * value.childTokens + 2 * value.coordinationTokens,
   "总预算至少要容纳规划、汇总、一个子任务和独立复核");
 export type TeamOptions = z.infer<typeof TeamOptionsSchema>;
@@ -182,6 +184,8 @@ export class TeamCoordinator {
     if (input.signal?.aborted) onAbort();
     else input.signal?.addEventListener("abort", onAbort, { once: true });
     let timedOut = false;
+    const startedAt = Date.now();
+    const remainingTeamMs = () => this.options.timeoutMs - (Date.now() - startedAt);
     const timer = setTimeout(() => { timedOut = true; controller.abort(new Error("团队运行超时")); }, this.options.timeoutMs);
     const budget = new TeamTokenBudget(this.options.totalTokens);
     const report: TeamReport = { runId, goal, status: "failed", tasks: [], reviews: [], reworkRounds: 0,
@@ -293,7 +297,7 @@ export class TeamCoordinator {
           emit({ type: "team_rework", runId, round, taskIds: nextPlan.tasks.map(task => task.id), feedback });
         }
         const batch = await scheduler.run({ parentRunId: runId, userGoal: goal, plan: nextPlan, budget,
-          round, context: [...latest.values()], feedback, signal: controller.signal, onTask });
+          round, context: [...latest.values()], feedback, signal: controller.signal, onTask, remainingTeamMs });
         report.tasks.push(...batch);
         for (const record of batch) latest.set(record.task.id, record);
         releaseReview(0); releaseReview = undefined;
@@ -305,7 +309,7 @@ export class TeamCoordinator {
           const reviewRecords = await scheduler.run({ parentRunId: runId, userGoal: goal, budget, round, mode: "review",
             plan: { tasks: [{ id: "team-review", role: "reviewer", goal: "独立核对所有原始任务的交付要求和检查项，指出具体缺口及补查问题。",
               dependsOn: [], deliverables: ["逐项复核报告"], checks: [{ id: "review", description: "覆盖全部原始检查项" }] }] },
-            context: report.plan.tasks.map(task => latest.get(task.id)!), signal: controller.signal, onTask });
+            context: report.plan.tasks.map(task => latest.get(task.id)!), signal: controller.signal, onTask, remainingTeamMs });
           reviewed = reviewRecords[0]!;
           report.reviews.push(reviewed);
           emit({ type: "team_review", runId, round, task: reviewed });
