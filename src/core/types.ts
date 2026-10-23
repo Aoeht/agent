@@ -1,6 +1,6 @@
 import { z } from "zod";
 import OpenAI from "openai";
-import type { BudgetStopReason } from "./run_budget";
+import type { BudgetExtensionRequest, BudgetStopReason } from "./run_budget";
 import type { Citation } from "./citations";
 import type { RunOutcome } from "./run_outcome";
 import type { AcceptanceCriterion, TaskRecord } from "./task_types";
@@ -26,6 +26,11 @@ export interface ToolRuntime {
    * Web 实现走 human_input_request 事件（bridge.askUser）。
    */
   askUser?: (prompt: string, signal: AbortSignal) => Promise<string | null>;
+  /**
+   * 运行预算越线时向用户申请追加额度：返回 true 表示同意，Agent 调高限额后原地继续本轮
+   * （工具上下文都还在）。未提供或返回 false 时按原逻辑优雅收尾。
+   */
+  requestBudgetExtension?: (request: BudgetExtensionRequest) => Promise<boolean>;
   /** 单次 run 内失败的浏览器网址，防止模型反复打断用户验证。 */
   browserFailures?: Set<string>;
 }

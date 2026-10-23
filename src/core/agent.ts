@@ -550,6 +550,29 @@ export class Agent {
     return result;
   }
 
+  /**
+   * 预算越线后询问用户是否追加额度；同意则调高限额并原地继续本轮——工具结果都还在上下文里，
+   * 比让用户重新发一句"继续"更连贯。交互通道缺失（一次性模式 / Web 未接）时保持原收尾逻辑。
+   */
+  private async askBudgetExtension(
+    reason: BudgetStopReason,
+    budget: RunBudget,
+    runtime?: ToolRuntime
+  ): Promise<boolean> {
+    const ask = runtime?.requestBudgetExtension;
+    if (!ask) return false;
+    const next = budget.proposeExtension(reason);
+    const approved = await ask({
+      reason,
+      used: { totalTokens: budget.totalTokens, toolCalls: budget.toolCalls, elapsedMs: budget.elapsedMs },
+      current: budget.limitsSnapshot(),
+      next,
+    });
+    if (!approved) return false;
+    budget.applyExtension(next);
+    return true;
+  }
+
   // runtime.signal 会透传到 LLM 请求与工具调用（含 MCP），支持外部取消
   private async runLoop(userMessage: string, runtime?: ToolRuntime): Promise<AgentResult> {
     this.contextManager.reset();
@@ -658,9 +681,15 @@ export class Agent {
           return await finish("cancelled");
         }
 
-        // 运行预算越线：优雅停止，交给后面的强制收尾拿一个真实答案
+        // 运行预算越线：先问用户是否追加；不同意才优雅停止，交给后面的强制收尾拿一个真实答案
         budgetStopped = budget.check() ?? budgetStopped;
-        if (budgetStopped) break;
+        if (budgetStopped) {
+          if (await this.askBudgetExtension(budgetStopped, budget, runtime)) {
+            budgetStopped = undefined;
+            continue;
+          }
+          break;
+        }
 
         iterations++;
 
@@ -770,16 +799,16 @@ export class Agent {
         };
 
         // 先按计划顺序做预算裁决：超限的调用不执行，但补一条错误 tool 观测，保证 tool_calls 与响应成对
-        const planned: Array<{ toolCall: ToolCall; blocked: boolean }> = [];
+        const planned: Array<{ toolCall: ToolCall; blockedBy: BudgetStopReason | null }> = [];
         for (const toolCall of validToolCalls) {
-          const blocked = budget.check(toolCall.function.name) !== null;
-          planned.push({ toolCall, blocked });
-          if (!blocked) budget.recordToolCall(toolCall.function.name);
+          const blockedBy = budget.check(toolCall.function.name);
+          planned.push({ toolCall, blockedBy });
+          if (blockedBy === null) budget.recordToolCall(toolCall.function.name);
         }
-        const allowedToolCalls = planned.filter((p) => !p.blocked).map((p) => p.toolCall);
+        const allowedToolCalls = planned.filter((p) => p.blockedBy === null).map((p) => p.toolCall);
         const blockedResults = new Map<string, string>(
           planned
-            .filter((p) => p.blocked)
+            .filter((p) => p.blockedBy !== null)
             .map((p) => [p.toolCall.id, JSON.stringify({ error: "运行预算已用尽，未执行该工具调用" })])
         );
 
@@ -803,13 +832,16 @@ export class Agent {
 
         const toolResults = planned.map((p) => ({
           toolCall: p.toolCall,
-          toolResult: p.blocked
+          toolResult: p.blockedBy !== null
             ? blockedResults.get(p.toolCall.id)!
             : executed.get(p.toolCall.id)!,
         }));
 
         // 若本轮有调用被预算拦下，收尾循环：下一轮循环顶会检出并停止
-        if (blockedResults.size > 0) budgetStopped = budget.check() ?? "max_tool_calls";
+        if (blockedResults.size > 0) {
+          // check() 不带工具名时看不到 per-name 上限，沿用刚才真正拦下调用的原因
+          budgetStopped = budget.check() ?? planned.find((p) => p.blockedBy !== null)?.blockedBy ?? "max_tool_calls";
+        }
 
         for (const { toolCall, toolResult } of toolResults) {
           // 🔗 Grounded 引用：解析工具结果中的证据来源，分配全局编号并注册到本轮引用表

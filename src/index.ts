@@ -19,6 +19,7 @@ import { CheckpointStore } from "./core/checkpoint_store";
 import { handleRewindCommand } from "./core/rewind_command";
 import { AgentResult, StepInfo, ToolRuntime } from "./core/types";
 import { STOP_REASON_LABELS } from "./core/run_outcome";
+import { acceptedBudgetExtension, formatBudgetExtensionPrompt } from "./core/budget_prompt";
 import { formatHistoryReplay } from "./core/session_replay";
 
 /**
@@ -138,8 +139,8 @@ type SessionNamer = (
  * 失败（模型报错 / 空标题）就什么都不写 —— 菜单会回退到首条用户消息预览，
  * 不留一个半成品的名字，也不让起名失败影响本回合的结果。
  */
-function createSessionNamer(store: SessionStore, hasHistory: boolean): SessionNamer {
-  let pending = !hasHistory;
+function createSessionNamer(store: SessionStore, isFirstTurn: boolean): SessionNamer {
+  let pending = isFirstTurn;
   return async (agent, userInput, result, signal) => {
     if (!pending || userInput === "/task" || userInput.startsWith("/task status") || userInput.startsWith("/task resolve")) return;
     const answer = result.finalAnswer?.trim();
@@ -153,20 +154,24 @@ function createSessionNamer(store: SessionStore, hasHistory: boolean): SessionNa
 }
 
 /** 跑一个回合并打印结果；返回 AgentResult 供调用方决定退出码/继续循环。 */
+type TurnChannels = Pick<ToolRuntime, "requestHuman" | "askUser" | "requestBudgetExtension"> & {
+  nameSession?: SessionNamer;
+};
+
 async function runTurn(
   agent: Agent,
   input: string,
   signal: AbortSignal,
   ui: TurnUi,
-  requestHuman?: ToolRuntime["requestHuman"],
-  askUser?: ToolRuntime["askUser"],
-  nameSession?: SessionNamer
+  channels: TurnChannels = {}
 ): Promise<AgentResult> {
+  const { requestHuman, askUser, requestBudgetExtension, nameSession } = channels;
   ui.streamState.active = false;
   const result = await agent.run(input, {
     signal,
     ...(requestHuman ? { requestHuman } : {}),
     ...(askUser ? { askUser } : {}),
+    ...(requestBudgetExtension ? { requestBudgetExtension } : {}),
   });
   if (ui.streamState.active) process.stdout.write("\n");
 
@@ -225,7 +230,7 @@ async function runOneShot(
   };
   process.on("SIGINT", onSigint);
   try {
-    const result = await runTurn(agent, input, controller.signal, ui, undefined, undefined, nameSession);
+    const result = await runTurn(agent, input, controller.signal, ui, { nameSession });
     // 后台记忆更新等它落地再退：一次性模式没有"下一轮"来收账，摘要写盘必须先于进程退出
     await agent.flushSummary();
     if (!result.success) process.exitCode = 1;
@@ -370,7 +375,22 @@ async function runRepl(
       const controller = new AbortController();
       activeController = controller;
       try {
-        await runTurn(agent, input, controller.signal, ui, (prompt, signal) => lines.next(prompt, signal), (prompt, signal) => lines.next(prompt, signal));
+        await runTurn(agent, input, controller.signal, ui, {
+          requestHuman: (prompt, signal) => lines.next(prompt, signal),
+          askUser: (prompt, signal) => lines.next(prompt, signal),
+          nameSession,
+          requestBudgetExtension: async (request) => {
+            const answer = await lines.next(
+              `\n⚠️ ${formatBudgetExtensionPrompt(request)} [y/N] `,
+              controller.signal
+            );
+            const approved = acceptedBudgetExtension(answer);
+            console.log(approved
+              ? "💰 已追加运行预算，本轮继续。"
+              : "⏹️  未追加预算，本轮按预算上限收尾。");
+            return approved;
+          },
+        });
       } catch (error) {
         console.error(`\n❌ 本回合失败: ${error instanceof Error ? error.message : String(error)}`);
       } finally {

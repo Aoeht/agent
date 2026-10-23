@@ -116,6 +116,43 @@ describe("任务状态与运行终态", () => {
       success: false, stopReason: "budget_exceeded", budgetStopped: "max_tool_calls", finalAnswer: "部分结论",
     });
   });
+  test("预算越线先询问追加：同意后原地继续，工具上下文不丢", async () => {
+    const { agent, requestCount, payloads } = setup(
+      [reply(null, "tool_calls", { tool_calls: [call] }), reply("完成")],
+      { tools: inspectionTool(), budget: { maxToolCalls: 1 } }
+    );
+    const asks: any[] = [];
+    const result = await agent.run("核查", {
+      requestBudgetExtension: async (request) => { asks.push(request); return true; },
+    });
+    expect(result).toMatchObject({ success: true, stopReason: "answer", finalAnswer: "完成" });
+    expect(asks).toEqual([{
+      reason: "max_tool_calls",
+      used: { totalTokens: 10, toolCalls: 1, elapsedMs: expect.any(Number) },
+      current: { maxToolCalls: 1 },
+      next: { maxToolCalls: 2 },
+    }]);
+    expect(requestCount()).toBe(2);
+    // 追加后是同一轮接着跑：第二请求里仍带着上一批 tool 结果
+    expect(payloads[1]!.messages.some((message: any) => message.role === "tool")).toBe(true);
+  });
+  test("拒绝追加时保持原有预算收尾", async () => {
+    const { agent } = setup([reply(null, "tool_calls", { tool_calls: [call] }), reply("部分结论")],
+      { tools: inspectionTool(), budget: { maxToolCalls: 1 } });
+    expect(await agent.run("核查", { requestBudgetExtension: async () => false })).toMatchObject({
+      success: false, stopReason: "budget_exceeded", budgetStopped: "max_tool_calls", finalAnswer: "部分结论",
+    });
+  });
+  test("单个工具次数越线时，追加原因记 per-name 而不是笼统的工具总次数", async () => {
+    const { agent } = setup(
+      [reply(null, "tool_calls", { tool_calls: [call] }), reply(null, "tool_calls", { tool_calls: [{ ...call, id: "c2" }] }), reply("部分结论")],
+      { tools: inspectionTool(), budget: { maxToolCallsPerName: 1 } }
+    );
+    const asks: any[] = [];
+    const result = await agent.run("核查", { requestBudgetExtension: async (request) => { asks.push(request); return false; } });
+    expect(asks[0]).toMatchObject({ reason: "max_tool_calls_per_name", next: { maxToolCallsPerName: 2 } });
+    expect(result).toMatchObject({ stopReason: "budget_exceeded", budgetStopped: "max_tool_calls_per_name" });
+  });
   test("运行前取消也发一个 run_end，不调用模型", async () => {
     const { agent, events, requestCount } = setup([]);
     const result = await agent.run("问", { signal: AbortSignal.abort() });

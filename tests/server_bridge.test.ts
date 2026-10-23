@@ -107,6 +107,33 @@ describe("UiBridge", () => {
     expect(await second).toBeNull();
   });
 
+  test("requestBudgetExtension：accept → 追加，decline/无会话 → 不追加", async () => {
+    const { emit, events } = fakeEmit();
+    const bridge = new UiBridge(emit, 5_000);
+
+    const approved = inRunSession("s1", () =>
+      bridge.requestBudgetExtension("追加预算继续？", new AbortController().signal)
+    );
+    const acceptEvent = events.at(-1)!.event;
+    expect(acceptEvent.type).toBe("approval_request");
+    if (acceptEvent.type === "approval_request") {
+      expect(acceptEvent.source).toBe("运行预算");
+      bridge.resolveApproval(acceptEvent.id, { action: "accept" });
+    }
+    expect(await approved).toBe(true);
+
+    const declined = inRunSession("s1", () =>
+      bridge.requestBudgetExtension("追加预算继续？", new AbortController().signal)
+    );
+    const declineEvent = events.at(-1)!.event;
+    if (declineEvent.type === "approval_request") {
+      bridge.resolveApproval(declineEvent.id, { action: "decline" });
+    }
+    expect(await declined).toBe(false);
+
+    expect(await bridge.requestBudgetExtension("追加预算继续？", new AbortController().signal)).toBe(false);
+  });
+
   test("elicitation 归因：ALS 缺席时按 server 在飞调用路由；多会话并存宁可 decline", async () => {
     const { emit, events } = fakeEmit();
     const bridge = new UiBridge(emit, 5_000);

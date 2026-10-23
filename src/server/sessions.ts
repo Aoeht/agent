@@ -16,6 +16,7 @@ import type { ServerRuntime } from "./runtime";
 import type { ServerEvent, SessionConfigEvent, SessionDetailDTO, SessionSummaryDTO, StatusDTO, Citation } from "./protocol";
 import { RunOutcomeSchema } from "./protocol";
 import { TaskStore } from "../core/task_store";
+import { formatBudgetExtensionPrompt } from "../core/budget_prompt";
 import path from "node:path";
 
 /**
@@ -490,6 +491,8 @@ export class SessionManager {
       signal,
       requestHuman: this.options.bridge.requestHuman,
       askUser: this.options.bridge.askUser,
+      requestBudgetExtension: (request) =>
+        this.options.bridge.requestBudgetExtension(formatBudgetExtensionPrompt(request), signal),
     };
 
     let result: AgentResult;

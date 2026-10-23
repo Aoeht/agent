@@ -74,6 +74,21 @@ export class UiBridge {
   };
 
   /**
+   * ToolRuntime.requestBudgetExtension 通道：预算用尽时询问是否追加。
+   * 走审批卡语义：accept → 追加并继续本轮，decline / 超时 / run 中止 → 不追加。
+   */
+  readonly requestBudgetExtension = async (prompt: string, signal: AbortSignal): Promise<boolean> => {
+    const sessionId = this.sessionFor();
+    if (sessionId === null) return false;
+    const decision = await this.askApproval(
+      sessionId,
+      { serverId: "运行预算", message: prompt.trim() },
+      signal
+    );
+    return decision.action === "accept";
+  };
+
+  /**
    * 标记某 server 连接上有某会话的在飞调用（由每会话注册表的包装中间件在
    * MCP 工具执行前后调用）。elicitation 从传输层回调进来时 ALS 已丢失，靠它归因。
    */

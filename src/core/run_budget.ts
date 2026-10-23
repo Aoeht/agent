@@ -17,6 +17,14 @@ export type BudgetStopReason =
   | "max_tool_calls_per_name"
   | "max_wall_clock";
 
+/** 越线时向用户申请追加额度：used 是当前消耗，current/next 是追加前后的限额 */
+export interface BudgetExtensionRequest {
+  reason: BudgetStopReason;
+  used: { totalTokens: number; toolCalls: number; elapsedMs: number };
+  current: RunBudgetLimits;
+  next: RunBudgetLimits;
+}
+
 /**
  * 运行预算跟踪器：Agent 在每步前后记账，越线时给出停止原因。
  * 与 AbortSignal 不同，预算是「累计消耗」而非「外部中断」的语义。
@@ -27,8 +35,10 @@ export class RunBudget {
   readonly toolCallsByName: Record<string, number> = {};
 
   private readonly startedAt: number;
+  private limits: RunBudgetLimits;
 
-  constructor(private readonly limits: RunBudgetLimits = {}, private readonly now: () => number = () => Date.now()) {
+  constructor(limits: RunBudgetLimits = {}, private readonly now: () => number = () => Date.now()) {
+    this.limits = { ...limits };
     this.startedAt = this.now();
   }
 
@@ -61,6 +71,39 @@ export class RunBudget {
       if ((this.toolCallsByName[upcomingToolName] ?? 0) >= maxToolCallsPerName) return "max_tool_calls_per_name";
     }
     return null;
+  }
+
+  /** 当前限额快照（追加预算前展示给用户） */
+  limitsSnapshot(): RunBudgetLimits {
+    return { ...this.limits };
+  }
+
+  /**
+   * 越线后追加一个与原上限等量的额度（墙钟按已用时长追加），返回追加后的限额快照。
+   * 只计算不生效：用户确认后再 applyExtension，拒绝时原限额保持不变。
+   */
+  proposeExtension(reason: BudgetStopReason): RunBudgetLimits {
+    const next = { ...this.limits };
+    switch (reason) {
+      case "max_total_tokens":
+        next.maxTotalTokens = this.totalTokens + (this.limits.maxTotalTokens ?? Math.max(1, this.totalTokens));
+        break;
+      case "max_tool_calls":
+        next.maxToolCalls = this.toolCalls + (this.limits.maxToolCalls ?? Math.max(1, this.toolCalls));
+        break;
+      case "max_tool_calls_per_name":
+        // 逐个工具名分不清是哪一个触发的（check 未传名字），统一再给一整份额度
+        next.maxToolCallsPerName = Math.max(1, (this.limits.maxToolCallsPerName ?? 1) * 2);
+        break;
+      case "max_wall_clock":
+        next.maxWallClockMs = this.elapsedMs + (this.limits.maxWallClockMs ?? 60_000);
+        break;
+    }
+    return next;
+  }
+
+  applyExtension(limits: RunBudgetLimits): void {
+    this.limits = { ...limits };
   }
 
   /**
