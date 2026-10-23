@@ -19,6 +19,7 @@ import { CheckpointStore } from "./core/checkpoint_store";
 import { handleRewindCommand } from "./core/rewind_command";
 import { AgentResult, StepInfo, ToolRuntime } from "./core/types";
 import { STOP_REASON_LABELS } from "./core/run_outcome";
+import { formatHistoryReplay } from "./core/session_replay";
 
 /**
  * 会话选择：AGENT_SESSION_ID 显式指定时直接用（跳过询问，适合脚本/定时任务）；
@@ -268,8 +269,16 @@ async function runRepl(
   };
   // /prompt 选中的模板：保留到手动清除，之后每轮都以独立消息注入（正文不靠历史重放）
   let pendingPrompt: PromptTemplateInjection | undefined;
+  // 续聊时把历史打到终端：内容一直在文件里也进了模型上下文，不回放会让人以为对话丢了；
+  // 空回答（取消/上游过滤）也要占位并写明原因
+  const loaded = await store.load();
+  const replay = formatHistoryReplay(loaded.messages);
+  if (replay.length > 0) {
+    console.log("📜 续聊上下文（已载入模型）：");
+    for (const line of replay) console.log(`  ${line}`);
+  }
   // 续聊时把上次选定的模板接回来；落盘记录本来就是 {role, text} 形态，直接还原，不做 content 伪装
-  const restored = (await store.load()).promptTemplate;
+  const restored = loaded.promptTemplate;
   if (restored) {
     pendingPrompt = {
       label: restored.label,

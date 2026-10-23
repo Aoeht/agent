@@ -138,6 +138,15 @@ export interface StepInfo {
   }[];
 }
 
+/**
+ * 会话文件里的 ReAct 过程快照：随终答记录一起落盘，仅供终端/Web 回放，
+ * 进模型上下文前会被剥离（不是 OpenAI 消息字段）。
+ */
+export interface PersistedProcessStep {
+  llmContent?: string;
+  toolCalls: { name: string; arguments: string }[];
+}
+
 // ✅ Agent 运行结果
 export interface AgentResult extends RunOutcome {
   task?: TaskRecord;

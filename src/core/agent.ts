@@ -2,7 +2,7 @@
 import path from "node:path";
 import OpenAI from "openai";
 import { ToolRegistry } from "./registry";
-import { Message, AgentResult, ToolCall, StepInfo, ToolRuntime, McpPromptRole } from "./types";
+import { Message, AgentResult, ToolCall, StepInfo, ToolRuntime, McpPromptRole, PersistedProcessStep } from "./types";
 import { extractSources, renderCitationBlock, bindRagCitationRefs, type Citation } from "./citations";
 import { AgentEventBus } from "./events";
 import { ContextManager } from "./context_manager";
@@ -43,19 +43,25 @@ const SESSION_NAME_PROMPT =
   "不要引号、不要句号、不要“会话名：”之类的前缀，也不要解释或换行。";
 
 /**
- * 落盘态 assistant 终答消息：本次运行的 Grounded 引用（citations）随消息一起写入会话文件。
- * JSONL 一行一个 JSON，OpenAI Message 之外的字段本来就能存（旧版本读到会忽略多余字段）；
- * 它只服务历史回放——刷新 / 切回旧会话后据此恢复引用卡片。
- * 重新加载进 LLM 上下文前必须剥离，见 stripPersistedCitations。
+ * 落盘态 assistant 终答消息：本次运行的 Grounded 引用（citations）与 ReAct 工具过程（process）
+ * 随消息一起写入会话文件。JSONL 一行一个 JSON，OpenAI Message 之外的字段本来就能存
+ * （旧版本读到会忽略多余字段）；它只服务历史回放——刷新 / 切回旧会话后据此恢复引用卡片与过程消息。
+ * 重新加载进 LLM 上下文前必须剥离，见 stripPersistedFields。
  */
-type PersistedAssistantMessage = Message & { citations?: Citation[]; outcome?: RunOutcome };
+type PersistedAssistantMessage = Message & {
+  citations?: Citation[];
+  outcome?: RunOutcome;
+  process?: PersistedProcessStep[];
+};
 
-/** 从会话历史里剥掉 citations：它不是 OpenAI 标准消息字段，多数兼容服务端忽略，严格的可能拒收。 */
-function stripPersistedCitations(message: Message): Message {
-  if (message.role === "assistant" && ("citations" in message || "outcome" in message)) {
-    const { citations, outcome, ...rest } = message as PersistedAssistantMessage;
+/** 从会话历史里剥掉非标准字段：多数兼容服务端忽略，严格的可能拒收。 */
+function stripPersistedFields(message: Message): Message {
+  if (message.role === "assistant" &&
+      ("citations" in message || "outcome" in message || "process" in message)) {
+    const { citations, outcome, process, ...rest } = message as PersistedAssistantMessage;
     void citations;
     void outcome;
+    void process;
     return rest;
   }
   return message;
@@ -492,8 +498,16 @@ export class Agent {
       const lastMessage = result.messages.at(-1) as PersistedAssistantMessage | undefined;
       if (lastMessage?.role === "assistant" && !lastMessage.tool_calls) lastMessage.outcome = outcome;
       try {
+        // 工具过程随终答记录落盘：重启回放时能看到"它到底调了什么"，但不进模型上下文
+        const process: PersistedProcessStep[] = result.steps
+          .filter((step) => step.toolCalls.length > 0)
+          .map((step) => ({
+            ...(step.llmContent?.trim() ? { llmContent: step.llmContent } : {}),
+            toolCalls: step.toolCalls.map((call) => ({ name: call.name, arguments: call.arguments })),
+          }));
         await this.persist({ role: "assistant", content: result.finalAnswer ?? "", outcome,
-          ...(result.citations.length ? { citations: result.citations } : {}) } as PersistedAssistantMessage);
+          ...(result.citations.length ? { citations: result.citations } : {}),
+          ...(process.length ? { process } : {}) } as PersistedAssistantMessage);
         await this.compactHistory();
       } catch (error) {
         Object.assign(result, runOutcome("error"), { errorMessage: `会话保存失败：${error instanceof Error ? error.message : String(error)}` });
@@ -551,7 +565,7 @@ export class Agent {
     await this.compactHistory();
     const stored = this.config.sessionStore ? await this.config.sessionStore.load() : undefined;
     // 落盘行的 citations 只服务历史回放，进 LLM 上下文前按标准消息形态剥离
-    const history = (stored?.messages ?? []).map(stripPersistedCitations);
+    const history = (stored?.messages ?? []).map(stripPersistedFields);
     // 调用方（REPL）若已显式设过就以它为准：显式 setPromptTemplate(undefined) 代表"用户刚清除"。
     // 顺序上很关键 —— REPL 每轮跑前都会调用一次 setPromptTemplate（哪怕传 undefined），
     // 所以这里的兜底恢复只对"不自己管模板生命周期"的调用方生效，不会把用户清除过的模板又拉回来。
@@ -1234,8 +1248,10 @@ export class Agent {
         models: [this.config.summaryModel ?? this.config.model, this.config.model],
         signal,
         call: async (model) => {
+          // 2000：8 段摘要按 1200 输出时经常在「当前进展」处被截断，
+          // 重启后长期记忆缺尾比多花一点摘要 token 更糟
           const resp = await this.client.chat.completions.create(
-            { model, messages, max_tokens: 1200, temperature: 0 },
+            { model, messages, max_tokens: 2000, temperature: 0 },
             signal ? { signal } : {}
           );
           return {

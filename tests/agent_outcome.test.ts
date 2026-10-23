@@ -198,6 +198,7 @@ describe("显式拒绝、过滤和截断", () => {
     { code: "content_policy_violation", status: 400 },
     { error: { code: "content_filter" }, status: 400 },
     { error: { innererror: { code: "ResponsibleAIPolicyViolation" } }, status: 400 },
+    { code: "data_inspection_failed", status: 400 },
   ]) {
     test(`策略错误码 ${JSON.stringify(error)} 被识别且不重试`, async () => {
       const { agent, requestCount } = setup([() => { throw error; }], { maxRetries: 2 });
@@ -205,6 +206,21 @@ describe("显式拒绝、过滤和截断", () => {
       expect(requestCount()).toBe(1);
     });
   }
+  test("DashScope DataInspectionFailed 按内容过滤收尾，提问与终态都落盘", async () => {
+    const sessionStore = await store();
+    const { agent, requestCount } = setup([
+      () => { throw new Error("<400> InternalError.Algo.DataInspectionFailed: Output data may contain inappropriate content."); },
+    ], { sessionStore, maxRetries: 2 });
+    const result = await agent.run("看一下图片");
+    expect(result).toMatchObject({ success: false, stopReason: "content_filter", taskStatus: "blocked" });
+    expect(requestCount()).toBe(1);
+
+    const manager = new SessionManager({ sessionDir: sessionStore.dir } as any);
+    const history = await manager.history("test");
+    expect(history.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+    expect(history.messages[0]!.content).toBe("看一下图片");
+    expect(history.messages[1]!.outcome?.stopReason).toBe("content_filter");
+  });
   test("强制收尾遭拒绝时不再发摘工具重试请求", async () => {
     const { agent, requestCount } = setup([
       reply(null, "tool_calls", { tool_calls: [call] }), reply(null, "stop", { refusal: "无法回答" }),

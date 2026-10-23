@@ -66,11 +66,20 @@ export function responseStopReason(response: {
   return undefined;
 }
 
-/** 兼容服务商明确的策略错误码；不凭 HTTP 状态或错误描述猜测拒绝。 */
+/** 兼容服务商明确的策略错误码；不凭 HTTP 状态或普通措辞猜测拒绝。 */
 export function isContentPolicyError(error: unknown): boolean {
   if (!error || typeof error !== "object") return false;
-  const e = error as { code?: unknown; error?: { code?: unknown; innererror?: { code?: unknown } } };
+  const e = error as {
+    code?: unknown;
+    message?: unknown;
+    error?: { code?: unknown; innererror?: { code?: unknown } };
+  };
   const codes = [e.code, e.error?.code, e.error?.innererror?.code];
-  return codes.some((code) => typeof code === "string" &&
-    ["content_filter", "content_policy_violation", "responsibleaipolicyviolation"].includes(code.toLowerCase()));
+  if (codes.some((code) => typeof code === "string" &&
+    ["content_filter", "content_policy_violation", "responsibleaipolicyviolation", "data_inspection_failed"]
+      .includes(code.toLowerCase()))) {
+    return true;
+  }
+  // DashScope/Qwen 在流式输出触发安全审核时只给 400 + 这句话，没有策略 code
+  return typeof e.message === "string" && /DataInspectionFailed/i.test(e.message);
 }
