@@ -542,6 +542,62 @@ describe("Agent 上下文压缩集成", () => {
     await fs.rm(dir, { recursive: true, force: true });
   });
 
+  test("长期摘要瞬时失败会退避重试，成功后才落盘", async () => {
+    const dir = await tempDir("dsh-agent-lts-retry-");
+    const store = new SessionStore({ dir, sessionId: "t" });
+    let summaryAttempts = 0;
+    let mainCalls = 0;
+    const client: any = {
+      chat: {
+        completions: {
+          create: async (params: any) => {
+            if (!params.tools?.length) {
+              summaryAttempts++;
+              if (summaryAttempts === 1) throw Object.assign(new Error("rate limited"), { status: 429 });
+              return {
+                choices: [{ message: { content: "## 任务与目标\n重试后长期摘要" } }],
+                usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+              };
+            }
+            mainCalls++;
+            if (mainCalls === 1) {
+              return {
+                choices: [
+                  {
+                    message: {
+                      content: null,
+                      tool_calls: [{ id: "c1", type: "function", function: { name: "dummy", arguments: "{}" } }],
+                    },
+                  },
+                ],
+                usage: { prompt_tokens: 100, completion_tokens: 5, total_tokens: 105 },
+              };
+            }
+            return {
+              choices: [{ message: { content: "最终答案" } }],
+              usage: { prompt_tokens: 100, completion_tokens: 5, total_tokens: 105 },
+            };
+          },
+        },
+      },
+    };
+    const agent = new Agent({
+      model: "glm-4.6",
+      systemPrompt: "系统规则",
+      client,
+      tools: bigToolRegistry(),
+      sessionStore: store,
+    });
+
+    await agent.run("查一下");
+    expect(await agent.flushSummary()).toBe(15);
+    expect(summaryAttempts).toBe(2);
+    const raw = await fs.readFile(store.filePath, "utf-8");
+    expect(raw).toContain("重试后长期摘要");
+
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
   test("纯聊天轮（无工具调用）不 fold 长期摘要", async () => {
     const dir = await tempDir("dsh-agent-chat-");
     const store = new SessionStore({ dir, sessionId: "t" });

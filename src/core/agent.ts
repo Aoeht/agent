@@ -6,6 +6,7 @@ import { Message, AgentResult, ToolCall, StepInfo, ToolRuntime, McpPromptRole } 
 import { extractSources, renderCitationBlock, bindRagCitationRefs, type Citation } from "./citations";
 import { AgentEventBus } from "./events";
 import { ContextManager } from "./context_manager";
+import { requestSummaryWithRetry } from "./summary_call";
 import { SessionStore, normalizeSessionName } from "./session_store";
 import { RunBudget, RunBudgetLimits, BudgetStopReason } from "./run_budget";
 import { wrapUntrustedData, wrapSummaryBlock } from "./untrusted";
@@ -1213,28 +1214,43 @@ export class Agent {
           : []),
       ].join("\n");
 
-      const resp = await this.client.chat.completions.create({
-        model: this.config.summaryModel ?? this.config.model,
-        messages: [
-          {
-            role: "system",
-            content: this.sessionLongTermSummary ? LONGTERM_MERGE_PROMPT : LONGTERM_FRESH_PROMPT,
-          },
-          {
-            role: "user",
-            content: this.sessionLongTermSummary
-              ? `现有长期摘要：\n${this.sessionLongTermSummary}\n\n本轮工作记录：\n${digest}`
-              : `本轮工作记录：\n${digest}`,
-          },
-        ],
-        max_tokens: 1200,
-        temperature: 0,
-      }, signal ? { signal } : {});
-      const text = resp.choices[0]?.message?.content?.trim();
-      if (!text) throw new Error("长期摘要模型返回空内容");
+      const messages = [
+        {
+          role: "system" as const,
+          content: this.sessionLongTermSummary ? LONGTERM_MERGE_PROMPT : LONGTERM_FRESH_PROMPT,
+        },
+        {
+          role: "user" as const,
+          content: this.sessionLongTermSummary
+            ? `现有长期摘要：\n${this.sessionLongTermSummary}\n\n本轮工作记录：\n${digest}`
+            : `本轮工作记录：\n${digest}`,
+        },
+      ];
+      const { content: text, usage } = await requestSummaryWithRetry({
+        models: [this.config.summaryModel ?? this.config.model, this.config.model],
+        signal,
+        call: async (model) => {
+          const resp = await this.client.chat.completions.create(
+            { model, messages, max_tokens: 1200, temperature: 0 },
+            signal ? { signal } : {}
+          );
+          return {
+            content: resp.choices[0]?.message?.content ?? "",
+            ...(resp.usage
+              ? {
+                  usage: {
+                    promptTokens: resp.usage.prompt_tokens ?? 0,
+                    completionTokens: resp.usage.completion_tokens ?? 0,
+                    totalTokens: resp.usage.total_tokens ?? 0,
+                  },
+                }
+              : {}),
+          };
+        },
+      });
       await store.recordLongTermSummary(text);
       this.sessionLongTermSummary = text;
-      const tokens = resp.usage?.total_tokens ?? 0;
+      const tokens = usage?.totalTokens ?? 0;
       this.events.emit("compact", { action: "longterm_summary", tokens, detail: "已更新跨 run 长期摘要" });
       return tokens;
     } catch (error) {
