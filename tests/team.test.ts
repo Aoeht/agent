@@ -328,6 +328,96 @@ describe("协调模型协议", () => {
     expect(report.totalTokens).toBe(18_030); // 3 次尝试费用不可知，汇总按预留 18000 保守结算
   });
 
+  test("汇总输入用紧凑投影：保留结论/交付/未解决项/来源定位，不复述 findings、证据片段与复核论证", async () => {
+    let summaryInput = "";
+    const dense: Submission = { summary: "SUMMARY-标记", deliverables: [{ index: 0, content: "DELIVERABLE-标记" }],
+      findings: [{ id: "f1", claim: "FINDING-标记", evidenceIds: ["e1"] }],
+      evidence: [{ id: "e1", source: "SRC-标记.ts:1", excerpt: "EXCERPT-标记" }],
+      coverage: [{ checkId: "c1", status: "covered", findingIds: ["f1"], note: "COVERED-标记" }], unresolved: ["UNRESOLVED-标记"] };
+    const createChild: ChildFactory = execution => ({
+      run: async () => rawResult(execution.mode === "review"
+        ? JSON.stringify(review(execution.reviewTargets.map(target => target.task)))
+        : JSON.stringify(dense)),
+      shutdown: async () => {},
+    });
+    const client = clientWith(async request => {
+      if (request.response_format) return reply(JSON.stringify({ tasks: [task("a")] }));
+      summaryInput = request.messages[1].content;
+      return reply("汇总完成");
+    });
+    const report = await new TeamCoordinator({ model: "test", client, createChild, capabilities: "只读" }).run("test");
+    // 带 unresolved 项的任务按设计不能复核通过，但仍应走到汇总
+    expect(report.status).toBe("incomplete");
+    expect(report.error).toContain("轮数");
+    for (const kept of ["SUMMARY-标记", "DELIVERABLE-标记", "SRC-标记.ts:1", "UNRESOLVED-标记", "passedCount"]) {
+      expect(summaryInput).toContain(kept);
+    }
+    for (const dropped of ["FINDING-标记", "EXCERPT-标记", "COVERED-标记", '"findings"', '"coverage"', '"evidenceRefs"', '"rationale"']) {
+      expect(summaryInput).not.toContain(dropped);
+    }
+  });
+
+  test("汇总投影逐级收紧直至装进协调预留，截断如实标注", async () => {
+    const bulk = Array.from({ length: 12000 }, (_, i) => "字一二三四五六七八九十"[i % 10]).join("");
+    const wide = { ...task("a"), deliverables: ["一", "二", "三", "四", "五", "六"] };
+    const dense: Submission = { summary: bulk.slice(0, 2000),
+      deliverables: wide.deliverables.map((_, index) => ({ index, content: bulk.slice(index * 200, index * 200 + 1200) })),
+      findings: [{ id: "f1", claim: "CLAIM", evidenceIds: ["e1"] }],
+      evidence: [{ id: "e1", source: bulk.slice(0, 1000), excerpt: "EXCERPT" }],
+      coverage: [{ checkId: "c1", status: "covered", findingIds: ["f1"], note: "已覆盖" }],
+      unresolved: [] };
+    let summaryInput = "";
+    const createChild: ChildFactory = execution => ({
+      run: async () => rawResult(execution.mode === "review"
+        ? JSON.stringify(review(execution.reviewTargets.map(target => target.task)))
+        : JSON.stringify(dense)),
+      shutdown: async () => {},
+    });
+    const client = clientWith(async request => {
+      if (request.response_format) return reply(JSON.stringify({ tasks: [wide] }));
+      summaryInput = request.messages[1].content;
+      return reply("汇总完成");
+    });
+    const report = await new TeamCoordinator({ model: "test", client, createChild, capabilities: "只读",
+      options: { totalTokens: 8_200, childTokens: 50, coordinationTokens: 4_000 } }).run("test");
+    expect(report.status).toBe("answered"); // 不再因协调预留不足而整体失败
+    expect(report.reviewStatus).toBe("passed");
+    expect(summaryInput).toContain("…(截断)"); // 被裁内容如实标注
+    expect(summaryInput).not.toContain("EXCERPT"); // 紧凑投影连降两级后不再含证据片段
+    expect(summaryInput.length).toBeLessThan(6_000);
+  });
+
+  test("复核在汇总中压成结论与未通过项，通过项论证与 evidenceRefs 不复述", async () => {
+    const tasks = [task("a"), task("b")];
+    const compact: TeamReview = { summary: "REVIEW-SUMMARY-标记", checks: [
+      { taskId: "a", checkId: "c1", verdict: "pass", rationale: "PASS-论证标记",
+        evidenceRefs: [{ taskId: "a", evidenceId: "e1" }], followUp: "" },
+      { taskId: "b", checkId: "c1", verdict: "blocked", rationale: "BLOCKED-理由标记",
+        evidenceRefs: [], followUp: "需要用户提供材料" },
+    ] };
+    let summaryInput = "";
+    const createChild: ChildFactory = execution => ({
+      run: async () => rawResult(execution.mode === "review"
+        ? JSON.stringify(compact) : JSON.stringify(submission(execution.task.id))),
+      shutdown: async () => {},
+    });
+    const client = clientWith(async request => {
+      if (request.response_format) return reply(JSON.stringify({ tasks }));
+      summaryInput = request.messages[1].content;
+      return reply("汇总完成");
+    });
+    const report = await new TeamCoordinator({ model: "test", client, createChild, capabilities: "只读" }).run("test");
+    expect(report.status).toBe("incomplete"); // blocked 不重跑
+    expect(report.reviewStatus).toBe("blocked");
+    expect(summaryInput).toContain("REVIEW-SUMMARY-标记");
+    expect(summaryInput).toContain('"passedCount":1');
+    expect(summaryInput).toContain("需要用户提供材料");
+    expect(summaryInput).toContain("有证据支持结论"); // 未通过项带原始检查项说明
+    for (const dropped of ["PASS-论证标记", "BLOCKED-理由标记", "evidenceRefs"]) {
+      expect(summaryInput).not.toContain(dropped);
+    }
+  });
+
   test("汇总失败保留子任务结论；部分失败不会被汇总文本变成成功", async () => {
     let calls = 0;
     const report = await new TeamCoordinator({ model: "test", capabilities: "只读", createChild: instant,
