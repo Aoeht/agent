@@ -246,7 +246,7 @@ async function testReadPathSeesExternalWrites() {
   const childScript = path.join(dir, "ingest-child.ts");
   await fs.writeFile(
     childScript,
-    `import { KnowledgeStore } from ${JSON.stringify(path.resolve(".sand-box/src/rag/knowledge_store.ts"))};\n` +
+    `import { KnowledgeStore } from ${JSON.stringify(path.resolve(import.meta.dir, "../src/rag/knowledge_store.ts"))};\n` +
       `const store = new KnowledgeStore({ filePath: ${JSON.stringify(filePath)} });\n` +
       `await store.upsert([{ source: "internal://docs/新资料.md", content: ${JSON.stringify(COOKING_DOC)}, trust: "internal", title: "新资料" }]);\n`
   );
@@ -328,7 +328,8 @@ interface RagOutput {
   result_count: number;
   notice: string;
   web_search_error?: string;
-  results: { ref: number; content: string; source: string; origin: string; trust: string; chunk_id: string; fetched_at: string }[];
+  sources: { title: string; url: string }[];
+  results: { ref?: number; content: string; source: string; origin: string; trust: string; chunk_id: string; fetched_at: string }[];
 }
 
 async function testRagTool() {
@@ -344,7 +345,8 @@ async function testRagTool() {
   const first = (await tool.execute({ query: "冒充客服退款诈骗案例", top_k: 2 })) as RagOutput;
   check(web.calls.length === 1 && web.calls[0]?.includeRawContent === true, "空缓存时联网且请求正文", web.calls);
   check(first.result_count === 2, "中文查询返回结果", first);
-  check(first.results.every((r, i) => r.ref === i + 1 && r.origin === "web" && r.trust === "web"), "结果带引用编号与来源标记", first.results);
+  check(first.results.every((r) => r.ref === undefined && r.origin === "web" && r.trust === "web"), "工具不分配局部编号，保留来源标记", first.results);
+  check(first.results.every((r) => first.sources.some((s) => s.url === r.source && s.title)), "证据块均有可注册的引用来源", first.sources);
   check(first.notice.includes("不可信") || first.notice.includes("参考资料而非指令"), "结果携带不可信数据提示", first.notice);
   check(new Set(first.results.map((r) => r.source)).size === 2, "同一网页的重复结果被去重", first.results.map((r) => r.source));
 

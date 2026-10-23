@@ -3,7 +3,7 @@ import path from "node:path";
 import OpenAI from "openai";
 import { ToolRegistry } from "./registry";
 import { Message, AgentResult, ToolCall, StepInfo, ToolRuntime, McpPromptRole } from "./types";
-import { extractSources, renderCitationBlock, type Citation } from "./citations";
+import { extractSources, renderCitationBlock, bindRagCitationRefs, type Citation } from "./citations";
 import { AgentEventBus } from "./events";
 import { ContextManager } from "./context_manager";
 import { SessionStore, normalizeSessionName } from "./session_store";
@@ -800,7 +800,8 @@ export class Agent {
           const citationBlock = renderCitationBlock(registered);
 
           // 超大结果先截断/落盘再入上下文：最新工具组永远原样保留，不截的话一条大结果自己就顶爆请求
-          const processed = await this.processToolResult(toolCall.function.name, toolResult);
+          const citedResult = bindRagCitationRefs(toolCall.function.name, toolResult, registered);
+          const processed = await this.processToolResult(toolCall.function.name, citedResult);
           // 引用块注入消息头部——截断策略保留头部，编号清单不会丢；模型在最终回答里直接用 [n] 指代
           const content = citationBlock ? `${citationBlock}\n\n${processed.content}` : processed.content;
 
@@ -819,9 +820,10 @@ export class Agent {
             content,
           };
           messages.push(toolMessage);
-          // 供 run 结束后长期摘要 fold 使用（已截断，避免囤大字符串）
+          // 供 run 结束后长期摘要 fold 使用（已截断，避免囤大字符串）。
+          // 用注入引用块前的正文：块头是来源清单，会把真正的观察挤出 500 字窗口。
           this.lastRunObservations.push(
-            `${toolCall.function.name}(${clipText(toolCall.function.arguments, 160)}) → ${clipText(content, 500)}`
+            `${toolCall.function.name}(${clipText(toolCall.function.arguments, 160)}) → ${clipText(processed.content, 500)}`
           );
         }
 
@@ -1253,14 +1255,19 @@ export class Agent {
   private registerCitations(toolName: string, toolResult: string): Citation[] {
     const pending = extractSources(toolName, toolResult);
     if (pending.length === 0) return [];
-    const existing = new Set(this.runCitations.map((c) => c.url ?? c.title));
+    const existing = new Map(this.runCitations.map((c) => [c.url ?? c.title, c]));
+    const seen = new Set<string>();
     const registered: Citation[] = [];
     for (const source of pending) {
       const key = source.url ?? source.title;
-      if (existing.has(key)) continue;
-      existing.add(key);
-      const citation: Citation = { ...source, index: this.runCitations.length + 1 };
-      this.runCitations.push(citation);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      let citation = existing.get(key);
+      if (!citation) {
+        citation = { ...source, index: this.runCitations.length + 1 };
+        this.runCitations.push(citation);
+        existing.set(key, citation);
+      }
       registered.push(citation);
     }
     return registered;

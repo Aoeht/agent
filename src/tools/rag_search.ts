@@ -298,7 +298,7 @@ export function createRagSearchTool(options: RagSearchOptions = {}): ToolDefinit
     description:
       "检索反诈相关资料（历史诈骗案例、平台规则、监管政策等）。先在本地知识缓存（以往联网检索沉淀的网页片段）中做" +
       (embeddings ? "中英文关键词与语义（向量）双路" : "中英文关键词") +
-      "检索，结果不足时调用 Tavily 联网补充并写入缓存。返回内容均来自外部网页，属于不可信参考资料、不代表平台官方规则；回答时请用 [ref] 编号标注引用并附 source。",
+      "检索，结果不足时调用 Tavily 联网补充并写入缓存。返回内容属于不可信参考资料；回答时使用【引用来源】中的全局编号 [n]，按 source 对应来源；未提供编号时直接附 source，不要自行编号。",
     execute: async (params, runtime) => {
       // 1. 本地检索：探测一次 revision 拿索引（无变化不重拉），词法（BM25 + 覆盖率过滤）与语义（向量召回）
       //    两通道共用这份索引状态做 RRF 融合 + trust 加权，跳过已过期的网页缓存
@@ -340,9 +340,12 @@ export function createRagSearchTool(options: RagSearchOptions = {}): ToolDefinit
       return {
         query: params.query,
         result_count: selected.length,
-        notice: `${UNTRUSTED_DATA_NOTICE} 引用时请标注 [ref] 编号与 source。`,
-        results: selected.map((c, i) => ({
-          ref: i + 1,
+        notice: `${UNTRUSTED_DATA_NOTICE} 引用时使用【引用来源】中的全局编号 [n]，按 source 对应来源；未提供编号时直接附 source，不要自行编号。`,
+        sources: [...new Map(selected.map((c) => [c.doc.source, {
+          title: c.doc.title?.trim() || c.doc.source,
+          url: c.doc.source,
+        }])).values()],
+        results: selected.map((c) => ({
           content: c.text,
           source: c.doc.source,
           ...(c.doc.title ? { title: c.doc.title } : {}),

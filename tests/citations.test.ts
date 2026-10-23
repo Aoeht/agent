@@ -5,9 +5,16 @@ import { ToolRegistry } from "../src/core/registry";
 import {
   extractSources,
   renderCitationBlock,
+  stripCitationPreamble,
   extractCitedIndices,
 } from "../src/core/citations";
 import type { ToolDefinition } from "../src/core/types";
+import { bindRagCitationRefs } from "../src/core/citations";
+import { createRagSearchTool } from "../src/tools/rag_search";
+import { KnowledgeStore } from "../src/rag/knowledge_store";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { tmpdir } from "node:os";
 
 // ---------- extractSources ----------
 
@@ -37,6 +44,18 @@ test("extractSources：无 sources / 非 JSON / 空 title 一律返回空数组�
   expect(extractSources("rag_search", JSON.stringify({ sources: "不是数组" }))).toEqual([]);
 });
 
+// ---------- stripCitationPreamble ----------
+
+test("stripCitationPreamble：剥掉块头只留正文，非引用块原样返回", () => {
+  const block = renderCitationBlock([
+    { index: 1, title: "来源一", url: "https://a.example/", tool: "rag_search" },
+    { index: 2, title: "来源二", tool: "rag_search" },
+  ]);
+  expect(stripCitationPreamble(`${block}\n\n真正的工具结果`)).toBe("真正的工具结果");
+  expect(stripCitationPreamble("没有引用块的普通结果")).toBe("没有引用块的普通结果");
+  expect(stripCitationPreamble(block)).toBe(""); // 纯引用块没有正文
+});
+
 // ---------- renderCitationBlock ----------
 
 test("renderCitationBlock：空列表返回空串，否则渲染编号清单", () => {
@@ -46,7 +65,7 @@ test("renderCitationBlock：空列表返回空串，否则渲染编号清单", (
       { index: 1, title: "A 篇", url: "https://a.example/", tool: "search_web" },
       { index: 2, title: "B 篇", tool: "rag_search" },
     ])
-  ).toBe("【引用来源】\n[1] A 篇（https://a.example/）\n[2] B 篇");
+  ).toBe("【引用来源】编号只放在被支撑句子的末尾；不要复制本列表，不要把编号放在回答开头\n[1] A 篇（https://a.example/）\n[2] B 篇");
 });
 
 // ---------- extractCitedIndices ----------
@@ -134,6 +153,60 @@ test("跨工具重复来源（同 url）只占一个编号", async () => {
 
   expect(result.citations).toHaveLength(1);
   expect(result.citations[0]!.index).toBe(1);
+  const repeated = result.messages.filter(m => m.role === "tool")[1];
+  expect(repeated?.content).toContain("[1] A 篇（https://a.example/）");
+});
+
+test("真实 RAG 多轮检索：跨工具去重、同源多块共用全局编号、无标题回退", async () => {
+  const dir = await fs.mkdtemp(path.join(tmpdir(), "rag-citations-"));
+  try {
+    const store = new KnowledgeStore({ filePath: path.join(dir, "knowledge.json"), chunk: { maxChars: 100 } });
+    const tools = new ToolRegistry();
+    tools.register(makeSearchTool("search_web", [{ title: "已有来源", url: "https://example.com/existing" }]));
+    tools.register(createRagSearchTool({
+      store, embeddings: null,
+      webSearch: async request => ({ results: request.query === "退款" ? [
+        { title: "重复来源", url: "https://example.com/existing", content: "退款证据。" },
+        { title: "", url: "https://example.com/new", content: "退款流程。" },
+      ] : [{ title: "新案例", url: "https://example.com/third", content: "诈骗案例。".repeat(40) }] }),
+    }));
+    const call = (id: string, name: string, args: object = {}) => ({
+      id, type: "function", function: { name, arguments: JSON.stringify(args) },
+    });
+    const { client, requests } = makeMockClient([
+      () => ({ content: null, tool_calls: [call("web", "search_web")] }),
+      () => ({ content: null, tool_calls: [call("rag1", "rag_search", { query: "退款", top_k: 2, use_cache: false })] }),
+      () => ({ content: null, tool_calls: [call("rag2", "rag_search", { query: "诈骗", top_k: 2, use_cache: false })] }),
+      () => ({ content: "证据见 [1][2][3]。" }),
+    ]);
+    const result = await new Agent({ model: "t", systemPrompt: "规则", client, tools }).run("检索");
+    expect(result.success).toBe(true);
+    expect(result.citations.map(c => [c.index, c.url])).toEqual([
+      [1, "https://example.com/existing"], [2, "https://example.com/new"], [3, "https://example.com/third"],
+    ]);
+    expect(result.citations[1]!.title).toBe("https://example.com/new");
+    const messages = result.messages.filter(m => m.role === "tool");
+    const payload = (i: number) => JSON.parse(String(messages[i]!.content).split("\n\n").slice(1).join("\n\n"));
+    expect(payload(1).results.map((r: any) => r.ref)).toEqual([1, 2]);
+    expect(payload(2).results.map((r: any) => r.ref)).toEqual([3, 3]);
+    expect(payload(2).sources).toHaveLength(1);
+    expect(payload(2).results.every((r: any) => r.chunk_id && r.content)).toBe(true);
+    expect(messages[1]!.content).toContain("[1] 已有来源");
+    expect(JSON.stringify(requests[3].messages)).toContain("[3] 新案例");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("RAG 编号绑定：移除未注册的局部编号，兼容空结果和错误响应", () => {
+  const citations = [{ index: 7, title: "来源", url: "https://a.example", tool: "rag_search" }];
+  const raw = JSON.stringify({ results: [{ ref: 1, source: "https://a.example", chunk_id: "a" }, { ref: 2, source: "missing" }] });
+  const bound = JSON.parse(bindRagCitationRefs("rag_search", raw, citations));
+  expect(bound.results).toEqual([{ source: "https://a.example", chunk_id: "a", ref: 7 }, { source: "missing" }]);
+  expect(bindRagCitationRefs("echo", raw, citations)).toBe(raw);
+  for (const input of ["not json", "null", '{"error":"failed"}', '{"results":[]}']) {
+    expect(bindRagCitationRefs("rag_search", input, citations)).toBe(input);
+  }
 });
 
 test("每次 run 引用编号都从 1 重新计数（run 间隔离）", async () => {

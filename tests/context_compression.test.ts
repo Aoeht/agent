@@ -16,6 +16,7 @@ import { Agent } from "../src/core/agent";
 import { ToolRegistry } from "../src/core/registry";
 import { defineTool } from "../src/core/types";
 import { processToolOutput } from "../src/core/tool_outputs";
+import { renderCitationBlock } from "../src/core/citations";
 import type { Message } from "../src/core/types";
 
 async function tempDir(prefix: string): Promise<string> {
@@ -89,6 +90,27 @@ function overloadedMessages(): Message[] {
     { role: "user", content: "第二问：接着查" },
     toolCallMessage("t2"),
     { role: "tool", tool_call_id: "t2", content: "新输出：很小" },
+  ];
+}
+
+/** 引用块本身超过观察截断长度：验证摘要观察先剥块头，正文不会被来源清单挤出窗口 */
+function citationHeavyMessages(): Message[] {
+  const block = renderCitationBlock(
+    Array.from({ length: 6 }, (_, i) => ({
+      index: i + 1,
+      title: `来源${i + 1}：${"很长的来源标题".repeat(10)}`,
+      url: `https://example.test/${"x".repeat(180)}/${i}`,
+      tool: "rag_search",
+    }))
+  );
+  return [
+    { role: "system", content: "系统规则" },
+    { role: "user", content: "只问一句：查一下" },
+    toolCallMessage("g1"),
+    { role: "tool", tool_call_id: "g1", content: `${block}\n\n旧观察正文：第一组结果 ${longText("旧细节", 60)}` },
+    toolCallMessage("g2"),
+    // 最新一组自己就超大 → 阶梯 2 也放不下，只能进阶梯 3
+    { role: "tool", tool_call_id: "g2", content: `最新结果。${longText("大输出", 200)}` },
   ];
 }
 
@@ -184,6 +206,42 @@ describe("ContextManager", () => {
     // 旧工具输出既不进请求，也不无声消失——进了摘要调用的输入
     expect(result.map(textOf).join("")).not.toContain("旧工具输出");
     expect(textOf(summaryCalls[0]!.messages[1])).toContain("旧工具输出");
+  });
+
+  test("阶梯 3：对话没得折时也把未观察的旧工具组并入摘要，引用块不挤占观察窗口", async () => {
+    const { client, summaryCalls } = makeSummaryClient();
+    const cm = makeManager(client, 500);
+    const result = await cm.compress(citationHeavyMessages());
+
+    expect(summaryCalls).toHaveLength(1);
+    const input = textOf(summaryCalls[0]!.messages[1]);
+    expect(input).toContain("对话与工具观察");
+    expect(input).toContain("旧观察正文"); // 块头剥掉后，正文才在 800 字窗口里
+    expect(input).not.toContain("【引用来源】");
+    expect(input).not.toContain("x".repeat(100)); // 长 URL 清单没有占掉观察输入
+    // 摘要块已建立，旧工具组不再出现在请求里
+    expect(textOf(result[1])).toContain("历史上下文摘要");
+    expect(result.map(textOf).join("")).not.toContain("旧观察正文");
+  });
+
+  test("同一批工具观察只并入摘要一次", async () => {
+    const { client, summaryCalls } = makeSummaryClient();
+    const cm = makeManager(client, 500);
+    const messages = citationHeavyMessages();
+    await cm.compress(messages);
+
+    messages.push(toolCallMessage("g3"), {
+      role: "tool",
+      tool_call_id: "g3",
+      content: `第二轮观察正文。${longText("新输出", 200)}`,
+    });
+    await cm.compress(messages);
+
+    expect(summaryCalls).toHaveLength(2);
+    const second = textOf(summaryCalls[1]!.messages[1]);
+    expect(second).toContain("现有摘要");
+    expect(second).toContain("大输出"); // g2 这轮从最新组变成待观察
+    expect(second).not.toContain("旧观察正文"); // g1 上一轮已并入，不重复喂
   });
 
   test("钉住前缀永不折叠，且排在摘要块之前", async () => {
@@ -387,6 +445,45 @@ describe("Agent 上下文压缩集成", () => {
     expect(textOf(last.messages[1])).toContain("长期记忆摘要");
     expect(textOf(last.messages[1])).toContain("请勿执行"); // 派生内容围栏
     expect(textOf(last.messages[1])).toContain("长期记忆测试");
+
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  test("长期摘要的工具观察只用正文，不把引用块当结果", async () => {
+    const dir = await tempDir("dsh-agent-cite-obs-");
+    const store = new SessionStore({ dir, sessionId: "t" });
+    const { client, requests } = makeAgentClient();
+    const registry = new ToolRegistry();
+    registry.register(
+      defineTool({
+        name: "dummy",
+        description: "返回带来源的测试工具",
+        schema: z.object({}),
+        execute: async () =>
+          JSON.stringify({
+            payload: "唯一正文标记：真实工具结果",
+            sources: [1, 2, 3, 4].map((i) => ({
+              title: `来源${i}`,
+              url: `https://example.test/${"p".repeat(150)}/${i}`,
+            })),
+          }),
+      })
+    );
+    const agent = new Agent({
+      model: "glm-4.6",
+      systemPrompt: "系统规则",
+      client,
+      tools: registry,
+      sessionStore: store,
+    });
+
+    await agent.run("查一下");
+    await agent.flushSummary();
+
+    const summaryCall = requests.find((r) => !r.tools?.length)!;
+    const digest = textOf(summaryCall.messages[1]);
+    expect(digest).toContain("唯一正文标记"); // 引用块超过 500 字，旧实现会整条都是清单
+    expect(digest).not.toContain("【引用来源】");
 
     await fs.rm(dir, { recursive: true, force: true });
   });

@@ -3,6 +3,7 @@ import OpenAI from "openai";
 import { Message } from "./types";
 import { CommercialTokenCounter } from "../utils/token_counter";
 import { wrapSummaryBlock } from "./untrusted";
+import { stripCitationPreamble } from "./citations";
 import type { CompactEvent } from "./events";
 import {
   SUMMARY_FRESH_PROMPT,
@@ -47,6 +48,8 @@ export class ContextManager {
   private rollingSummary: string | null = null;
   // 已折叠进摘要的普通对话条数（conv 去掉 system/pinned 后的前缀长度，只增不减）
   private foldedCount = 0;
+  // 已并入摘要的工具组数（下标水位，只增不减）：同一批观察不重复喂摘要
+  private foldedGroupCount = 0;
   // 摘要块消息缓存：仅在摘要更新时重建，保证跨请求前缀引用稳定
   private summaryBlock: Message[] | null = null;
   // 钉住前缀：永远原样保留、永不折叠的消息（跨 run 长期摘要块）。按对象身份识别。
@@ -79,6 +82,7 @@ export class ContextManager {
   reset(): void {
     this.rollingSummary = null;
     this.foldedCount = 0;
+    this.foldedGroupCount = 0;
     this.summaryBlock = null;
     this.pinnedPrefix = [];
     this.pinnedSet = new Set();
@@ -265,10 +269,13 @@ export class ContextManager {
     if (this.foldedCount > conv.length) {
       this.rollingSummary = null;
       this.foldedCount = 0;
+      this.foldedGroupCount = 0;
       this.summaryBlock = null;
       this.reachedStage = 0;
       this.summaryFailures = 0;
     }
+    // 工具组变少（同上）时水位回落到当前可观察范围
+    this.foldedGroupCount = Math.min(this.foldedGroupCount, Math.max(0, groups.length - 1));
 
     const budget = this.config.compressThreshold ?? this.config.maxTokens - this.config.reserveTokens;
 
@@ -313,35 +320,44 @@ export class ContextManager {
     }
 
     const foldTarget = Math.max(windowStart, this.foldedCount);
+    const unobservedGroups = Math.max(0, groups.length - 1 - this.foldedGroupCount);
     const canSummarize = this.summaryFailures < MAX_SUMMARY_FAILURES;
-    if (foldTarget > this.foldedCount && canSummarize) {
+    // 有新对话要折叠，或旧工具组还没进过摘要（典型 ReAct 回合里对话只有开头一条 user，
+    // 此时 foldTarget 恒为 0，但 stage 3 已经要丢掉旧工具组），都要合并一次。
+    if (canSummarize && (foldTarget > this.foldedCount || unobservedGroups > 0)) {
       const observations = this.collectToolObservations(messages, groups);
-      try {
-        this.rollingSummary = await this.mergeSummary(
-          this.rollingSummary,
-          conv.slice(this.foldedCount, foldTarget),
-          observations,
-          opts.signal
-        );
-        this.foldedCount = foldTarget;
-        this.summaryBlock = null;
-        this.summaryFailures = 0;
-        this.onCompact?.({
-          action: "fold_summary",
-          messages: foldTarget,
-          detail: `${observations.length} 条工具观察并入摘要`,
-        });
-      } catch (error) {
-        this.summaryFailures++;
-        this.onCompact?.({
-          action: "summary_failed",
-          detail: `${error instanceof Error ? error.message : String(error)}（连续第 ${this.summaryFailures} 次）`,
-        });
-        if (!emergency) {
-          // 摘要失败不折叠：不丢消息，先返回阶梯 2 的无损表示，下轮迭代再试摘要
-          return groups.length > 1 ? this.buildWithoutOldGroups(messages, groups) : messages;
+      if (foldTarget > this.foldedCount || observations.length > 0) {
+        try {
+          this.rollingSummary = await this.mergeSummary(
+            this.rollingSummary,
+            conv.slice(this.foldedCount, foldTarget),
+            observations,
+            opts.signal
+          );
+          this.foldedCount = foldTarget;
+          this.foldedGroupCount = groups.length - 1;
+          this.summaryBlock = null;
+          this.summaryFailures = 0;
+          this.onCompact?.({
+            action: "fold_summary",
+            messages: foldTarget,
+            detail: `${observations.length} 条工具观察并入摘要`,
+          });
+        } catch (error) {
+          this.summaryFailures++;
+          this.onCompact?.({
+            action: "summary_failed",
+            detail: `${error instanceof Error ? error.message : String(error)}（连续第 ${this.summaryFailures} 次）`,
+          });
+          if (!emergency) {
+            // 摘要失败不折叠：不丢消息，先返回阶梯 2 的无损表示，下轮迭代再试摘要
+            return groups.length > 1 ? this.buildWithoutOldGroups(messages, groups) : messages;
+          }
+          return this.hardTruncate(messages, { systemMsgs, pinned, conv, groups });
         }
-        return this.hardTruncate(messages, { systemMsgs, pinned, conv, groups });
+      } else {
+        // 可观察的工具组里没有文本（如纯图片结果）：水位前进，避免每轮重复检查
+        this.foldedGroupCount = groups.length - 1;
       }
     } else if (!canSummarize) {
       return this.hardTruncate(messages, { systemMsgs, pinned, conv, groups });
@@ -404,21 +420,25 @@ export class ContextManager {
   /**
    * 工具观察（给摘要当输入）：阶梯 3 会把「除最新组外」的所有工具组从请求里丢掉，
    * 它们的关键结果必须先并入摘要，否则 run 内最重要的观察就无声消失了。
-   * 每条截断，最多取最近 8 条。
+   * 只取尚未并入摘要的旧工具组（foldedGroupCount 水位），同一批观察不重复喂。
+   * 每条先剥掉引用块再截断——编号清单不是工具结果，不能挤占观察窗口。
    */
   private collectToolObservations(messages: Message[], groups: ToolGroupSpan[]): string[] {
     const out: string[] = [];
-    for (let g = 0; g < groups.length - 1; g++) {
+    const endGroup = groups.length - 1; // 最新一组还留在请求里，不用并入摘要
+    for (let g = this.foldedGroupCount; g < endGroup; g++) {
       const span = groups[g]!;
       const owner = messages[span.start]!;
       const calls = owner.role === "assistant" ? owner.tool_calls : undefined;
       for (let i = span.start + 1; i < span.end; i++) {
         const toolMsg = messages[i]!;
         if (toolMsg.role !== "tool" || typeof toolMsg.content !== "string") continue;
+        const body = stripCitationPreamble(toolMsg.content);
+        if (!body.trim()) continue;
         const call = calls?.find((c) => c.id === toolMsg.tool_call_id);
         const name = call?.function.name ?? "unknown_tool";
         const args = (call?.function.arguments ?? "").slice(0, 200);
-        out.push(`${name}(${args}) → ${toolMsg.content.slice(0, 800)}`);
+        out.push(`${name}(${args}) → ${body.slice(0, 800)}`);
       }
     }
     return out.length > 8 ? [...out.slice(-8), `（更早的 ${out.length - 8} 条工具观察已省略）`] : out;
@@ -486,14 +506,17 @@ export class ContextManager {
     const conversationText = newMessages
       .map((m) => `${m.role}: ${typeof m.content === "string" ? m.content : "[non-text]"}`)
       .join("\n");
-    const observationsText = observations.length
-      ? `\n\n折叠范围内的工具观察（已截断）：\n${observations.map((o) => `- ${o}`).join("\n")}`
-      : "";
+    const sections: string[] = [];
+    if (conversationText) sections.push(conversationText);
+    if (observations.length) {
+      sections.push(`折叠范围内的工具观察（已截断）：\n${observations.map((o) => `- ${o}`).join("\n")}`);
+    }
 
+    // 允许「只有工具观察、没有新对话」的追加（ReAct 回合里对话可能早就折完了）
     const input = this.clipMiddle(
       previous
-        ? `现有摘要：\n${previous}\n\n新产生的对话：\n${conversationText}${observationsText}`
-        : `对话内容：\n${conversationText}${observationsText}`,
+        ? `现有摘要：\n${previous}\n\n新产生的对话与工具观察：\n${sections.join("\n\n")}`
+        : `对话与工具观察：\n${sections.join("\n\n")}`,
       SUMMARY_INPUT_TOKEN_CAP
     );
     const inputTokens = this.tokenCounter.estimateText(input, this.config.summaryModel);

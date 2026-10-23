@@ -65,7 +65,36 @@ export function renderCitationBlock(citations: Citation[]): string {
     const suffix = c.url ? `（${c.url}）` : "";
     return `[${c.index}] ${c.title}${suffix}`;
   });
-  return `【引用来源】\n${lines.join("\n")}`;
+  // 块头就地写约束：模型最容易模仿紧邻工具结果的格式，这里比系统提示中段更有效
+  return `【引用来源】编号只放在被支撑句子的末尾；不要复制本列表，不要把编号放在回答开头\n${lines.join("\n")}`;
+}
+
+/**
+ * 去掉 tool 消息头部的【引用来源】块，只留工具正文。
+ * 摘要观察按字符截断时若从块头开始，编号清单会把真正的结果挤出窗口。
+ */
+export function stripCitationPreamble(text: string): string {
+  if (!text.startsWith("【引用来源】")) return text;
+  const separator = text.indexOf("\n\n");
+  return separator === -1 ? "" : text.slice(separator + 2);
+}
+
+/** RAG 的证据块使用 Agent 已分配的来源编号，避免每次检索从 1 开始。 */
+export function bindRagCitationRefs(toolName: string, resultText: string, citations: Citation[]): string {
+  if (toolName !== "rag_search") return resultText;
+  let parsed: unknown;
+  try { parsed = JSON.parse(resultText); } catch { return resultText; }
+  if (typeof parsed !== "object" || parsed === null) return resultText;
+  const result = parsed as Record<string, unknown>;
+  if (!Array.isArray(result.results)) return resultText;
+  const bySource = new Map(citations.filter(c => c.url).map(c => [c.url, c.index]));
+  result.results = result.results.map((item: unknown) => {
+    if (typeof item !== "object" || item === null) return item;
+    const { ref: _localRef, ...chunk } = item as Record<string, unknown>;
+    const ref = typeof chunk.source === "string" ? bySource.get(chunk.source.trim()) : undefined;
+    return ref === undefined ? chunk : { ...chunk, ref };
+  });
+  return JSON.stringify(result);
 }
 
 /** 从最终回答中提取实际被引用的编号（去重、保持出现顺序） */
