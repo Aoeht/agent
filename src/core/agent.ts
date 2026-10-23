@@ -17,6 +17,7 @@ import { CommercialTokenCounter } from "../utils/token_counter";
 import { processToolOutput } from "./tool_outputs";
 import { LONGTERM_FRESH_PROMPT, LONGTERM_MERGE_PROMPT } from "./summary_prompts";
 import { runOutcome, responseStopReason, isContentPolicyError, type RunOutcome, type StopReason } from "./run_outcome";
+import { isRetryableTransportError, retryDelayMs } from "./llm_retry";
 import { TaskStore } from "./task_store";
 import { AcceptanceCriteriaSchema, TASK_STATE_LABELS, type AcceptanceCriterion, type TaskRecord, type Verification } from "./task_types";
 import { validateAcceptancePaths, verifyTask } from "./task_verifier";
@@ -1029,15 +1030,12 @@ export class Agent {
           attempt > this.config.maxRetries ||
           runtime?.signal?.aborted ||
           partial ||
-          !this.isRetryable(error)
+          !isRetryableTransportError(error)
         ) {
           throw error;
         }
 
-        const delayMs = Math.round(
-          this.config.retryBaseDelayMs * 2 ** (attempt - 1) +
-            Math.random() * this.config.retryBaseDelayMs
-        );
+        const delayMs = retryDelayMs(this.config.retryBaseDelayMs, attempt);
         this.events.emit("retry", {
           attempt,
           delayMs,
@@ -1371,13 +1369,6 @@ export class Agent {
     }
 
     return { toolCall, toolResult };
-  }
-
-  /** 可重试的失败类型：连接中断/超时、429 限流、5xx 服务端错误 */
-  private isRetryable(error: unknown): boolean {
-    if (error instanceof OpenAI.APIConnectionError) return true;
-    const status = (error as { status?: unknown } | null)?.status;
-    return status === 429 || (typeof status === "number" && status >= 500);
   }
 
   /**

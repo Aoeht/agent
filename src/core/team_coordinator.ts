@@ -3,9 +3,10 @@ import OpenAI from "openai";
 import { z } from "zod";
 import { CommercialTokenCounter } from "../utils/token_counter";
 import { wrapUntrustedData } from "./untrusted";
+import { isRetryableTransportError, retryDelayMs } from "./llm_retry";
 import { AgentScheduler, TeamTokenBudget, validateTeamPlan,
   type ChildFactory, type ChildRecord, type TeamPlan } from "./team_scheduler";
-import type { TeamReview } from "./team_contracts";
+import { extractJsonObject, type TeamReview } from "./team_contracts";
 
 export const TeamOptionsSchema = z.object({
   concurrency: z.number().int().min(1).max(8).default(2),
@@ -16,6 +17,7 @@ export const TeamOptionsSchema = z.object({
   coordinationTokens: z.number().int().min(1).default(18_000),
   timeoutMs: z.number().int().min(1).max(3_600_000).default(600_000),
   maxReworkRounds: z.number().int().min(0).max(2).default(2),
+  retryBaseDelayMs: z.number().int().min(0).max(60_000).default(500),
 }).strict().refine(value => value.totalTokens >= 2 * value.childTokens + 2 * value.coordinationTokens,
   "总预算至少要容纳规划、汇总、一个子任务和独立复核");
 export type TeamOptions = z.infer<typeof TeamOptionsSchema>;
@@ -110,31 +112,55 @@ export class TeamCoordinator {
       catch (error) { console.warn("[Team] 事件记录失败:", error); }
     };
     const request = async (system: string, user: string, json: boolean, settle: (actual: number) => void) => {
-      let actual = 0;
+      let billed = 0;
+      let attempted = false;
+      let receivedResponse = false;
+      const counter = new CommercialTokenCounter();
       try {
-        controller.signal.throwIfAborted();
-        const counter = new CommercialTokenCounter();
-        const promptTokens = counter.estimateText(system + user, this.config.model) + 100;
-        const maxTokens = Math.min(4096, this.options.coordinationTokens - promptTokens);
-        if (maxTokens < 256) { actual = 0; throw new Error("协调上下文超出预留预算"); }
-        actual = this.options.coordinationTokens; // Unknown billing on transport failure: charge the reservation.
-        const response = await this.config.client.chat.completions.create({
-          model: this.config.model, temperature: 0, max_tokens: maxTokens,
-          messages: [{ role: "system", content: system }, { role: "user", content: user }],
-          ...(json ? { response_format: { type: "json_object" as const } } : {}),
-        }, { signal: controller.signal });
-        const choice = response.choices[0];
-        const content = choice?.message.content?.trim() ?? "";
-        const usage = response.usage?.total_tokens;
-        const knownUsage = typeof usage === "number" && Number.isFinite(usage) && usage >= 0;
-        actual = knownUsage ? usage : promptTokens + counter.estimateText(content, this.config.model);
-        if (!knownUsage) report.coordinationUsageEstimated = true;
-        controller.signal.throwIfAborted();
-        if (choice?.message.refusal || choice?.finish_reason !== "stop" || !content) {
-          throw new Error(`协调模型未完整回答：${choice?.message.refusal || choice?.finish_reason || "空响应"}`);
+        // 传输类错误（连接/429/5xx）与子 Agent 的内部重试一致：退避重试，最多 3 次尝试；语义失败不重试。
+        for (let attempt = 1; ; attempt++) {
+          let promptTokens = 0;
+          try {
+            controller.signal.throwIfAborted();
+            promptTokens = counter.estimateText(system + user, this.config.model) + 100;
+            const maxTokens = Math.min(4096, this.options.coordinationTokens - promptTokens);
+            if (maxTokens < 256) throw new Error("协调上下文超出预留预算");
+            attempted = true;
+            const response = await this.config.client.chat.completions.create({
+              model: this.config.model, temperature: 0, max_tokens: maxTokens,
+              messages: [{ role: "system", content: system }, { role: "user", content: user }],
+              ...(json ? { response_format: { type: "json_object" as const } } : {}),
+            }, { signal: controller.signal });
+            receivedResponse = true;
+            const choice = response.choices[0];
+            const content = choice?.message.content?.trim() ?? "";
+            const usage = response.usage?.total_tokens;
+            const knownUsage = typeof usage === "number" && Number.isFinite(usage) && usage >= 0;
+            billed += knownUsage ? usage : promptTokens + counter.estimateText(content, this.config.model);
+            if (!knownUsage) report.coordinationUsageEstimated = true;
+            controller.signal.throwIfAborted();
+            if (choice?.message.refusal || choice?.finish_reason !== "stop" || !content) {
+              throw new Error(`协调模型未完整回答：${choice?.message.refusal || choice?.finish_reason || "空响应"}`);
+            }
+            return content;
+          } catch (error) {
+            if (!isRetryableTransportError(error) || attempt >= 3 || controller.signal.aborted) throw error;
+            // 请求可能已到达服务端：按本次 prompt 估算保守计费，实际账单未知。
+            billed += promptTokens;
+            report.coordinationUsageEstimated = true;
+            await new Promise<void>(resolve => {
+              const timer = setTimeout(resolve, retryDelayMs(this.options.retryBaseDelayMs, attempt));
+              const wake = () => { clearTimeout(timer); resolve(); };
+              if (controller.signal.aborted) wake();
+              else controller.signal.addEventListener("abort", wake, { once: true });
+            });
+            controller.signal.throwIfAborted();
+          }
         }
-        return content;
-      } finally { settle(actual); }
+      } finally {
+        // 请求已发出但从未拿到响应时费用不可知：保守按预留额度结算；未发出的请求不扣费。
+        settle(attempted && !receivedResponse ? Math.max(billed, this.options.coordinationTokens) : billed);
+      }
     };
 
     emit({ type: "team_start", runId, goal });
@@ -146,17 +172,31 @@ export class TeamCoordinator {
       // Reserve synthesis before scheduling workers, so successful workers cannot consume its allowance.
       releaseSummary = budget.reserve(this.options.coordinationTokens)!;
       const releasePlan = budget.reserve(this.options.coordinationTokens)!;
-      const text = await request(
+      const planningSystem =
         `你是任务协调者。把用户目标拆成 1 到 ${this.options.maxTasks} 个必要的子任务，简单目标只拆一个。` +
-        "只输出 JSON 对象，格式为 {\"tasks\":[{\"id\":\"research\",\"role\":\"researcher\",\"goal\":\"任务说明\",\"dependsOn\":[],\"deliverables\":[\"交付内容\"],\"checks\":[{\"id\":\"c1\",\"description\":\"可据证据核对的完成要求\"}]}]}。" +
+        "只输出 JSON 对象，格式为 {\"tasks\":[{\"id\":\"research\",\"role\":\"researcher\",\"goal\":\"任务说明\",\"dependsOn\":[],\"deliverables\":[\"交付内容\"],\"checks\":[{\"id\":\"c1\",\"description\":\"可据证据核对的完成要求\"]}]}]}。" +
         "role 只能是 researcher、analyst、reviewer，id 只能是小写字母开头的字母、数字、下划线或连字符，最多 40 字符。" +
         "每个任务说明最多 4000 字符，依赖必须引用本计划里的 ID，不能循环。子任务只看到原始目标、自己的任务和直接依赖的结论。" +
         "需要已有结果的复核任务必须声明依赖。不能自行创建更多 Agent 或指定模型、权限、预算。" +
         "每个任务必须列出 1–6 个交付项和 1–6 个检查项，每项最多 500 字符，检查项 ID 在任务内唯一。" +
         "检查项应覆盖用户实际要求；宿主会另外安排独立复核和最多两轮定向补查。" +
-        "任务必须符合宿主能力；用户目标超出能力时安排分析可行方案并说明限制，不能声称已执行。\n宿主能力：" + this.config.capabilities,
-        goal, true, releasePlan);
-      report.plan = validateTeamPlan(JSON.parse(text), this.options.maxTasks);
+        "任务必须符合宿主能力；用户目标超出能力时安排分析可行方案并说明限制，不能声称已执行。\n宿主能力：" + this.config.capabilities;
+      const parsePlan = (text: string) => validateTeamPlan(JSON.parse(extractJsonObject(text)), this.options.maxTasks);
+      // 请求层失败（含传输重试耗尽、拒绝、截断）直接结束运行；只有解析/校验失败才值得带反馈重试一次。
+      const planText = await request(planningSystem, goal, true, releasePlan);
+      try {
+        report.plan = parsePlan(planText);
+      } catch (error) {
+        // 规划输出不合法：预算允许时带校验错误重试一次，而不是让整个运行失败。
+        const releaseRetry = budget.reserve(this.options.coordinationTokens);
+        if (!releaseRetry) throw error;
+        const retryText = await request(planningSystem, goal + "\n\n" +
+          wrapUntrustedData("上一次的规划输出与宿主校验错误，修正后重新输出完整计划", JSON.stringify({
+            invalidPlan: planText.slice(0, 8000),
+            validationError: error instanceof Error ? error.message : String(error),
+          })), true, releaseRetry);
+        report.plan = parsePlan(retryText);
+      }
       emit({ type: "team_plan", runId, plan: report.plan });
       const scheduler = new AgentScheduler(this.options, this.config.createChild);
       let nextPlan = report.plan;

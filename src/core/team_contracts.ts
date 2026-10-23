@@ -43,10 +43,21 @@ function unique(values: Array<string | number>, label: string) {
   if (new Set(values).size !== values.length) throw new Error(`${label} 重复`);
 }
 
+/** 从模型输出中容错提取最外层 JSON 对象文本：接受 Markdown 围栏和前后夹杂的说明文字。
+ * 只负责定位文本，不放宽其后的 JSON.parse 与 Schema 校验；提取不到就原样返回，由解析报错。 */
+export function extractJsonObject(raw: string): string {
+  const fenced = [...raw.matchAll(/```(?:json)?[ \t]*\r?\n?([\s\S]*?)```/gi)].map(match => match[1]!.trim());
+  const jsonFenced = fenced.filter(body => body.startsWith("{"));
+  const text = jsonFenced.length ? jsonFenced[jsonFenced.length - 1]! : (fenced.at(-1) ?? raw).trim();
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  return start >= 0 && end > start ? text.slice(start, end + 1) : text;
+}
+
 /** Schema/reference integrity only: neither this validator nor model review proves factual truth. */
 export function parseSubmission(raw: string, task: TeamTask): Submission {
   if (raw.length > 40000) throw new Error("结构化结果过长");
-  const submission = SubmissionSchema.parse(JSON.parse(raw));
+  const submission = SubmissionSchema.parse(JSON.parse(extractJsonObject(raw)));
   unique(submission.deliverables.map(item => item.index), "交付项");
   if (submission.deliverables.length !== task.deliverables.length ||
       submission.deliverables.some(item => item.index >= task.deliverables.length)) throw new Error("必须逐项返回原始交付清单");
@@ -70,7 +81,7 @@ export function parseSubmission(raw: string, task: TeamTask): Submission {
 
 export function parseReview(raw: string, targets: ReviewTarget[]): TeamReview {
   if (raw.length > 60000) throw new Error("复核结果过长");
-  const review = ReviewSchema.parse(JSON.parse(raw));
+  const review = ReviewSchema.parse(JSON.parse(extractJsonObject(raw)));
   const byTask = new Map(targets.map(target => [target.task.id, target]));
   const expected = new Set(targets.flatMap(target => target.task.checks.map(check => `${target.task.id}/${check.id}`)));
   unique(review.checks.map(check => `${check.taskId}/${check.checkId}`), "复核检查项");

@@ -88,6 +88,9 @@ export interface ChildExecution {
   previous?: ChildRecord;
   feedback: ReviewCheck[];
   reviewTargets: ChildRecord[];
+  /** 宿主安排的一次性格式修复：重放该任务上一次的最终回答与校验错误，只修正输出格式。
+   * 修复运行不提供检索工具，消耗并入原任务的预算结算。 */
+  repair?: { previousAnswer: string; validationError: string };
 }
 export interface ChildRunner {
   run(): Promise<AgentResult>;
@@ -134,7 +137,7 @@ export class AgentScheduler {
       let actual = this.options.childTokens;
       try {
         input.signal.throwIfAborted();
-        child = this.createChild({
+        const execution: ChildExecution = {
           parentRunId: input.parentRunId, userGoal: input.userGoal, task: structuredClone(record.task),
           dependencies: record.task.dependsOn.map(id => structuredClone(byId.get(id)!)),
           budget: { maxTotalTokens: this.options.childTokens, maxToolCalls: this.options.childToolCalls,
@@ -146,7 +149,8 @@ export class AgentScheduler {
             ? { previous: context.find(item => item.task.id === record.task.id)! } : {}),
           feedback: structuredClone((input.feedback ?? []).filter(check => check.taskId === record.task.id)),
           reviewTargets: record.mode === "review" ? context : [],
-        });
+        };
+        child = this.createChild(execution);
         const result = await child.run();
         actual = result.totalTokens;
         const { finalAnswer, totalTokens, toolCallsCount, citations, runStatus, taskStatus, stopReason,
@@ -158,8 +162,37 @@ export class AgentScheduler {
             ? "answered" : "failed";
         if (record.state !== "answered") record.reason = errorMessage ?? stopReason;
         if (record.state === "answered") {
-          if (record.mode === "review") record.result.review = parseReview(finalAnswer!, context);
-          else record.result.submission = parseSubmission(finalAnswer!, record.task);
+          const accepted = (candidate: AgentResult) => candidate.runStatus === "completed" &&
+            ["answered", "verified"].includes(candidate.taskStatus) && !!candidate.finalAnswer?.trim();
+          try {
+            if (record.mode === "review") record.result.review = parseReview(finalAnswer!, context);
+            else record.result.submission = parseSubmission(finalAnswer!, record.task);
+          } catch (error) {
+            // 结构校验失败先走一次无工具格式修复，远比等复核补查整轮重跑便宜；仍失败才判 failed。
+            const validationError = error instanceof Error ? error.message : String(error);
+            input.signal.throwIfAborted();
+            const repairChild = this.createChild({ ...execution, repair: { previousAnswer: finalAnswer!, validationError } });
+            try {
+              const repaired = await repairChild.run();
+              actual += repaired.totalTokens;
+              if (!accepted(repaired)) throw new Error(repaired.errorMessage ?? repaired.stopReason ?? "修复运行未给出回答");
+              if (record.mode === "review") record.result.review = parseReview(repaired.finalAnswer!, context);
+              else record.result.submission = parseSubmission(repaired.finalAnswer!, record.task);
+              record.result.finalAnswer = repaired.finalAnswer;
+              record.result.totalTokens += repaired.totalTokens;
+              record.reason = "首次结构化输出未通过校验，已由一次性无工具修复接受";
+            } catch (repairError) {
+              record.state = "failed";
+              record.reason = `结构化结果无效：${validationError}；格式修复未成功：${
+                repairError instanceof Error ? repairError.message : String(repairError)}`;
+            } finally {
+              try { await repairChild.shutdown(); }
+              catch (closeError) {
+                record.state = input.signal.aborted ? "cancelled" : "failed";
+                record.reason = `子 Agent 清理失败：${String(closeError)}`;
+              }
+            }
+          }
         }
       } catch (error) {
         record.state = input.signal.aborted ? "cancelled" : "failed";

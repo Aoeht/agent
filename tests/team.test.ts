@@ -6,7 +6,7 @@ import type OpenAI from "openai";
 import type { AgentStack } from "../src/bootstrap";
 import { loadAgentConfig } from "../src/config";
 import { AgentScheduler, TeamTokenBudget, validateTeamPlan, type ChildFactory, type ChildExecution,
-  type TeamTask } from "../src/core/team_scheduler";
+  type ChildRecord, type TeamTask } from "../src/core/team_scheduler";
 import { TeamCoordinator, type TeamEvent } from "../src/core/team_coordinator";
 import { createTeamChildFactory, createTeamRegistry, loadTeamOptions } from "../src/team_runtime";
 import { ToolRegistry } from "../src/core/registry";
@@ -27,6 +27,10 @@ const review = (tasks: TeamTask[]): TeamReview => ({ summary: "逐项核对完�
 }))) });
 const result = (answer: string, tokens = 10, reason: StopReason = "answer"): AgentResult => ({
   ...runOutcome(reason), finalAnswer: JSON.stringify(submission(answer || "未完成")), totalTokens: tokens, toolCallsCount: 0,
+  messages: [], steps: [], citations: [],
+});
+const rawResult = (finalAnswer: string, tokens = 10): AgentResult => ({
+  ...runOutcome("answer"), finalAnswer, totalTokens: tokens, toolCallsCount: 0,
   messages: [], steps: [], citations: [],
 });
 const schedulerOptions = { concurrency: 2, maxTasks: 6, childTokens: 100, childToolCalls: 5 };
@@ -159,6 +163,67 @@ describe("团队计划与运行时调度", () => {
       expect(records.map(record => record.state)).toEqual(["failed", "skipped"]);
     }
   });
+
+  test("结构化输出不合法时安排一次格式修复；修复成功保留结算、引用与下游", async () => {
+    const repairs: ChildExecution[] = [];
+    let closed = 0;
+    const scheduler = new AgentScheduler(schedulerOptions, execution => {
+      if (execution.repair) {
+        repairs.push(execution);
+        return { run: async () => result(`repaired-${execution.task.id}`), shutdown: async () => { closed++; } };
+      }
+      return { run: async () => rawResult("```json\n" + JSON.stringify({ summary: "只有摘要" }) + "\n```"),
+        shutdown: async () => { closed++; } };
+    });
+    const budget = new TeamTokenBudget(1000);
+    const records = await scheduler.run({ parentRunId: "root", userGoal: "test",
+      plan: { tasks: [task("a"), task("b", ["a"])] }, budget, signal: signal() });
+    expect(records.map(record => record.state)).toEqual(["answered", "answered"]);
+    expect(records[0]!.reason).toContain("修复");
+    expect(records[0]!.result!.finalAnswer).toContain("repaired-a");
+    expect(records[0]!.result!.submission!.summary).toBe("repaired-a");
+    expect(records[0]!.result!.totalTokens).toBe(20); // 原运行 + 修复运行
+    expect(budget.used).toBe(40);
+    expect(closed).toBe(4);
+    expect(repairs.map(execution => execution.task.id)).toEqual(["a", "b"]);
+    expect(repairs[0]!.repair!.previousAnswer).toContain("只有摘要");
+    expect(repairs[0]!.repair!.validationError).toBeTruthy();
+    expect(repairs[0]!.dependencies.map(dep => dep.task.id)).toEqual([]); // 修复沿用原执行上下文
+  });
+
+  test("修复仍不合法才判 failed，下游跳过并保留原始回答供复盘", async () => {
+    const scheduler = new AgentScheduler(schedulerOptions, execution => ({
+      run: async () => rawResult(execution.repair ? "还是不合法" : JSON.stringify({ summary: "缺少交付" })),
+      shutdown: async () => {},
+    }));
+    const records = await scheduler.run({ parentRunId: "root", userGoal: "test",
+      plan: { tasks: [task("a"), task("b", ["a"])] }, budget: new TeamTokenBudget(1000), signal: signal() });
+    expect(records.map(record => record.state)).toEqual(["failed", "skipped"]);
+    expect(records[0]!.reason).toContain("结构化结果无效");
+    expect(records[0]!.reason).toContain("格式修复未成功");
+    expect(records[0]!.result!.finalAnswer).toContain("缺少交付");
+  });
+
+  test("复核输出不合法同样先走一次修复", async () => {
+    const target: ChildRecord = { parentRunId: "root", task: task("a"), state: "answered", round: 0, mode: "work",
+      result: { ...result("A result"), submission: submission("A result") } };
+    const repairs: ChildExecution[] = [];
+    const scheduler = new AgentScheduler(schedulerOptions, execution => {
+      if (execution.repair) {
+        repairs.push(execution);
+        return { run: async () => rawResult(JSON.stringify(review([task("a")]))), shutdown: async () => {} };
+      }
+      return { run: async () => rawResult("{ broken"), shutdown: async () => {} };
+    });
+    const records = await scheduler.run({ parentRunId: "root", userGoal: "test", mode: "review",
+      plan: { tasks: [{ id: "team-review", role: "reviewer", goal: "复核", dependsOn: [],
+        deliverables: ["复核报告"], checks: [{ id: "review", description: "覆盖全部检查项" }] }] },
+      context: [target], budget: new TeamTokenBudget(1000), signal: signal() });
+    expect(records[0]!.state).toBe("answered");
+    expect(records[0]!.result!.review!.checks[0]!.verdict).toBe("pass");
+    expect(repairs[0]!.mode).toBe("review");
+    expect(repairs[0]!.reviewTargets.map(record => record.task.id)).toEqual(["a"]);
+  });
 });
 
 describe("协调模型协议", () => {
@@ -183,16 +248,84 @@ describe("协调模型协议", () => {
     ]);
   });
 
-  test("规划格式错误和输出截断不会启动子任务", async () => {
-    for (const response of [reply("invalid JSON"), reply(JSON.stringify({ tasks: [task("a")] }), "length")]) {
-      let created = 0;
-      const report = await new TeamCoordinator({ model: "test", capabilities: "只读",
-        client: clientWith(async () => response), createChild: execution => { created++; return instant(execution); },
-      }).run("test");
-      expect(report.status).toBe("failed");
-      expect(created).toBe(0);
-      expect(report.totalTokens).toBe(10);
-    }
+  test("规划格式不合法重试一次，仍不合法则失败且不启动子任务", async () => {
+    let created = 0, calls = 0;
+    const report = await new TeamCoordinator({ model: "test", capabilities: "只读",
+      client: clientWith(async () => { calls++; return reply("invalid JSON"); }),
+      createChild: execution => { created++; return instant(execution); },
+    }).run("test");
+    expect(report.status).toBe("failed");
+    expect(created).toBe(0);
+    expect(calls).toBe(2);
+    expect(report.totalTokens).toBe(20);
+  });
+
+  test("规划输出被截断不做重试，直接失败", async () => {
+    let calls = 0;
+    const report = await new TeamCoordinator({ model: "test", capabilities: "只读", createChild: instant,
+      client: clientWith(async () => { calls++; return reply(JSON.stringify({ tasks: [task("a")] }), "length"); }),
+    }).run("test");
+    expect(report.status).toBe("failed");
+    expect(calls).toBe(1);
+    expect(report.totalTokens).toBe(10);
+  });
+
+  test("规划格式不合法时带校验错误重试，重试成功则继续执行", async () => {
+    const planRequests: any[] = [];
+    let planCalls = 0;
+    const client = clientWith(async request => {
+      if (!request.response_format) return reply("最终结论");
+      planCalls++;
+      planRequests.push(request);
+      return planCalls === 1 ? reply("我想想，这个目标……") : reply(JSON.stringify({ tasks: [task("a")] }));
+    });
+    const report = await new TeamCoordinator({ model: "test", client, createChild: instant, capabilities: "只读" })
+      .run("test");
+    expect(report.status).toBe("answered");
+    expect(planCalls).toBe(2);
+    expect(planRequests[1]!.messages[1]!.content).toContain("校验错误");
+    expect(planRequests[1]!.messages[1]!.content).toContain("我想想");
+    expect(report.totalTokens).toBe(50); // 规划 2 次 + 工作 + 复核 + 汇总
+  });
+
+  test("预算不足时规划不做重试，保留原始格式错误", async () => {
+    const report = await new TeamCoordinator({ model: "test", capabilities: "只读", createChild: instant,
+      client: clientWith(async request => request.response_format ? reply("不是 JSON") : reply("汇总")),
+      options: { totalTokens: 36_002, childTokens: 1, coordinationTokens: 18_000 },
+    }).run("test");
+    expect(report.status).toBe("failed");
+    expect(report.error).not.toContain("预算");
+  });
+
+  test("汇总传输错误按退避重试，成功后不降级结果", async () => {
+    let summaryCalls = 0;
+    const client = clientWith(async request => {
+      if (request.response_format) return reply(JSON.stringify({ tasks: [task("a")] }));
+      summaryCalls++;
+      if (summaryCalls === 1) throw Object.assign(new Error("rate limited"), { status: 429 });
+      return reply("最终结论");
+    });
+    const report = await new TeamCoordinator({ model: "test", client, createChild: instant, capabilities: "只读",
+      options: { retryBaseDelayMs: 0 } }).run("test");
+    expect(report.status).toBe("answered");
+    expect(report.finalAnswer).toBe("最终结论");
+    expect(summaryCalls).toBe(2);
+  });
+
+  test("传输重试最多 3 次尝试，耗尽后仍明确失败并保守计费", async () => {
+    let summaryCalls = 0;
+    const client = clientWith(async request => {
+      if (request.response_format) return reply(JSON.stringify({ tasks: [task("a")] }));
+      summaryCalls++;
+      throw Object.assign(new Error("server exploded"), { status: 500 });
+    });
+    const report = await new TeamCoordinator({ model: "test", client, createChild: instant, capabilities: "只读",
+      options: { retryBaseDelayMs: 0 } }).run("test");
+    expect(report.status).toBe("incomplete");
+    expect(summaryCalls).toBe(3);
+    expect(report.finalAnswer).toContain("server exploded");
+    expect(report.coordinationUsageEstimated).toBe(true);
+    expect(report.totalTokens).toBe(18_030); // 3 次尝试费用不可知，汇总按预留 18000 保守结算
   });
 
   test("汇总失败保留子任务结论；部分失败不会被汇总文本变成成功", async () => {
@@ -240,6 +373,8 @@ describe("真实 Agent 接入", () => {
     const a = new PlanStore(), b = new PlanStore();
     const ar = createTeamRegistry(source, a), br = createTeamRegistry(source, b);
     expect(ar.list().map(tool => tool.name)).toEqual(["filesystem__read_text_file", "update_plan", "read_task_state"]);
+    expect(createTeamRegistry(source, new PlanStore(), false).list().map(tool => tool.name))
+      .toEqual(["update_plan", "read_task_state"]); // 格式修复运行没有任何检索工具
     await ar.execute("update_plan", { steps: [{ content: "A plan", status: "pending" }] });
     expect(a.getSteps()).toHaveLength(1);
     expect(b.getSteps()).toHaveLength(0);

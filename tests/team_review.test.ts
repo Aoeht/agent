@@ -73,6 +73,20 @@ describe("固定任务契约和证据引用", () => {
     expect(parseSubmission(JSON.stringify(missing), task("a")).unresolved).toHaveLength(1);
   });
 
+  test("容错提取：接受围栏与前后说明文字，提取后仍走完整校验", () => {
+    const valid = JSON.stringify(submission());
+    for (const raw of [
+      "```json\n" + valid + "\n```",
+      "以下是结果：\n```\n" + valid + "\n```\n请查收。",
+      "前言 " + valid + " 后记",
+    ]) {
+      expect(parseSubmission(raw, task("a")).summary).toBe("已检查退出流程");
+    }
+    expect(() => parseSubmission("```json\n{\"summary\":\"残缺\"}\n```", task("a"))).toThrow();
+    expect(parseReview("说明文字\n```json\n" + JSON.stringify(review([task("a")])) + "\n```",
+      [record(task("a"))]).summary).toBe("所有检查项有支持证据");
+  });
+
   test("复核不能遗漏检查项、引用虚构证据、修改标准或提出空泛返工", () => {
     const tasks = [task("a"), task("b")];
     const targets = tasks.map(t => record(t));
