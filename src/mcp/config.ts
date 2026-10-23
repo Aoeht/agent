@@ -30,6 +30,15 @@ export const McpServers: McpServerConfig[] = [
     loggingLevel: "info",
     enabled: true,
   },
+  {
+    id: "logistics",
+    transport: "streamableHttp",
+    url: "https://dashscope.aliyuncs.com/api/v1/mcps/market-cmgjmcp00075338/mcp",
+    headers: { Authorization: `Bearer ${process.env.DASHSCOPE_API_KEY ?? ""}` },
+    requestTimeoutMs: 30_000,
+    loggingLevel: "info",
+    enabled: true,
+  },
 
   // GitHub（未配置 Token 时自动跳过，不会拖垮 Agent 启动）
 //   {
