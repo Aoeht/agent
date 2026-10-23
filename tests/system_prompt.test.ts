@@ -19,6 +19,8 @@ describe("文件操作分工", () => {
     expect(prompt).not.toContain("filesystem__search_files");
     expect(prompt).not.toContain("当前未挂载 filesystem MCP");
     expect(prompt).toContain("一律自己写脚本文件");
+    expect(prompt).toContain("查看本地图片用 read_image");
+    expect(prompt).toContain("不要用 filesystem 的 read_media_file");
   });
 
   test("未挂载 filesystem 时明确所有文件操作写脚本", () => {

@@ -20,6 +20,7 @@ import { createSetAcceptanceCriteriaTool, createReadTaskStateTool } from "./tool
 import { createAskUserTool } from "./tools/ask_user";
 import { createLoadSkillTool } from "./tools/load_skill";
 import { createRunScriptTool } from "./tools/run_script";
+import { createReadImageTool } from "./tools/read_image";
 import { resolveScriptSandbox, ScriptSandboxResolution } from "./tools/sandbox_docker";
 import { loadSkills, SkillManifest } from "./skills/loader";
 import { McpAdapter } from "./mcp/adapter";
@@ -92,7 +93,10 @@ export function registerSessionTools(
   registry.register(createIngestFindingsTool());
   // 仓库结构只读工具：目录树 + 提交图，回答"项目长什么样"类问题，免确认、可并发
   registry.register(createGitTreeTool());
-  if (options.skills.length > 0) registry.register(createLoadSkillTool(options.skills));
+  // 本地图片进视觉通道的入口：图片直接附加到下一轮模型输入，
+  // 不让多模态模型绕道 read_media_file 的 base64 文本或外部视觉服务
+  registry.register(createReadImageTool({ sandboxRoot }));
+  if (options.skills.length > 0) registry.register(createLoadSkillTool(options.skills, { sandboxRoot }));
   // 沙箱脚本执行器：技能脚本（load_skill 物化到 .skills/）与模型自写脚本共用的唯一执行面；
   // 执行后端由 AGENT_SANDBOX 解析结果决定（宿主机进程或一次性容器），
   // 两种后端每次执行都经 requestHuman 人工确认，不依赖技能是否安装。
