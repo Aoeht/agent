@@ -61,6 +61,8 @@ export interface SessionUIState {
   contextWindow?: number;
   /** 最近一次 step 的 promptTokens ≈ 发送时的上下文长度 */
   lastPromptTokens?: number;
+  /** 最近一次 step 的前缀缓存命中（provider 不上报时保持上次的值） */
+  lastCachedTokens?: number;
   /** 本次页面会话里累计消耗（每次 run_end 累加） */
   accumulatedTokens?: number;
   /** 工具清单与本会话的关闭集合（切换会话时加载） */
@@ -74,7 +76,7 @@ export interface SessionUIState {
     requestedSchema?: Record<string, import("@protocol").RequestedSchemaField>;
   };
   pendingInput?: { id: string; source?: string; prompt: string };
-  stats?: { success: boolean; totalTokens: number; toolCallsCount: number; iterations: number } & Partial<RunOutcome>;
+  stats?: { success: boolean; totalTokens: number; toolCallsCount: number; iterations: number; cachedPromptTokens?: number } & Partial<RunOutcome>;
   runStartIndex?: number;
   meta?: Extract<ServerEvent, { type: "hello" }>;
   cancelledByUser?: boolean;
@@ -212,14 +214,18 @@ export function applyEvent(s: SessionUIState, e: ServerEvent): SessionUIState {
     case "step": {
       // 非流式后端的兜底：把整段 LLM 输出补成一条 assistant 消息
       const last = s.items[s.items.length - 1];
+      const tokens = {
+        lastPromptTokens: e.tokens?.promptTokens ?? s.lastPromptTokens,
+        lastCachedTokens: e.tokens?.cachedPromptTokens ?? s.lastCachedTokens,
+      };
       if (e.llmContent && !(last?.kind === "assistant" && last.streaming)) {
         return {
           ...s,
           items: [...s.items, { kind: "assistant", id: uid(), text: e.llmContent, streaming: false }],
-          lastPromptTokens: e.tokens?.promptTokens ?? s.lastPromptTokens,
+          ...tokens,
         };
       }
-      return { ...s, lastPromptTokens: e.tokens?.promptTokens ?? s.lastPromptTokens };
+      return { ...s, ...tokens };
     }
     case "plan_update":
       return { ...s, plan: e.steps };
@@ -321,6 +327,7 @@ export function applyEvent(s: SessionUIState, e: ServerEvent): SessionUIState {
           runId: e.runId,
           verification: e.verification,
           totalTokens: e.totalTokens,
+          ...(e.cachedPromptTokens ? { cachedPromptTokens: e.cachedPromptTokens } : {}),
           toolCallsCount: e.toolCallsCount,
           iterations: e.iterations,
         },

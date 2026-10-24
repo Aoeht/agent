@@ -460,6 +460,9 @@ export class SessionManager {
           promptTokens: step.tokens.promptTokens,
           completionTokens: step.tokens.completionTokens,
           totalTokens: step.tokens.totalTokens,
+          ...(step.tokens.cachedPromptTokens !== undefined
+            ? { cachedPromptTokens: step.tokens.cachedPromptTokens }
+            : {}),
         },
       });
     });
@@ -522,6 +525,7 @@ export class SessionManager {
       ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
       ...(result.finalAnswer !== null ? { finalAnswer: result.finalAnswer } : {}),
       totalTokens: result.totalTokens,
+      ...(result.cachedPromptTokens ? { cachedPromptTokens: result.cachedPromptTokens } : {}),
       toolCallsCount: result.toolCallsCount,
       iterations: result.steps.length,
       ...(result.budgetStopped !== undefined ? { budgetStopped: result.budgetStopped } : {}),

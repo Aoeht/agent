@@ -111,7 +111,11 @@ let printAsyncEvent: (msg: string) => void = (msg) => console.log(msg);
 
 function printStep(step: StepInfo, includeContent: boolean): void {
   console.log(`\n============== [迭代 ${step.iteration}] ==============`);
-  console.log(`💰 本步消耗 Token: ${step.tokens.totalTokens}`);
+  const cached = step.tokens.cachedPromptTokens;
+  console.log(`💰 本步消耗 Token: ${step.tokens.totalTokens}` +
+    (cached && step.tokens.promptTokens > 0
+      ? `（prompt ${step.tokens.promptTokens} · 前缀缓存命中 ${cached}，占 ${Math.round((cached / step.tokens.promptTokens) * 100)}%）`
+      : ""));
   if (includeContent && step.llmContent) {
     console.log(`🧠 LLM 输出/思考:\n${step.llmContent}`);
   }
@@ -186,8 +190,12 @@ async function runTurn(
       console.log(`  [${c.index}] ${c.title}${c.url ? ` — ${c.url}` : ""}`);
     }
   }
+  const promptTotal = result.steps.reduce((sum, step) => sum + step.tokens.promptTokens, 0);
+  const cacheNote = result.cachedPromptTokens && promptTotal > 0
+    ? ` · ⚡缓存命中 ${Math.round((result.cachedPromptTokens / promptTotal) * 100)}%`
+    : "";
   console.log(
-    `\n---------------- 💰 ${result.totalTokens} tokens · 🔧 ${result.toolCallsCount} 次工具调用 ----------------`
+    `\n---------------- 💰 ${result.totalTokens} tokens${cacheNote} · 🔧 ${result.toolCallsCount} 次工具调用 ----------------`
   );
   console.log(`\n${result.success ? "📝" : "⚠️"} ${STOP_REASON_LABELS[result.stopReason]}${result.budgetStopped ? `（${result.budgetStopped}）` : ""}`);
   if (result.errorMessage) console.log(`详情：${result.errorMessage}`);

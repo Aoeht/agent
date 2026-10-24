@@ -90,12 +90,15 @@ function Card({ title, action, children }: { title: string; action?: React.React
 
 /** 上下文占用：最近一次 step 的 promptTokens ≈ 发送时的上下文长度 */
 function ContextUsage({ session }: { session: SessionUIState }) {
-  const { lastPromptTokens, contextWindow } = session;
+  const { lastPromptTokens, lastCachedTokens, contextWindow } = session;
   if (contextWindow === undefined || lastPromptTokens === undefined || lastPromptTokens <= 0) {
     return <p className="text-xs leading-5 text-ink-400">回合运行后这里显示上下文占用（按最近一轮的 prompt 估算）。</p>;
   }
   const percent = Math.min(100, Math.round((lastPromptTokens / contextWindow) * 100));
   const tone = percent >= 85 ? "bg-terra-500" : percent >= 60 ? "bg-clay-500" : "bg-sage-500";
+  const cachedPercent = lastCachedTokens !== undefined && lastCachedTokens > 0
+    ? Math.min(100, Math.round((lastCachedTokens / lastPromptTokens) * 100))
+    : undefined;
   return (
     <div className="space-y-2">
       <div className="h-1.5 overflow-hidden rounded-full bg-cream-200">
@@ -107,6 +110,14 @@ function ContextUsage({ session }: { session: SessionUIState }) {
           ~{lastPromptTokens.toLocaleString()} / {contextWindow.toLocaleString()}（{percent}%）
         </span>
       </div>
+      {cachedPercent !== undefined && (
+        <div className="flex items-baseline justify-between text-sm">
+          <span className="text-ink-400">前缀缓存命中</span>
+          <span className="font-mono text-xs">
+            ⚡ {lastCachedTokens!.toLocaleString()} / {lastPromptTokens.toLocaleString()}（{cachedPercent}%）
+          </span>
+        </div>
+      )}
     </div>
   );
 }
@@ -120,6 +131,9 @@ function Stats({ session }: { session: SessionUIState }) {
   }
   if ((session.accumulatedTokens ?? 0) > 0) {
     rows.push(["本次累计", session.accumulatedTokens!.toLocaleString()]);
+  }
+  if ((session.stats?.cachedPromptTokens ?? 0) > 0) {
+    rows.push(["缓存命中", `${session.stats!.cachedPromptTokens!.toLocaleString()} tok`]);
   }
   return (
     <div className="space-y-2">

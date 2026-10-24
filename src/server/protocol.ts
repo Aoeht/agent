@@ -135,6 +135,8 @@ export const ServerEventSchema = z.discriminatedUnion("type", [
         promptTokens: z.number().int(),
         completionTokens: z.number().int(),
         totalTokens: z.number().int(),
+        /** prompt 里命中服务端前缀缓存的部分（provider 不上报时缺省；promptTokens 的子集） */
+        cachedPromptTokens: z.number().int().optional(),
       })
       .optional(),
   }),
@@ -198,6 +200,8 @@ export const ServerEventSchema = z.discriminatedUnion("type", [
     success: z.boolean(),
     finalAnswer: z.string().nullable().optional(),
     totalTokens: z.number().int(),
+    /** 本轮命中前缀缓存的 prompt token 合计（provider 不上报时缺省） */
+    cachedPromptTokens: z.number().int().optional(),
     toolCallsCount: z.number().int(),
     iterations: z.number().int(),
     budgetStopped: z.string().optional(),
