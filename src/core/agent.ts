@@ -174,7 +174,26 @@ interface CompletionResult {
   refusal: string | null;
   interrupted?: boolean;
   toolCalls: ToolCall[];
-  tokens: { promptTokens: number; completionTokens: number; totalTokens: number };
+  tokens: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+    /** prompt 里命中服务端前缀缓存的部分；provider 不上报时缺省（是 promptTokens 的子集） */
+    cachedPromptTokens?: number;
+  };
+}
+
+/**
+ * 从 usage 中提取命中前缀缓存的 prompt token 数。
+ * 标准字段是 prompt_tokens_details.cached_tokens（OpenAI/DeepSeek 兼容端/DashScope/GLM 均映射到此）；
+ * DeepSeek 原生 API 的顶层 prompt_cache_hit_tokens 做回退，双保险。
+ * 导出供测试直接断言解析行为。
+ */
+export function cachedTokensOf(usage: OpenAI.Completions.CompletionUsage | undefined): number {
+  const cached = usage?.prompt_tokens_details?.cached_tokens;
+  if (typeof cached === "number" && cached > 0) return cached;
+  const legacy = (usage as { prompt_cache_hit_tokens?: unknown } | undefined)?.prompt_cache_hit_tokens;
+  return typeof legacy === "number" && legacy > 0 ? legacy : 0;
 }
 
 /** 流式已输出部分内容后失败：不可重试，否则重试会重复吐出文本 */
@@ -544,6 +563,7 @@ export class Agent {
       ...(result.task ? { task: result.task } : {}),
       ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
       totalTokens: result.totalTokens,
+      ...(result.cachedPromptTokens ? { cachedPromptTokens: result.cachedPromptTokens } : {}),
       toolCallsCount: result.toolCallsCount,
       iterations: result.steps.length,
       ...(result.budgetStopped !== undefined ? { budgetStopped: result.budgetStopped } : {}),
@@ -637,14 +657,19 @@ export class Agent {
     const userMsg: Message = { role: "user", content: userMessage };
     const injected = this.injectedMessages();
 
+    // 消息顺序服务于服务端前缀缓存（DeepSeek/GLM 等按 64-token 块做最长前缀命中）：
+    // [system + 进程内稳定的注入 + history] 是跨轮只增不变的前缀，全部排在前半段；
+    // 长期摘要块与任务记录每轮内容都会更新（fold 落地 / actions 增长），排在 history
+    // 之后——它们一变只废掉尾部几个小块的缓存，整段 history 的命中前缀跨轮保持有效。
+    // 若反过来放在 history 之前（旧顺序），每次更新都会让全部历史按全价重读。
+    // 钉住属性（压缩永不折叠）由 setPinnedPrefix 的对象集合保证，与消息位置无关。
     const messages: Message[] = [
       { role: "system", content: this.config.systemPrompt },
       ...injected.filter(message => message.role === "system"),
-      // Templates retain system priority ahead of task data and conversation.
-      ...longTermBlock,
-      ...taskBlock,
       ...injected.filter(message => message.role !== "system"),
       ...history,
+      ...longTermBlock,
+      ...taskBlock,
       userMsg,
     ];
     if (this.config.onTurnStart) await this.config.onTurnStart(userMessage);
@@ -652,6 +677,8 @@ export class Agent {
 
     let iterations = 0;
     let totalTokens = 0;
+    // 前缀缓存命中合计：观测口径（含在 promptTokens 内），进 step/run_end 供 REPL/Web/trace 展示
+    let cachedPromptTokens = 0;
     let toolCallsCount = 0;
     // 收集所有 step 的记录
     const steps: StepInfo[] = [];
@@ -672,6 +699,7 @@ export class Agent {
       return {
         ...outcome, messages, finalAnswer, toolCallsCount,
         totalTokens: totalTokens + summaryTokens, steps, budgetStopped, citations: this.runCitations,
+        ...(cachedPromptTokens > 0 ? { cachedPromptTokens } : {}),
       };
     };
 
@@ -724,7 +752,9 @@ export class Agent {
         const promptTokens = completion.tokens.promptTokens;
         const completionTokens = completion.tokens.completionTokens;
         const stepTotalTokens = completion.tokens.totalTokens;
+        const stepCachedTokens = completion.tokens.cachedPromptTokens ?? 0;
         totalTokens += stepTotalTokens;
+        cachedPromptTokens += stepCachedTokens;
         budget.addTokens(stepTotalTokens);
 
         const llmContent = completion.content;
@@ -735,7 +765,8 @@ export class Agent {
         if (validToolCalls.length === 0 || responseStop || runtime?.signal?.aborted) {
           const finalStep: StepInfo = {
             iteration: iterations,
-            tokens: { promptTokens, completionTokens, totalTokens: stepTotalTokens },
+            tokens: { promptTokens, completionTokens, totalTokens: stepTotalTokens,
+              ...(stepCachedTokens > 0 ? { cachedPromptTokens: stepCachedTokens } : {}) },
             llmContent,
             finishReason: completion.finishReason,
             refusal: completion.refusal,
@@ -902,6 +933,7 @@ export class Agent {
             promptTokens,
             completionTokens,
             totalTokens: stepTotalTokens,
+            ...(stepCachedTokens > 0 ? { cachedPromptTokens: stepCachedTokens } : {}),
           },
           llmContent,
           finishReason: completion.finishReason,
@@ -944,6 +976,7 @@ export class Agent {
         );
         lastCompletion = forcedCompletion;
         totalTokens += forcedCompletion.tokens.totalTokens;
+        cachedPromptTokens += forcedCompletion.tokens.cachedPromptTokens ?? 0;
         const finalizeUsage = { ...forcedCompletion.tokens };
         // 收尾偶发空内容（推理模型把 completion 耗在思考上、或 provider 忽略 tool_choice:"none"
         // 又回了工具调用）：摘掉工具再要一次——请求里没有工具可调，模型只能给文本
@@ -956,9 +989,12 @@ export class Agent {
             [...imageMessages]
           );
           totalTokens += forcedCompletion.tokens.totalTokens;
+          cachedPromptTokens += forcedCompletion.tokens.cachedPromptTokens ?? 0;
           finalizeUsage.promptTokens += forcedCompletion.tokens.promptTokens;
           finalizeUsage.completionTokens += forcedCompletion.tokens.completionTokens;
           finalizeUsage.totalTokens += forcedCompletion.tokens.totalTokens;
+          finalizeUsage.cachedPromptTokens = (finalizeUsage.cachedPromptTokens ?? 0) +
+            (forcedCompletion.tokens.cachedPromptTokens ?? 0);
           lastCompletion = forcedCompletion;
         }
         const forcedContent = forcedCompletion.content;
@@ -987,6 +1023,7 @@ export class Agent {
       if (partial) {
         lastCompletion = partial;
         totalTokens += partial.tokens.totalTokens;
+        cachedPromptTokens += partial.tokens.cachedPromptTokens ?? 0;
         const step: StepInfo = { iteration: iterations, tokens: partial.tokens,
           llmContent: partial.content, finishReason: partial.finishReason, refusal: partial.refusal, toolCalls: [] };
         steps.push(step);
@@ -1003,6 +1040,7 @@ export class Agent {
         ...outcome, messages, finalAnswer,
         toolCallsCount, totalTokens: totalTokens + summaryTokens, steps, budgetStopped,
         citations: this.runCitations,
+        ...(cachedPromptTokens > 0 ? { cachedPromptTokens } : {}),
       };
     }
   }
@@ -1059,6 +1097,7 @@ export class Agent {
     const choice = response.choices[0];
     if (!choice) throw new Error("No response from LLM");
 
+    const cached = cachedTokensOf(response.usage);
     return {
       content: choice.message.content ?? null,
       finishReason: choice.finish_reason ?? null,
@@ -1068,6 +1107,7 @@ export class Agent {
         promptTokens: response.usage?.prompt_tokens ?? 0,
         completionTokens: response.usage?.completion_tokens ?? 0,
         totalTokens: response.usage?.total_tokens ?? 0,
+        ...(cached > 0 ? { cachedPromptTokens: cached } : {}),
       },
     };
   }
@@ -1095,10 +1135,12 @@ export class Agent {
 
         // usage 只在流末尾的独立 chunk 里出现（include_usage 开启时）
         if (chunk.usage) {
+          const cached = cachedTokensOf(chunk.usage);
           usage = {
             promptTokens: chunk.usage.prompt_tokens,
             completionTokens: chunk.usage.completion_tokens,
             totalTokens: chunk.usage.total_tokens,
+            ...(cached > 0 ? { cachedPromptTokens: cached } : {}),
           };
         }
 

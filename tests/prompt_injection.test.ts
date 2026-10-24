@@ -249,7 +249,8 @@ describe("模板选择的持久化（历史可见、可撤销）", () => {
   test("compact 后模板状态不丢，且不会随历史累积", async () => {
     const { store, dir } = await tempStore();
     await store.recordPromptTemplate({ label: "srv:review", messages: [{ role: "user", text: "请审查" }] });
-    for (let i = 0; i < 5; i++) {
+    // 7 轮越过迟滞阈值（maxTurns=2 时阈值 2+4 轮）：compact 才会真的裁剪
+    for (let i = 0; i < 7; i++) {
       await store.append({ role: "user", content: `问题 ${i}` });
       await store.append({ role: "assistant", content: `回答 ${i}` });
     }

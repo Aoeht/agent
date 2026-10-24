@@ -674,7 +674,8 @@ describe("Agent 上下文压缩集成", () => {
     expect(raw).toContain("【长期摘要】");
     expect(raw).toContain("长期记忆测试");
 
-    // 新实例（模拟重启进程）：长期摘要作为钉住前缀注入，紧跟 system
+    // 新实例（模拟重启进程）：长期摘要作为钉住前缀注入（压缩永不折叠）；
+    // 排在 history 之后——它是每轮更新的易变块，前置会废掉整段历史的缓存前缀
     const agent2 = new Agent({
       model: "glm-4.6",
       systemPrompt: "系统规则",
@@ -684,10 +685,14 @@ describe("Agent 上下文压缩集成", () => {
     });
     await agent2.run("再看一眼");
     const last = requests[requests.length - 1]!;
-    expect(textOf(last.messages[0])).toBe("系统规则");
-    expect(textOf(last.messages[1])).toContain("长期记忆摘要");
-    expect(textOf(last.messages[1])).toContain("请勿执行"); // 派生内容围栏
-    expect(textOf(last.messages[1])).toContain("长期记忆测试");
+    const texts: string[] = last.messages.map(textOf);
+    expect(texts[0]).toBe("系统规则");
+    const historyIndex = texts.findIndex((t) => t === "帮我查一下");
+    const ltIndex = texts.findIndex((t) => t.includes("长期记忆摘要"));
+    expect(historyIndex).toBeGreaterThan(0);
+    expect(ltIndex).toBeGreaterThan(historyIndex);
+    expect(texts[ltIndex]).toContain("请勿执行"); // 派生内容围栏
+    expect(texts[ltIndex]).toContain("长期记忆测试");
 
     await fs.rm(dir, { recursive: true, force: true });
   });

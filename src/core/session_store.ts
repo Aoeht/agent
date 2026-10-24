@@ -367,10 +367,19 @@ export class SessionStore {
     const sessionName = SessionStore.lastMetaValue(records, SESSION_NAME_PREFIX);
     const model = SessionStore.lastMetaValue(records, MODEL_PREFIX);
     const longTermSummary = SessionStore.lastMetaValue(records, LONG_TERM_SUMMARY_PREFIX);
-    const messages = SessionStore.toConversationTurns(
-      SessionStore.repairTail(records.filter((record) => !isMetaRecord(record)))
-    );
-    const kept = messages.slice(-Math.max(0, Math.floor(maxTurns)) * 2);
+    const nonMeta = records.filter((record) => !isMetaRecord(record));
+    const messages = SessionStore.toConversationTurns(SessionStore.repairTail(nonMeta));
+    const keepTurns = Math.max(0, Math.floor(maxTurns));
+    // 迟滞窗口：历史条数没超过 maxTurns+slack 就不动文件。滑动窗口如果每轮都裁一条，
+    // history 的第一条每轮都变，服务端前缀缓存对整段历史每轮作废一次；攒够一批再
+    // 一次性裁到 maxTurns，把失效频率从每轮一次降到每 slack 轮一次。
+    // 有"要清理的东西"（旧版本遗留的工具组、未配对的残尾）时不受迟滞限制，照常重写。
+    if (keepTurns > 0) {
+      const slackTurns = Math.max(4, Math.ceil(keepTurns * 0.25));
+      const hasForeignRecords = nonMeta.length !== messages.length;
+      if (!hasForeignRecords && messages.length <= (keepTurns + slackTurns) * 2) return;
+    }
+    const kept = messages.slice(-keepTurns * 2);
     if (activeTemplate) {
       kept.push({ role: "user", content: templateRecordBody(activeTemplate) });
     }

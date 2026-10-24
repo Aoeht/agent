@@ -128,6 +128,12 @@ export interface StepInfo {
     promptTokens: number;
     completionTokens: number;
     totalTokens: number;
+    /**
+     * prompt 里命中服务端前缀缓存的部分（usage.prompt_tokens_details.cached_tokens，
+     * 兼容 DeepSeek 原生 prompt_cache_hit_tokens）。provider 不上报时缺省。
+     * 已含在 promptTokens 内，是它的子集——账本口径不变，这里只做观测。
+     */
+    cachedPromptTokens?: number;
   };
   /** 本轮 LLM 的文本输出（思考过程或解释，可能为 null） */
   llmContent: string | null;
@@ -160,6 +166,8 @@ export interface AgentResult extends RunOutcome {
   finalAnswer: string | null;
   toolCallsCount: number;
   totalTokens: number;
+  /** 本轮各次调用命中前缀缓存的 prompt token 合计（provider 不上报时缺省） */
+  cachedPromptTokens?: number;
   /** 每步的详细 token 与工具调用记录 */
   steps: StepInfo[];
   /** 本轮工具产出且经过编号的证据来源（Grounded 引用，按 index 全局递增） */

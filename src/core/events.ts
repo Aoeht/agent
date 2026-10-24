@@ -20,6 +20,8 @@ export interface RunEndEvent extends RunOutcome {
   task?: TaskRecord;
   success: boolean;
   totalTokens: number;
+  /** 本轮命中前缀缓存的 prompt token 合计（provider 不上报时缺省）；用于观测缓存收益 */
+  cachedPromptTokens?: number;
   toolCallsCount: number;
   /** 完成的迭代数（含强制收尾那一次） */
   iterations: number;
