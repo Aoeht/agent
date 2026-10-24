@@ -14,6 +14,7 @@ import { createAgentStack } from "./bootstrap";
 import { buildSystemPrompt } from "./prompts/system";
 import { handlePromptCommand } from "./prompts/commands";
 import { handleModelCommand } from "./core/model_command";
+import { candidateModels, formatModelProbeLine, probeModels } from "./core/model_probe";
 import { TraceRecorder } from "./core/trace";
 import { CheckpointStore } from "./core/checkpoint_store";
 import { handleRewindCommand } from "./core/rewind_command";
@@ -446,6 +447,11 @@ function readStdin(): Promise<string> {
   });
 }
 
+/** AGENT_MODEL_PROBE=0/false/off/no 关闭对话开始的模型可用性探测（默认开启） */
+function modelProbeEnabled(): boolean {
+  return !["0", "false", "off", "no"].includes((process.env.AGENT_MODEL_PROBE ?? "").trim().toLowerCase());
+}
+
 async function main() {
   const config = loadAgentConfig();
   console.log(
@@ -559,6 +565,18 @@ async function main() {
         streamState.active = true;
         process.stdout.write(delta);
       });
+    }
+
+    // 每次对话开始探一次模型可用性：清单里有 ≠ 能用（免费配额按模型计，403 到对话中途才炸）。
+    // 探测失败或关闭（AGENT_MODEL_PROBE=0）只降级为不打横幅，不影响会话
+    if (modelProbeEnabled()) {
+      try {
+        const probes = await probeModels({ models: candidateModels(config) });
+        const line = formatModelProbeLine(probes);
+        if (line) console.log(`🩺 ${line}`);
+      } catch (error) {
+        console.warn(`⚠️ 模型可用性探测失败（不影响会话）: ${error instanceof Error ? error.message : error}`);
+      }
     }
 
     // 7. 终端进 REPL；管道进单次模式；AGENT_REPL=1 强制逐行 REPL（多回合脚本/测试用）

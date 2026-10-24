@@ -247,6 +247,21 @@ export interface SessionSummaryDTO {
   firstUserText: string;
 }
 
+/**
+ * 模型可用性探测结果（GET /models/status）：对候选模型真发一条微型补全请求。
+ * 服务商 /models 清单里"有"不等于"能用"（免费配额按模型计），对话开始前先探一次。
+ * 结构与 core/model_probe.ts 的 ModelProbeResult 一致——DTO 在协议层独立声明，
+ * web/ 只允许经 @protocol 跨边界拿类型。
+ */
+export interface ModelProbeStatus {
+  model: string;
+  ok: boolean;
+  kind: "ok" | "quota" | "unavailable" | "error";
+  /** 失败时的错误摘要，前端 tooltip 用 */
+  detail?: string;
+  latencyMs?: number;
+}
+
 export interface HistoryMessageDTO {
   role: "user" | "assistant";
   content: string;

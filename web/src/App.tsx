@@ -96,6 +96,7 @@ export default function App() {
               running={busy === true}
               disabled={false}
               models={state.models}
+              modelStatus={state.modelStatus}
               config={{
                 model: current.model ?? current.meta?.model,
                 temperature: current.temperature,

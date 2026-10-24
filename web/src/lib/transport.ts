@@ -1,6 +1,7 @@
 // web/src/lib/transport.ts
 import type {
   ApprovalDecisionBody,
+  ModelProbeStatus,
   ServerEvent,
   SessionConfigEvent,
   SessionDetailDTO,
@@ -32,6 +33,8 @@ export interface Transport {
   openSession(sessionId: string): Promise<SessionDetailDTO>;
   /** 可选模型清单（服务商实时清单 + env 前置合并） */
   listModels(): Promise<string[]>;
+  /** 模型可用性探测（对话开始时拉取；清单里有 ≠ 能用，配额按模型计） */
+  listModelStatus(): Promise<ModelProbeStatus[]>;
   /** 应用会话级配置；成功后服务器广播 session_config 事件 */
   applySessionConfig(sessionId: string, config: SessionConfigInput): Promise<SessionConfigEvent>;
   getSettings(): Promise<{ sandboxRoot: string }>;

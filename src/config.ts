@@ -23,6 +23,7 @@
  *   AGENT_SANDBOX_NET              docker 沙箱网络：none 断网（默认，防外传）/ bridge 显式放开
  *   AGENT_CHECKPOINTS              是否开启回合级回滚检查点（/rewind），"0"/"false" 关闭（默认开启）
  *   AGENT_MEMORY_DIR               跨会话记忆目录（缺省 .agent-memory；记忆条目 memory.jsonl + MEMORY.md 视图）
+ *   AGENT_MODEL_PROBE              对话开始时探测候选模型可用性（微型补全），"0"/"false" 关闭（默认开启）
  */
 
 import path from "node:path";

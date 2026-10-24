@@ -1,5 +1,6 @@
 // web/src/components/Composer.tsx
 import { useEffect, useRef, useState } from "react";
+import type { ModelProbeStatus } from "@protocol";
 import type { SessionConfigInput } from "../lib/transport";
 import { useMediaQuery } from "../lib/useMediaQuery";
 
@@ -9,11 +10,20 @@ export interface ComposerConfig {
   maxIterations?: number;
 }
 
+/** 探测结果的展示标记：ok 不标注（默认即正常），失败档位给前缀与 tooltip 说明 */
+function modelOptionLabel(model: string, probe: ModelProbeStatus | undefined): string {
+  if (!probe || probe.ok) return model;
+  if (probe.kind === "quota") return `⛔ ${model}（配额耗尽）`;
+  if (probe.kind === "unavailable") return `⚠️ ${model}（不可用）`;
+  return `⚠️ ${model}（探测异常）`;
+}
+
 export function Composer({
   sessionId,
   running,
   disabled,
   models,
+  modelStatus,
   config,
   onSend,
   onCancel,
@@ -24,6 +34,8 @@ export function Composer({
   running: boolean;
   disabled: boolean;
   models: string[];
+  /** 模型可用性探测结果（对话开始时拉取；探测失败的模型在下拉框里标注出来） */
+  modelStatus?: ModelProbeStatus[];
   config: ComposerConfig;
   onSend: (text: string) => void;
   onCancel: () => void;
@@ -31,6 +43,7 @@ export function Composer({
   /** 欢迎态（sessionId=null）专用：草稿一变就上报，由上层暂存、随首条消息经 createAndSend 落地 */
   onDraftConfig?: (config: SessionConfigInput) => void;
 }) {
+  const statusByModel = new Map((modelStatus ?? []).map((probe) => [probe.model, probe]));
   const [text, setText] = useState("");
   const [panelOpen, setPanelOpen] = useState(false);
   const [draft, setDraft] = useState<{ model: string; temperature: string; maxIterations: string }>({
@@ -164,11 +177,14 @@ export function Composer({
                 }}
                 className="mt-1 w-full rounded-xl border border-cream-300 bg-white/70 px-3 py-2 font-mono text-xs outline-none focus:border-clay-500"
               >
-                {models.map((model) => (
-                  <option key={model} value={model}>
-                    {model}
-                  </option>
-                ))}
+                {models.map((model) => {
+                  const probe = statusByModel.get(model);
+                  return (
+                    <option key={model} value={model} title={probe && !probe.ok ? probe.detail : undefined}>
+                      {modelOptionLabel(model, probe)}
+                    </option>
+                  );
+                })}
               </select>
             </label>
             <div className="mt-3 grid grid-cols-2 gap-3">

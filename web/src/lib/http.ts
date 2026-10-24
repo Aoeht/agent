@@ -1,6 +1,7 @@
 // web/src/lib/http.ts
 import type {
   ApprovalDecisionBody,
+  ModelProbeStatus,
   ServerEvent,
   SessionConfigEvent,
   SessionDetailDTO,
@@ -49,6 +50,10 @@ export class HttpTransport implements Transport {
 
   async listModels(): Promise<string[]> {
     return (await this.request("/models")).json();
+  }
+
+  async listModelStatus(): Promise<ModelProbeStatus[]> {
+    return (await this.request("/models/status")).json();
   }
 
   async applySessionConfig(sessionId: string, config: SessionConfigInput): Promise<SessionConfigEvent> {

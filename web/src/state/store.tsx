@@ -11,6 +11,7 @@ import {
 } from "react";
 import type {
   ApprovalDecisionBody,
+  ModelProbeStatus,
   PlanStep,
   ServerEvent,
   SessionDetailDTO,
@@ -93,6 +94,8 @@ interface AppState {
   byId: Record<string, SessionUIState>;
   /** 可选模型清单（GET /models，启动时拉一次） */
   models: string[];
+  /** 模型可用性探测（GET /models/status）：对话开始时刷新，配额耗尽的模型在前端标出 */
+  modelStatus: ModelProbeStatus[];
   /** 服务器级设置（目前只有沙箱根目录） */
   appSettings: { sandboxRoot?: string };
 }
@@ -102,6 +105,7 @@ interface AppState {
 type Action =
   | { type: "sessions_loaded"; sessions: SessionSummaryDTO[] }
   | { type: "models_loaded"; models: string[] }
+  | { type: "model_status_loaded"; status: ModelProbeStatus[] }
   | { type: "settings_loaded"; sandboxRoot?: string }
   | { type: "sandbox_root_changed"; sandboxRoot: string }
   | { type: "tools_loaded"; id: string; tools: Array<{ name: string; description: string }>; disabled: string[] }
@@ -384,6 +388,8 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, sessions: action.sessions };
     case "models_loaded":
       return { ...state, models: action.models };
+    case "model_status_loaded":
+      return { ...state, modelStatus: action.status };
     case "settings_loaded":
       return {
         ...state,
@@ -544,6 +550,7 @@ export function StoreProvider({
     currentId: null,
     byId: {},
     models: [],
+    modelStatus: [],
     appSettings: {},
   });
   const stateRef = useRef(state);
@@ -561,6 +568,15 @@ export function StoreProvider({
       if (!alive) return;
       dispatch({ type: "models_loaded", models });
     });
+    void resolvedTransport
+      .listModelStatus()
+      .then((status) => {
+        if (!alive) return;
+        dispatch({ type: "model_status_loaded", status });
+      })
+      .catch(() => {
+        // 探测端点不可用（老版本后端）不拦 UI：下拉框只是没有可用性标注
+      });
     void resolvedTransport.getSettings().then((settings) => {
       if (!alive) return;
       dispatch({ type: "settings_loaded", sandboxRoot: settings.sandboxRoot });
@@ -578,6 +594,13 @@ export function StoreProvider({
     void resolvedTransport.openSession(currentId).then((detail) => {
       if (alive) dispatch({ type: "session_opened", detail });
     });
+    // 每次对话开始刷新模型可用性（服务端 60s 缓存，切换会话的重复拉取几乎零成本）
+    void resolvedTransport
+      .listModelStatus()
+      .then((status) => {
+        if (alive) dispatch({ type: "model_status_loaded", status });
+      })
+      .catch(() => {});
     void resolvedTransport.listTools(currentId).then((toolState) => {
       if (alive) dispatch({ type: "tools_loaded", id: currentId, ...toolState });
     });

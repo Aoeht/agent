@@ -43,6 +43,7 @@ export function Welcome() {
           running={false}
           disabled={false}
           models={state.models}
+          modelStatus={state.modelStatus}
           // 模型回退到第一个可选项：⚙ 按钮在无 config.model 时会禁用，欢迎态要能直接打开选模型
           config={{ ...config, model: config.model ?? state.models[0] }}
           onSend={(text) => void actions.createAndSend(text, Object.keys(config).length > 0 ? config : undefined)}
