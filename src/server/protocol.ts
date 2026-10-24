@@ -164,6 +164,8 @@ export const ServerEventSchema = z.discriminatedUnion("type", [
       "hard_truncate",
       "emergency",
       "longterm_summary",
+      "memory_write",
+      "memory_failed",
     ]),
     messages: z.number().int().optional(),
     tokens: z.number().int().optional(),

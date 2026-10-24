@@ -8,6 +8,7 @@ import { AgentEventBus } from "./events";
 import { ContextManager } from "./context_manager";
 import { requestSummaryWithRetry } from "./summary_call";
 import { SessionStore, normalizeSessionName } from "./session_store";
+import { MemoryStore } from "./memory_store";
 import { RunBudget, RunBudgetLimits, BudgetStopReason } from "./run_budget";
 import { wrapUntrustedData, wrapSummaryBlock } from "./untrusted";
 import { PlanStore } from "./plan_store";
@@ -104,6 +105,11 @@ interface AgentConfig {
    * 注入实例可实现 per-agent 工具集隔离（同进程多个不同工具集的 agent）。
    */
   tools?: ToolRegistry;
+  /**
+   * 跨会话核心记忆仓：传入后每次 run 开始把生效记忆的索引注入为钉住前缀
+   * （压缩永不折叠），memory 工具的写入对所有会话可见。缺省不启用。
+   */
+  memoryStore?: MemoryStore;
   /** 传入后开启多轮会话：历史从本地加载，运行中逐条追加落盘 */
   sessionStore?: SessionStore;
   /**
@@ -230,6 +236,7 @@ export class Agent {
           AgentConfig,
           | "tools"
           | "sessionStore"
+          | "memoryStore"
           | "client"
           | "summaryModel"
           | "budget"
@@ -635,6 +642,26 @@ export class Agent {
           { role: "assistant", content: "收到，我已了解以上长期记忆摘要。" },
         ]
       : [];
+    // 跨会话核心记忆：全局生效记忆的索引（带条目 id，模型可用 memory 工具增改）。
+    // 更新频率远低于任务块，排在长期摘要之后同段注入，前缀缓存失效范围保持局部。
+    let memoryBlock: Message[] = [];
+    if (this.config.memoryStore) {
+      try {
+        const memoryIndex = await this.config.memoryStore.loadIndex();
+        if (memoryIndex) {
+          memoryBlock = [
+            { role: "user", content: wrapSummaryBlock("长期记忆（跨会话）", memoryIndex) },
+            { role: "assistant", content: "收到，我会结合以上跨会话记忆；与当前对话或工具实测冲突时以后者为准。" },
+          ];
+        }
+      } catch (error) {
+        // 记忆读取失败不拦 run：当作没带记忆继续，只留一条可观测事件
+        this.events.emit("compact", {
+          action: "memory_failed",
+          detail: `跨会话记忆读取失败：${error instanceof Error ? error.message : error}`,
+        });
+      }
+    }
     // Fresh plain chat has no task state worth injecting. Include actual work or
     // resumed durable instructions, without repeating the very first user message.
     const needsTaskContext = this.activeTask && (this.activeTask.criteria.length || this.activeTask.plan.length ||
@@ -649,7 +676,7 @@ export class Agent {
       })) },
       { role: "assistant", content: "我会按当前用户目标核对已有进度；工具返回不等于验收通过。" },
     ] : [];
-    this.contextManager.setPinnedPrefix([...longTermBlock, ...taskBlock]);
+    this.contextManager.setPinnedPrefix([...longTermBlock, ...memoryBlock, ...taskBlock]);
     this.sessionLongTermSummary = stored?.longTermSummary;
     this.lastRunObservations = [];
     // The plan is restored from the task record by runManaged, including across restarts.
@@ -659,9 +686,9 @@ export class Agent {
 
     // 消息顺序服务于服务端前缀缓存（DeepSeek/GLM 等按 64-token 块做最长前缀命中）：
     // [system + 进程内稳定的注入 + history] 是跨轮只增不变的前缀，全部排在前半段；
-    // 长期摘要块与任务记录每轮内容都会更新（fold 落地 / actions 增长），排在 history
-    // 之后——它们一变只废掉尾部几个小块的缓存，整段 history 的命中前缀跨轮保持有效。
-    // 若反过来放在 history 之前（旧顺序），每次更新都会让全部历史按全价重读。
+    // 长期摘要块、跨会话记忆块与任务记录每轮内容都可能更新（fold 落地 / 记忆增改 / actions
+    // 增长），排在 history 之后——它们一变只废掉尾部几个小块的缓存，整段 history 的命中
+    // 前缀跨轮保持有效。若反过来放在 history 之前（旧顺序），每次更新都会让全部历史按全价重读。
     // 钉住属性（压缩永不折叠）由 setPinnedPrefix 的对象集合保证，与消息位置无关。
     const messages: Message[] = [
       { role: "system", content: this.config.systemPrompt },
@@ -669,6 +696,7 @@ export class Agent {
       ...injected.filter(message => message.role !== "system"),
       ...history,
       ...longTermBlock,
+      ...memoryBlock,
       ...taskBlock,
       userMsg,
     ];

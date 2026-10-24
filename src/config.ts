@@ -22,9 +22,16 @@
  *   AGENT_SANDBOX_IMAGE            docker 沙箱镜像（默认 ai-agent-sandbox:latest，构建见 tools/sandbox/Dockerfile）
  *   AGENT_SANDBOX_NET              docker 沙箱网络：none 断网（默认，防外传）/ bridge 显式放开
  *   AGENT_CHECKPOINTS              是否开启回合级回滚检查点（/rewind），"0"/"false" 关闭（默认开启）
+ *   AGENT_MEMORY_DIR               跨会话记忆目录（缺省 .agent-memory；记忆条目 memory.jsonl + MEMORY.md 视图）
  */
 
+import path from "node:path";
 import type { RunBudgetLimits } from "./core/run_budget";
+
+/** 跨会话记忆目录：AGENT_MEMORY_DIR 可改，缺省落在工作区 .agent-memory（与 .agent-sessions 同级） */
+export function resolveMemoryDir(): string {
+  return process.env.AGENT_MEMORY_DIR?.trim() || path.join(process.cwd(), ".agent-memory");
+}
 
 /** run_script 执行沙箱模式，语义见 tools/sandbox_docker.ts 的 resolveScriptSandbox */
 export type ScriptSandboxMode = "host" | "docker" | "auto";

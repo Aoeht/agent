@@ -4,6 +4,7 @@ import type { McpClientManager } from "../mcp/client_manager";
 import type { AgentRunConfig } from "../config";
 import type { SkillManifest } from "../skills/loader";
 import type { ScriptSandboxResolution } from "../tools/sandbox_docker";
+import type { MemoryStore } from "../core/memory_store";
 import { createAgentStack } from "../bootstrap";
 import type { UiBridge } from "./bridge";
 
@@ -19,6 +20,8 @@ export interface ServerRuntime {
   mcp: McpClientManager;
   skills: SkillManifest[];
   sandbox: ScriptSandboxResolution;
+  /** 跨会话核心记忆仓：每会话 Agent 注入同一实例（全局一份，随栈重建刷新） */
+  memoryStore: MemoryStore;
   /** 当前沙箱根（绝对路径）。UI 切换后整栈重建并更新此字段 */
   sandboxRoot: string;
   /**
@@ -49,6 +52,7 @@ export async function createServerRuntime(options: {
     mcp: stack.mcp,
     skills: stack.skills,
     sandbox: stack.sandbox,
+    memoryStore: stack.memoryStore,
     sandboxRoot: stack.sandboxRoot,
     disableRunScript: options.disableRunScript === true,
     ...(stack.untrustedContext !== "" ? { untrustedContext: stack.untrustedContext } : {}),
@@ -77,6 +81,7 @@ export async function rebuildRuntimeWithSandboxRoot(
   runtime.registry = next.registry;
   runtime.mcp = next.mcp;
   runtime.sandbox = next.sandbox;
+  runtime.memoryStore = next.memoryStore;
   runtime.sandboxRoot = next.sandboxRoot;
   runtime.untrustedContext = next.untrustedContext !== "" ? next.untrustedContext : undefined;
   runtime.dispose = next.dispose;

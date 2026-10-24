@@ -9,6 +9,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { ToolRegistry, ToolCallMiddleware } from "./core/registry";
 import { PlanStore } from "./core/plan_store";
+import { MemoryStore } from "./core/memory_store";
+import { createMemoryTool } from "./tools/memory";
 import { createToolTelemetry } from "./tools/telemetry";
 import { createSearchWebTool } from "./tools/tavily_search";
 import { createRagSearchTool } from "./tools/rag_search";
@@ -31,7 +33,7 @@ import { MCP_SANDBOX_DIR, McpServers } from "./mcp/config";
 import { McpConfigWatcher, resolveMcpServers } from "./mcp/hot_reload";
 import { createPolicyMatrix } from "./mcp/policy_matrix";
 import type { Confirmer, McpResourceInfo } from "./mcp/types";
-import { loadAgentConfig, AgentRunConfig } from "./config";
+import { loadAgentConfig, AgentRunConfig, resolveMemoryDir } from "./config";
 
 export interface AgentStackOptions {
   /** 人工确认器：CLI 用终端版（createCliConfirmer），Web UI 用审批桥。缺省时策略 ask 直接拒绝 */
@@ -62,6 +64,8 @@ export interface AgentStack {
   sandboxRoot: string;
   registry: ToolRegistry;
   planStore: PlanStore;
+  /** 跨会话核心记忆仓：全局一份，注入 Agent 上下文并绑定 memory 工具 */
+  memoryStore: MemoryStore;
   mcp: McpClientManager;
   /** MCP 配置热载入 watcher（关停要随 mcp 一起收口，用 dispose()） */
   mcpWatcher: McpConfigWatcher;
@@ -95,12 +99,16 @@ export function registerSessionTools(
     };
     /** 委派子代理的轨迹目录；缺省 .agent-sessions/delegates */
     delegateTraceDir?: string;
+    /** 跨会话记忆仓；传入才注册 memory 工具（与 Agent 注入共用同一实例） */
+    memoryStore?: MemoryStore;
   }
 ): void {
   const sandboxRoot = options.sandboxRoot ?? MCP_SANDBOX_DIR;
   registry.register(createUpdatePlanTool(options.planStore));
   registry.register(createSetAcceptanceCriteriaTool());
   registry.register(createReadTaskStateTool());
+  // 跨会话记忆：模型自管的 user/feedback/project/reference 四类事实，宿主注入同一 MemoryStore 实例
+  if (options.memoryStore) registry.register(createMemoryTool(options.memoryStore));
   // 主动澄清：信息缺失且查不到时向用户征询自由文本回答，通道由入口注入（CLI readline / UI human_input_request）
   registry.register(createAskUserTool());
   registry.register(createSearchWebTool());
@@ -199,11 +207,17 @@ export async function createAgentStack(options: AgentStackOptions = {}): Promise
   for (const middleware of options.extraMiddleware ?? []) registry.use(middleware);
   // 计划状态仓与工具分开各持一半：仓由 Agent 消费（pin 上下文 + 事件），工具只做校验写入
   const planStore = new PlanStore();
+  // 跨会话记忆仓：全局一份（CLI 与 Web 服务器各自创建，同一工作区共目录）；
+  // 读取失败只降级为「无记忆」，不阻塞启动
+  const memoryStore = new MemoryStore({ dir: resolveMemoryDir() });
+  const memoryCount = await memoryStore.active().then((entries) => entries.length, () => 0);
+  console.log(`🧠 ${prefix}跨会话记忆: ${memoryCount} 条（${memoryStore.dir}）`);
   registerSessionTools(registry, {
     skills,
     planStore,
     sandbox,
     sandboxRoot,
+    memoryStore,
     disableRunScript: options.disableRunScript === true,
     config,
   });
@@ -272,6 +286,7 @@ export async function createAgentStack(options: AgentStackOptions = {}): Promise
     sandboxRoot,
     registry,
     planStore,
+    memoryStore,
     mcp,
     mcpWatcher,
     untrustedContext,

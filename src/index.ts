@@ -456,7 +456,7 @@ async function main() {
   //      与 Web UI 服务器共用同一装配点（src/bootstrap.ts），两条入口的差别只剩
   //      Confirmer（终端逐个询问 vs UI 审批桥）与日志前缀
   const stack = await createAgentStack({ confirmer: createCliConfirmer(), config });
-  const { skills, registry: tools, planStore, mcp, untrustedContext } = stack;
+  const { skills, registry: tools, planStore, memoryStore, mcp, untrustedContext } = stack;
   // 提示词里的文件操作分工按实际挂载情况生成：server 下线时不再提不存在的工具
   const filesystemTools = tools.list().map((def) => def.name).filter((name) => name.startsWith("filesystem__"));
 
@@ -515,6 +515,7 @@ async function main() {
       budget: config.budget,
       tools,
       planStore,
+      memoryStore,
       stream: config.stream,
       ...(checkpoints
         ? {
