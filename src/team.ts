@@ -10,13 +10,17 @@ import type { ChildRecord } from "./core/team_scheduler";
 
 /** 运行收尾的任务/token 小表：每次工作与复核尝试的状态和消耗一目了然。 */
 export function renderTeamCostTable(report: TeamReport): string {
+  const records = [...report.tasks, ...report.reviews];
+  const cachedTotal = records.reduce((sum, record) => sum + (record.result?.cachedPromptTokens ?? 0), 0);
   const row = (record: ChildRecord) =>
     `${record.mode.padEnd(6)} r${String(record.round).padEnd(5)} ${record.task.id.slice(0, 15).padEnd(16)}` +
     `${record.state.padEnd(10)} ${String(record.result?.totalTokens ?? 0).padStart(7)} tok` +
+    (record.result?.cachedPromptTokens ? `（⚡${record.result.cachedPromptTokens}）` : "") +
     (record.reason ? `  ${record.reason.slice(0, 40)}` : "");
   const header = `mode   round  task            state      tokens`;
-  return [header, ...[...report.tasks, ...report.reviews].map(row),
-    `合计 ${report.tasks.length + report.reviews.length} 次运行，${report.totalTokens} tokens` +
+  return [header, ...records.map(row),
+    `合计 ${records.length} 次运行，${report.totalTokens} tokens` +
+    (cachedTotal > 0 ? `（其中前缀缓存命中 ${cachedTotal}）` : "") +
     (report.coordinationUsageEstimated ? "（含估算）" : "")].join("\n");
 }
 

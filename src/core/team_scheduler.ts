@@ -11,6 +11,8 @@ export type ChildState = "pending" | "running" | "answered" | "failed" | "skippe
 export interface ChildResult extends RunOutcome {
   finalAnswer: string | null;
   totalTokens: number;
+  /** 该次运行命中前缀缓存的 prompt token 合计（provider 不上报时缺省） */
+  cachedPromptTokens?: number;
   toolCallsCount: number;
   citations: Citation[];
   submission?: Submission;
@@ -173,9 +175,10 @@ export class AgentScheduler {
         const result = await child.run();
         actual = result.totalTokens;
         const { finalAnswer, totalTokens, toolCallsCount, citations, runStatus, taskStatus, stopReason,
-          finishReason, refusal, taskId, runId, errorMessage } = result;
+          finishReason, refusal, taskId, runId, errorMessage, cachedPromptTokens } = result;
         record.result = { finalAnswer, totalTokens, toolCallsCount, citations, runStatus, taskStatus, stopReason,
-          finishReason, refusal, taskId, runId, errorMessage };
+          finishReason, refusal, taskId, runId, errorMessage,
+          ...(cachedPromptTokens ? { cachedPromptTokens } : {}) };
         record.state = input.signal.aborted || stopReason === "cancelled" ? "cancelled"
           : runStatus === "completed" && ["answered", "verified"].includes(taskStatus) && finalAnswer?.trim()
             ? "answered" : "failed";
@@ -199,6 +202,9 @@ export class AgentScheduler {
               else record.result.submission = parseSubmission(repaired.finalAnswer!, record.task);
               record.result.finalAnswer = repaired.finalAnswer;
               record.result.totalTokens += repaired.totalTokens;
+              if (repaired.cachedPromptTokens) {
+                record.result.cachedPromptTokens = (record.result.cachedPromptTokens ?? 0) + repaired.cachedPromptTokens;
+              }
               record.reason = "首次结构化输出未通过校验，已由一次性无工具修复接受";
             } catch (repairError) {
               record.state = "failed";
