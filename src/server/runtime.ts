@@ -29,6 +29,8 @@ export interface ServerRuntime {
   disableRunScript: boolean;
   /** MCP 资源注入的不可信上下文（随栈重建刷新；空串表示无资源） */
   untrustedContext?: string | undefined;
+  /** 收口整栈（配置 watcher + 全部 MCP 连接）；关停与切沙箱回收旧栈用 */
+  dispose: () => Promise<void>;
 }
 
 export async function createServerRuntime(options: {
@@ -50,6 +52,7 @@ export async function createServerRuntime(options: {
     sandboxRoot: stack.sandboxRoot,
     disableRunScript: options.disableRunScript === true,
     ...(stack.untrustedContext !== "" ? { untrustedContext: stack.untrustedContext } : {}),
+    dispose: stack.dispose,
   };
 }
 
@@ -70,11 +73,12 @@ export async function rebuildRuntimeWithSandboxRoot(
     sandboxRoot,
     disableRunScript: runtime.disableRunScript,
   });
-  const previousMcp = runtime.mcp;
+  const previousDispose = runtime.dispose;
   runtime.registry = next.registry;
   runtime.mcp = next.mcp;
   runtime.sandbox = next.sandbox;
   runtime.sandboxRoot = next.sandboxRoot;
   runtime.untrustedContext = next.untrustedContext !== "" ? next.untrustedContext : undefined;
-  await previousMcp.closeAll();
+  runtime.dispose = next.dispose;
+  await previousDispose();
 }

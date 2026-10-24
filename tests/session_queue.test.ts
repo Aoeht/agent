@@ -20,7 +20,21 @@ const dirs: string[] = [];
 const cleanups: Array<() => void> = [];
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) cleanup();
-  for (const dir of dirs.splice(0)) await fs.rm(dir, { recursive: true, force: true });
+  // Windows 下 taskStore 的 sqlite 句柄可能晚一拍释放，rm 撞 EBUSY/EPERM：重试兜底
+  for (const dir of dirs.splice(0)) {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await fs.rm(dir, { recursive: true, force: true });
+        break;
+      } catch (error) {
+        if (attempt >= 3) {
+          console.warn(`[test] 清理失败 ${dir}: ${error instanceof Error ? error.message : error}`);
+          break;
+        }
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    }
+  }
 });
 
 async function fixture() {

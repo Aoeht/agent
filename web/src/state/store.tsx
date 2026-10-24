@@ -205,6 +205,9 @@ export function applyEvent(s: SessionUIState, e: ServerEvent): SessionUIState {
     }
     case "queue_changed":
       return { ...s, queue: e.items };
+    case "tools_changed":
+      // 无载荷信号：订阅回调里直接重拉 listTools，这里无需迁移状态
+      return s;
     case "token": {
       const items = [...s.items];
       const last = items[items.length - 1];
@@ -567,9 +570,16 @@ export function StoreProvider({
     void resolvedTransport.listTools(currentId).then((toolState) => {
       if (alive) dispatch({ type: "tools_loaded", id: currentId, ...toolState });
     });
-    const unsubscribe = resolvedTransport.subscribe(currentId, (event) =>
-      dispatch({ type: "event", id: currentId, event })
-    );
+    const unsubscribe = resolvedTransport.subscribe(currentId, (event) => {
+      // MCP 热载入等引起的工具集变化：重拉本会话的工具开关面板数据
+      if (event.type === "tools_changed") {
+        void resolvedTransport.listTools(currentId).then((toolState) => {
+          if (alive) dispatch({ type: "tools_loaded", id: currentId, ...toolState });
+        }).catch(() => {});
+        return;
+      }
+      dispatch({ type: "event", id: currentId, event });
+    });
     return () => {
       alive = false;
       unsubscribe();

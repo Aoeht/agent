@@ -76,7 +76,7 @@ async function main(): Promise<void> {
   const runtime = await createServerRuntime({ bridge, disableRunScript: REMOTE_HARDENING });
   const sandboxProblem = sandboxRefusal({ hardening: REMOTE_HARDENING, backend: runtime.sandbox.backend });
   if (sandboxProblem !== undefined) {
-    await runtime.mcp.closeAll();
+    await runtime.dispose();
     refuse(sandboxProblem);
   }
   if (gate.enabled) {

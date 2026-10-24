@@ -223,6 +223,11 @@ export const ServerEventSchema = z.discriminatedUnion("type", [
     type: z.literal("queue_changed"),
     items: z.array(z.object({ id: z.string(), text: z.string() })),
   }),
+  /**
+   * 会话可见的工具集变了（MCP 热载入/工具增删在回合开始时对齐进会话注册表）。
+   * 无载荷：前端收到后重新 GET /sessions/:id/tools 刷新开关面板。
+   */
+  z.object({ type: z.literal("tools_changed") }),
   z.object({ type: z.literal("error"), message: z.string() }),
 ]);
 

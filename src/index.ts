@@ -568,8 +568,8 @@ async function main() {
       await runOneShot(agent, mcp, ui, nameSession);
     }
   } finally {
-    // 8. 无论成功、抛错还是被取消，都要回收子进程与长连接
-    await mcp.closeAll();
+    // 8. 无论成功、抛错还是被取消，都要收口 watcher 并回收子进程与长连接
+    await stack.dispose();
   }
 }
 

@@ -368,7 +368,7 @@ export class SessionManager {
       entry.queue = [];
     }
     for (const sessionId of this.entries.keys()) this.options.bridge.disposeSession(sessionId);
-    await this.options.runtime.mcp.closeAll();
+    await this.options.runtime.dispose();
   }
 
   // ---------- 内部 ----------
@@ -567,6 +567,39 @@ export class SessionManager {
     });
   }
 
+  /**
+   * 把共享注册表的 MCP 工具集合对齐进本会话注册表（增/删，按 `serverId__tool` 名）。
+   * MCP 定义是无状态闭包（策略/路径守卫在 execute 里），按定义拷贝安全，与
+   * copyMcpTools 同语义；变更时刷新定义快照（工具开关的恢复源）、重应用本会话
+   * 关闭集合，并广播 tools_changed 让前端重拉工具面板。
+   */
+  private syncMcpTools(entry: SessionEntry, sessionId: string): void {
+    const sessionRegistry = entry.registry;
+    if (!sessionRegistry) return;
+    const sharedDefs = this.options.runtime.registry.list().filter((def) => def.name.includes("__"));
+    const sharedNames = new Set(sharedDefs.map((def) => def.name));
+    const sessionNames = new Set(
+      sessionRegistry.list().filter((def) => def.name.includes("__")).map((def) => def.name)
+    );
+    let changed = false;
+    for (const def of sharedDefs) {
+      if (!sessionNames.has(def.name)) {
+        sessionRegistry.register(def, { replace: true });
+        changed = true;
+      }
+    }
+    for (const name of sessionNames) {
+      if (!sharedNames.has(name)) {
+        sessionRegistry.unregister(name);
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    entry.toolDefs = new Map(sessionRegistry.list().map((def) => [def.name, def]));
+    for (const name of entry.disabledTools ?? []) sessionRegistry.unregister(name);
+    this.options.hub.publish(sessionId, { type: "tools_changed" });
+  }
+
   private async runTurn(
     entry: SessionEntry,
     sessionId: string,
@@ -575,6 +608,9 @@ export class SessionManager {
     queueId?: string
   ): Promise<void> {
     const agent = await this.ensureAgent(entry, sessionId);
+    // MCP 工具同步：共享注册表是唯一热更新目标（.mcp.json 变更 / ToolListChanged），
+    // 每会话注册表在回合开始时与其对齐——长驻会话下一回合就能用上新增/移除的 MCP 工具
+    this.syncMcpTools(entry, sessionId);
     this.options.hub.publish(sessionId, {
       type: "run_start",
       userMessage: text,

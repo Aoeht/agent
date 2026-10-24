@@ -27,6 +27,7 @@ import { loadSkills, SkillManifest } from "./skills/loader";
 import { McpAdapter } from "./mcp/adapter";
 import { McpClientManager } from "./mcp/client_manager";
 import { MCP_SANDBOX_DIR, McpServers } from "./mcp/config";
+import { McpConfigWatcher, resolveMcpServers } from "./mcp/hot_reload";
 import { createPolicyMatrix } from "./mcp/policy_matrix";
 import type { Confirmer, McpResourceInfo } from "./mcp/types";
 import { loadAgentConfig, AgentRunConfig } from "./config";
@@ -61,8 +62,12 @@ export interface AgentStack {
   registry: ToolRegistry;
   planStore: PlanStore;
   mcp: McpClientManager;
+  /** MCP 配置热载入 watcher（关停要随 mcp 一起收口，用 dispose()） */
+  mcpWatcher: McpConfigWatcher;
   /** MCP 资源注入的不可信上下文（没有可用资源时为空串） */
   untrustedContext: string;
+  /** 关停配置 watcher 并断开全部 MCP 连接（取代直接调 mcp.closeAll） */
+  dispose: () => Promise<void>;
 }
 
 /**
@@ -240,10 +245,18 @@ export async function createAgentStack(options: AgentStackOptions = {}): Promise
   );
 
   console.log(`⏳ ${prefix}正在挂载 MCP 服务...`);
-  const reports = await mcp.loadFromConfig(McpServers);
+  // 配置来源：内置默认 ⊕ .mcp.json（AGENT_MCP_CONFIG 可改路径）；文件变更无需重启，
+  // McpConfigWatcher 防抖监听并增量应用（增/删/改=重连）。文件缺失时与纯内置行为一致。
+  const { servers: initialServers, fileIssues } = await resolveMcpServers();
+  for (const issue of fileIssues) console.warn(`⚠️  ${prefix}.mcp.json: ${issue}`);
+  const reports = await mcp.loadFromConfig(initialServers);
   for (const report of reports) {
     console.log(report.ok ? `✅ ${report.id}: ${report.tools?.length ?? 0} 个工具` : `❌ ${report.id}: ${report.error}`);
   }
+  const mcpWatcher = new McpConfigWatcher(mcp);
+  // 水位与实际加载结果对齐：启动失败的 server 下次文件变更时会作为"新增"重试
+  mcpWatcher.useApplied(reports.filter((report) => report.ok).map((report) => initialServers.find((s) => s.id === report.id)!));
+  mcpWatcher.start();
 
   // 4. 挑资源注入上下文：只是原始文本，不进 systemPrompt；Agent 会统一套上"不可信数据"围栏
   const untrustedContext = await collectCapabilitiesContext(mcp);
@@ -256,7 +269,12 @@ export async function createAgentStack(options: AgentStackOptions = {}): Promise
     registry,
     planStore,
     mcp,
+    mcpWatcher,
     untrustedContext,
+    dispose: async () => {
+      mcpWatcher.close();
+      await mcp.closeAll();
+    },
   };
 }
 

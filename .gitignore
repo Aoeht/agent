@@ -63,3 +63,4 @@ docs/.obsidian/
 
 # 模型观测本地数据库（257MB 二进制数据，不入库）
 docs/observations.sqlite3
+.mcp.json

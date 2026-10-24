@@ -192,7 +192,7 @@ OpenAI 兼容端（DeepSeek/GLM/DashScope）普遍有隐式前缀缓存：provid
 
 ### 5.1 传输 ✓
 
-三种全支持：stdio（本地子进程，env/cwd/stderr 增量收割）、SSE（标注过时）、streamableHttp（现代 HTTP）。配置在 `src/mcp/config.ts`——**编译期静态数组，加服务器要改代码重启**（热载入是缺口，见第十六章）。
+三种全支持：stdio（本地子进程，env/cwd/stderr 增量收割）、SSE（标注过时）、streamableHttp（现代 HTTP）。配置来源（2026-10-24 起支持热载入，`src/mcp/hot_reload.ts`）：**内置默认（`config.ts`）⊕ `.mcp.json`** 按合并——文件条目覆盖同 id 内置、新 id 追加、`false` 下线；文件路径可用 `AGENT_MCP_CONFIG` 改，已 gitignore（可能含密钥）。watcher 防抖监听目录（编辑器原子替换安全），变更后做增量 diff：新增 addServer、消失 removeServer、配置变化重连；单条失败不拖垮其余，坏文件保持上一次有效结果。生效日志形如 `🔁 [MCP] 配置热载入生效: +probe、-demo`。
 
 ### 5.2 三类原语 ◐
 
@@ -214,7 +214,7 @@ OpenAI 兼容端（DeepSeek/GLM/DashScope）普遍有隐式前缀缓存：provid
 | roots（向服务器声明工作区根） | ✓ | config.roots → file:// URI + listChanged |
 | sampling（服务器反向请求模型） | ✗ | 未声明该能力 |
 | OAuth | ✗ | 仅静态 header（env Bearer） |
-| 工具热更新 | ◐ | server 内变更会刷新**共享**注册表；但每会话注册表在 ensureAgent 时一次性拷贝，长驻 UI 会话拿不到变更 |
+| 工具热更新 | ✓ | .mcp.json 热载入（增/删/改=重连，diff 应用）；server 内 ToolListChanged 刷新共享注册表；每会话注册表在回合开始时对齐共享侧（tools_changed 事件让前端刷新面板）——2026-10-24 |
 
 ---
 
@@ -442,7 +442,7 @@ frontmatter 只解析 name/description（不支持 allowed-tools 等扩展字段
 | 1 | ~~主对话内 Task 委派工具~~ | ✅ 完成 | 2026-10-24 落地 `delegate_task`（只读白名单子代理 + 围栏回注 + 预算/取消 + 委派轨迹）；剩余：重 DAG 团队接入主对话 |
 | 2 | ~~后台任务 + 完成通知~~ | ✅ 完成 | 2026-10-24 落地会话消息队列（排队/自动接续/撤单/重连快照）；剩余：全局后台任务与跨会话通知、REPL 侧队列 |
 | 3 | Web 斜杠命令通道 | 正确性 | RightPanel 正引导用户输 /task resolve，但 Web 把它当普通文本喂给 LLM——正在发生的行为断裂；顺带 /rewind UI 化 |
-| 4 | MCP 配置热载入 + 跨会话传播 | 正确性 | 配置是编译期静态数组；ToolListChanged 不传播到已建会话的注册表，长驻 UI 会话拿不到 MCP 变更 |
+| 4 | ~~MCP 配置热载入 + 跨会话传播~~ | ✅ 完成 | 2026-10-24：.mcp.json 合并热载入（增/删/重连，防抖 watcher，坏文件 fail-safe）+ 每回合把共享注册表 MCP 工具对齐进会话注册表并广播 tools_changed；剩余：MCP resources/prompts 的 UI 浏览（5.2） |
 | 5 | 复核去单点 | 质量 | 缺省跨家族模型 + 2-3 评审者多数裁决 |
 | 6 | 系统提示动态环境块 | 能力 | 日期/cwd/git 状态；内容必须会话内稳定（别自己变成缓存破坏点） |
 | 7 | 并行子集执行 + 并发上限/超时 | 性能 | 一批里一个非 parallelSafe 就整批串行 |

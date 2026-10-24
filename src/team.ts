@@ -66,7 +66,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   } finally {
     process.off("SIGINT", cancel);
     process.off("SIGTERM", cancel);
-    await stack?.mcp.closeAll();
+    await stack?.dispose();
   }
 }
 
