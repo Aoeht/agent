@@ -5,6 +5,8 @@ import { z } from "zod";
 import { ToolDefinition, defineTool } from "../core/types";
 import { UNTRUSTED_DATA_NOTICE } from "../core/untrusted";
 import type { ToolRuntime } from "../core/types";
+// 短链域名与诈骗关键词表抽到 src/core/scam_lexicon.ts 与 bili 粗定位共用，此处仅导入
+import { SCAM_KEYWORDS, SHORT_LINK_HOSTS } from "../core/scam_lexicon";
 
 /**
  * 工具入口的 URL 归一化，http / browser 两条路径共用（过去各自解析，同一份输入两个说法：
@@ -105,17 +107,6 @@ export type LookupLike = (hostname: string) => Promise<{ address: string; family
 
 const DEFAULT_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
-
-/** 常见短链域名：目的地被隐藏是主要风险特征之一 */
-const SHORT_LINK_HOSTS = new Set([
-  "t.cn", "url.cn", "dwz.cn", "bit.ly", "tinyurl.com", "is.gd", "suo.im", "mrw.so", "t.im",
-]);
-
-/** 页面文本命中即记信号的启发式关键词（不是定性，误报交给模型权衡） */
-const SCAM_KEYWORDS = [
-  "退款", "理赔", "贷款", "征信", "解冻", "中奖", "刷单", "兼职",
-  "安全账户", "退款通道", "验证身份", "保证金", "返利","竞彩"
-];
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 

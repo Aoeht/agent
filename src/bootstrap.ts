@@ -14,6 +14,7 @@ import { createSearchWebTool } from "./tools/tavily_search";
 import { createRagSearchTool } from "./tools/rag_search";
 import { createInspectLinkTool } from "./tools/inspect_link";
 import { createIngestFindingsTool } from "./tools/ingest_findings";
+import { createBiliCollectTool } from "./tools/bili_collect";
 import { createGitTreeTool } from "./tools/git_tree";
 import { createUpdatePlanTool } from "./tools/update_plan";
 import { createSetAcceptanceCriteriaTool, createReadTaskStateTool } from "./tools/set_acceptance_criteria";
@@ -106,6 +107,9 @@ export function registerSessionTools(
   registry.register(createRagSearchTool());
   registry.register(createInspectLinkTool());
   registry.register(createIngestFindingsTool());
+  // B 站视频快照读数：读取 dataset/<BV>.json（独立采集流程产物）做证据预处理，
+  // 供 scanner 子代理与主对话直接调用；快照缺失时报错并指引，不影响其它工具
+  registry.register(createBiliCollectTool());
   // 仓库结构只读工具：目录树 + 提交图，回答"项目长什么样"类问题，免确认、可并发
   registry.register(createGitTreeTool());
   // 本地图片进视觉通道的入口：图片直接附加到下一轮模型输入，

@@ -23,7 +23,7 @@ import { Agent } from "../core/agent";
 import { PlanStore } from "../core/plan_store";
 import { TraceRecorder } from "../core/trace";
 import { wrapUntrustedData } from "../core/untrusted";
-import { createTeamRegistry, TEAM_CAPABILITIES } from "../team_runtime";
+import { createTeamRegistry, createScannerRegistry, TEAM_CAPABILITIES, SCANNER_CAPABILITIES } from "../team_runtime";
 import { defineTool } from "../core/types";
 import type { ToolRegistry } from "../core/registry";
 
@@ -64,22 +64,74 @@ export function loadDelegateBudget(env: NodeJS.ProcessEnv = process.env): Delega
   };
 }
 
+/**
+ * scanner 委派要逐链接采证、对照知识库，默认墙钟放宽到 10 分钟；
+ * AGENT_DELEGATE_SCANNER_TIMEOUT_MS 显式覆盖；通用环境变量已放宽时取更宽者。
+ */
+export function loadScannerBudget(base: DelegateBudget, env: NodeJS.ProcessEnv = process.env): DelegateBudget {
+  const value = Number(env.AGENT_DELEGATE_SCANNER_TIMEOUT_MS?.trim());
+  const wallClock = Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : Math.max(base.maxWallClockMs, 600_000);
+  return { ...base, maxWallClockMs: wallClock };
+}
+
+/** 委派预算的最终决策：显式注入原样尊重；默认/环境变量预算下 scanner 放宽墙钟 */
+export function resolveDelegateBudget(role: string, options: DelegateTaskToolOptions): DelegateBudget {
+  const base = options.budget ?? loadDelegateBudget();
+  if (role !== "scanner" || options.budget) return base;
+  return loadScannerBudget(base);
+}
+
 const ROLE_INSTRUCTIONS: Record<string, string> = {
   researcher: "你的职责是资料收集：围绕任务目标检索与阅读，返回有出处的事实。",
   analyst: "你的职责是分析：基于可查证的资料做推理与结论，明确区分观察与推测。",
   reviewer: "你的职责是独立复核：审视任务目标中隐含的结论或产物，指出证据不足或矛盾之处。",
 };
 
-const childSystemPrompt = (role: string, sandboxRoot: string): string =>
-  `你是主对话派出的 ${role} 子 Agent。${TEAM_CAPABILITIES}\n` +
-  `工作区：${sandboxRoot}\n` +
-  "你看不到主对话的其它内容：任务描述里缺少的背景，要么自己查证，要么在结论里写明假设。\n" +
-  ROLE_INSTRUCTIONS[role]! + "\n" +
-  "只使用实际提供的工具；不能完成的操作如实说明。多步任务先用 update_plan 列计划，完成后更新步骤。\n" +
-  "报告要求：开头直接给结论；区分观察与推测；给出实际查阅过的 URL 或文件路径；列出未解决的问题；保持紧凑，除非任务明确要求详尽。";
+/** scanner 的固定报告结构：与 ingest_findings 字段对齐，同时就是数据集的产出格式 */
+const SCANNER_REPORT_SCHEMA =
+  `{"bvid":"BV号","risk_level":"high|medium|low|clean","confidence":0到1,"summary":"三维度综合结论",` +
+  `"video":{"risk_level":"...","windows":[{"start_s":0,"end_s":0,"reason":"..."}],"reason":"..."},` +
+  `"author":{"risk_level":"...","signals":["..."],"reason":"..."},` +
+  `"comments":{"risk_level":"...","reason":"..."},` +
+  `"links":[{"url":"...","verdict":"采证结论","signals":["..."]}],` +
+  `"unresolved":["..."]}`;
+
+const childSystemPrompt = (role: string, sandboxRoot: string): string => {
+  if (role === "scanner") {
+    return (
+      `你是主对话派出的 scanner 子 Agent，专门对单个 B 站视频做诈骗风险扫描，` +
+      `从视频内容、作者账号、评论区三个维度取证并定性。${SCANNER_CAPABILITIES}\n` +
+      `工作区：${sandboxRoot}\n` +
+      "你看不到主对话的其它内容：任务描述里应包含 BV 号；没有就说明无法扫描。\n" +
+      "固定流程：\n" +
+      "1. bili_collect 读快照拿证据（风险窗口/命中评论/链接候选/作者卡片）。快照缺失或所有维度都无数据时直接结束，报告无法扫描。\n" +
+      "2. 对提取到的链接逐一 inspect_link 采证（至多 5 条，优先标题/简介、置顶与高赞评论里的）；采证受限（不可达/被拦截）如实记录，不作定性。\n" +
+      "3. rag_search 对照反诈知识库中的已知套路（1~2 次）。\n" +
+      "4. 得出三维度结论后逐条 ingest_findings 落库：source 填 scan_video，subject 填 BV 号，" +
+      "dedupe_key 分别填 BV号:video、BV号:author、BV号:comments。\n" +
+      "判定纪律：\n" +
+      "- 采证≠终判：链接不可达、被人机校验拦截、页面打不开都不是诈骗证据，只能记为采证受限。\n" +
+      "- 模型拒绝/内容过滤/数据缺失都不是诈骗证据，对应维度记为无法判断。\n" +
+      "- 每一条风险结论必须给出可核查的证据：时间戳+弹幕/评论/字幕原文摘录，或 inspect_link 的具体采证字段。\n" +
+      "- 引流（加微信/QQ、站外链接）是强风险信号但不是定性本身，要结合话术语境定性。\n" +
+      "- 证据不足就降低风险等级并把疑点写进 unresolved，不要编造证据。\n" +
+      "报告格式（最后一条消息）：先用 3~5 句中文给出结论，再输出一个 JSON 代码块，结构固定为：\n" +
+      SCANNER_REPORT_SCHEMA
+    );
+  }
+  return (
+    `你是主对话派出的 ${role} 子 Agent。${TEAM_CAPABILITIES}\n` +
+    `工作区：${sandboxRoot}\n` +
+    "你看不到主对话的其它内容：任务描述里缺少的背景，要么自己查证，要么在结论里写明假设。\n" +
+    ROLE_INSTRUCTIONS[role]! + "\n" +
+    "只使用实际提供的工具；不能完成的操作如实说明。多步任务先用 update_plan 列计划，完成后更新步骤。\n" +
+    "报告要求：开头直接给结论；区分观察与推测；给出实际查阅过的 URL 或文件路径；列出未解决的问题；保持紧凑，除非任务明确要求详尽。"
+  );
+};
 
 export function createDelegateTaskTool(options: DelegateTaskToolOptions) {
-  const budget = options.budget ?? loadDelegateBudget();
   const traceDir = options.traceDir ??
     path.resolve(process.env.AGENT_SESSION_DIR ?? ".agent-sessions", "delegates");
 
@@ -89,18 +141,25 @@ export function createDelegateTaskTool(options: DelegateTaskToolOptions) {
       "派出一个只读子代理去完成一项独立调研/分析/复核任务，等它跑完把报告带回本对话。" +
       "适用：需要多轮检索的长调研、与本任务并行的旁支查证、希望你不在场时独立完成的资料工作。" +
       "goal 必须自包含（子代理看不到本对话），写清要什么、查哪里、以什么形式交付。" +
-      "role 按性质选：researcher 收集事实、analyst 做分析结论、reviewer 独立复核已有结论。" +
+      "role 按性质选：researcher 收集事实、analyst 做分析结论、reviewer 独立复核已有结论、" +
+      "scanner 对 B 站视频做诈骗风险扫描（需已存在采集快照，goal 里给 BV 号）。" +
       "不适合委派的：一步就能完成的调用、需要写文件或跑脚本的任务（子代理只读）。",
     parallelSafe: true,
     needsReconciliation: false,
     schema: z.object({
       goal: z.string().min(1).max(12_000).describe("自包含的任务描述：目标、范围、期望的交付形式"),
-      role: z.enum(["researcher", "analyst", "reviewer"]).default("researcher").describe("子代理角色"),
+      role: z.enum(["researcher", "analyst", "reviewer", "scanner"]).default("researcher")
+        .describe("子代理角色"),
     }),
     execute: async (args, runtime) => {
       const planStore = new PlanStore();
-      // 白名单注册表：只读工具 + 计划/账本；delegate_task 不在其中，子代理无法再委派
-      const registry = createTeamRegistry(options.sourceRegistry, planStore);
+      // 白名单注册表按角色选择：scanner 用扫描白名单（快照/链接/知识库/沉淀），
+      // 其余角色用只读调研白名单；两者都不含 delegate_task，子代理无法再委派
+      const registry = args.role === "scanner"
+        ? createScannerRegistry(options.sourceRegistry, planStore)
+        : createTeamRegistry(options.sourceRegistry, planStore);
+      // 预算决策独立成函数（resolveDelegateBudget）：显式注入原样尊重，scanner 默认放宽墙钟
+      const effectiveBudget = resolveDelegateBudget(args.role, options);
       const delegateId = randomUUID().slice(0, 8);
       const agent = new Agent({
         model: options.config.model,
@@ -109,7 +168,7 @@ export function createDelegateTaskTool(options: DelegateTaskToolOptions) {
         temperature: options.config.temperature ?? 0.1,
         maxIterations: Math.min(options.config.maxIterations && options.config.maxIterations > 0
           ? options.config.maxIterations : 24, 24),
-        budget,
+        budget: effectiveBudget,
         tools: registry,
         planStore,
         stream: false,

@@ -38,6 +38,27 @@ export function createTeamRegistry(source: ToolRegistry, planStore: PlanStore, i
   return registry;
 }
 
+// Scanner 子代理（诈骗风险扫描）白名单：读快照 + 链接采证 + 反诈知识库 + 发现沉淀。
+// 刻意不含文件系统读写、run_script、浏览器人工验证与 delegate_task——
+// 扫描输入（弹幕/评论/链接落地页）全是攻击者可控文本，能力面收到最小。
+const SCANNER_TOOLS = new Set(["bili_collect", "inspect_link", "rag_search", "ingest_findings"]);
+
+export const SCANNER_CAPABILITIES =
+  "支持读取已采集的 B 站视频快照并做诈骗风险扫描：视频证据预处理(bili_collect)、链接采证(inspect_link)、" +
+  "反诈知识库检索(rag_search)、结论沉淀(ingest_findings)。" +
+  "不能写文件、运行脚本、操作浏览器人工验证或再派生 Agent；快照缺失或某维度数据不足时，在报告里如实说明并记为无法判断。";
+
+export function createScannerRegistry(source: ToolRegistry, planStore: PlanStore): ToolRegistry {
+  const registry = new ToolRegistry();
+  registry.use(createToolTelemetry());
+  for (const definition of source.list()) {
+    if (SCANNER_TOOLS.has(definition.name)) registry.register(definition);
+  }
+  registry.register(createUpdatePlanTool(planStore));
+  registry.register(createReadTaskStateTool());
+  return registry;
+}
+
 export function createTeamChildFactory(stack: AgentStack, options: {
   client: OpenAI;
   runDirectory?: string;

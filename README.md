@@ -57,7 +57,10 @@ src/
   core/               内核：Agent 主循环、工具注册表（registry）、上下文压缩、
                       会话存储/选择、运行预算、事件、轨迹、不可信数据围栏（untrusted）
   tools/              内置工具：联网搜索（tavily_*）、链接核查（inspect_link）、
-                      RAG 检索（rag_search）、浏览器采证（browser_*）、遥测
+                      B 站快照读数（bili_collect）、RAG 检索（rag_search）、
+                      浏览器采证（browser_*）、遥测
+  bili/               B 站视频风控纯函数层：快照契约（snapshot）、SRT 解析、
+                      链接候选提取（links）、风险窗口粗定位（localize）
   mcp/                MCP 客户端层：配置、适配器、路径守卫、策略矩阵、人工确认
   prompts/            系统提示词、/prompt 命令、本地提示模板 MCP 服务器（server.ts）
   rag/                自包含知识库：导入、切块、BM25/向量混合检索、
@@ -78,6 +81,7 @@ core 不反向依赖 tools/mcp（数据围栏、注册表、MCP prompt 角色类
 McpAdapter，同进程可以组装出多套工具集跑多个 agent（见 gaia_eval）。
 
 根目录 `tools/` 与 `src/tools/` 语义不同：前者放一次性诊断脚本，后者是 agent 的内置工具。
-`src/tools/find_suspicious_segments.ts` 为保留的占位文件（尚未接线）。
+`src/tools/find_suspicious_segments.ts` 为保留的占位文件（尚未接线；其 SRT 风险定位的意图
+已由 `src/bili/`（srt/localize）与 scanner 子代理实现，见 docs/视频诈骗扫描.md）。
 
 本项目的知识文档面向"从零理解"写成，代码里的关键取舍都有对应章节；改动较大时建议同步更新对应文档。
