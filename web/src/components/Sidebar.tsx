@@ -40,12 +40,13 @@ export function Sidebar({
   return (
     <aside
       className={[
-        "flex w-72 flex-col gap-3 border-r border-cream-300 bg-cream-200/40 p-4",
+        "flex w-72 flex-col gap-3 border-r border-cream-300 p-4",
+        // 抽屉浮在主界面上方：必须用不透明底色，否则透出下层内容
         drawer
-          ? `fixed inset-y-0 left-0 z-40 shrink-0 shadow-xl transition-transform duration-200 ${
+          ? `fixed inset-y-0 left-0 z-40 shrink-0 bg-cream-100 shadow-xl transition-transform duration-200 ${
               drawerOpen ? "translate-x-0" : "invisible -translate-x-full"
             }`
-          : "shrink-0",
+          : "shrink-0 bg-cream-200/40",
       ].join(" ")}
     >
       <div className="px-1">

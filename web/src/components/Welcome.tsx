@@ -49,7 +49,6 @@ export function Welcome() {
           onCancel={() => {}}
           onApplyConfig={async () => {}}
           onDraftConfig={setConfig}
-          placeholder="给 Agent 派个任务…"
         />
       </div>
 

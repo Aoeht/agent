@@ -1,6 +1,7 @@
 // web/src/components/Composer.tsx
 import { useEffect, useRef, useState } from "react";
 import type { SessionConfigInput } from "../lib/transport";
+import { useMediaQuery } from "../lib/useMediaQuery";
 
 export interface ComposerConfig {
   model?: string;
@@ -18,7 +19,6 @@ export function Composer({
   onCancel,
   onApplyConfig,
   onDraftConfig,
-  placeholder,
 }: {
   sessionId: string | null;
   running: boolean;
@@ -30,8 +30,6 @@ export function Composer({
   onApplyConfig: (config: SessionConfigInput) => Promise<void>;
   /** 欢迎态（sessionId=null）专用：草稿一变就上报，由上层暂存、随首条消息经 createAndSend 落地 */
   onDraftConfig?: (config: SessionConfigInput) => void;
-  /** 覆盖默认占位文案（欢迎界面用它换一行短句） */
-  placeholder?: string;
 }) {
   const [text, setText] = useState("");
   const [panelOpen, setPanelOpen] = useState(false);
@@ -47,6 +45,8 @@ export function Composer({
   activeSession.current = sessionId;
   const [applying, setApplying] = useState(false);
   const [configError, setConfigError] = useState<string | null>(null);
+  // 窄屏输入框只剩一百来像素宽：占位文案换超短句，否则换行后被最小高度裁掉
+  const narrow = useMediaQuery("(max-width: 639px)");
 
   useEffect(() => {
     setPanelOpen(false);
@@ -252,7 +252,13 @@ export function Composer({
             }}
             rows={1}
             placeholder={
-              placeholder ?? (disabled ? "先选择一个会话" : "给 Agent 派个任务…（Enter 发送，Shift+Enter 换行；运行中发送会自动排队）")
+              disabled
+                ? "先选择一个会话"
+                : narrow
+                  ? "派个任务…"
+                  : sessionId === null
+                    ? "给 Agent 派个任务…"
+                    : "给 Agent 派个任务…（Enter 发送，Shift+Enter 换行）"
             }
             disabled={disabled}
             className="max-h-40 min-h-[42px] flex-1 resize-none bg-transparent px-2.5 py-2 text-[15px] max-lg:text-base leading-6 outline-none placeholder:text-ink-400 disabled:opacity-50"

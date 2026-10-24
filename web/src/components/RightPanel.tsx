@@ -244,13 +244,13 @@ export function RightPanel({ drawer = false, drawerOpen = false }: { drawer?: bo
   return (
     <aside
       className={[
-        "flex w-80 flex-col gap-4 overflow-y-auto border-l border-cream-300 bg-cream-200/40 p-4",
-        // 窄屏（<1280）抽屉滑入；桌面保持原样：xl 以下隐藏、xl 起静态展示
+        "flex w-80 flex-col gap-4 overflow-y-auto border-l border-cream-300 p-4",
+        // 窄屏（<1280）抽屉滑入（不透明底色，浮在主界面上方）；桌面保持原样：xl 以下隐藏、xl 起静态展示
         drawer
-          ? `fixed inset-y-0 right-0 z-40 shrink-0 shadow-xl transition-transform duration-200 ${
+          ? `fixed inset-y-0 right-0 z-40 shrink-0 bg-cream-100 shadow-xl transition-transform duration-200 ${
               drawerOpen ? "translate-x-0" : "invisible translate-x-full"
             }`
-          : "hidden shrink-0 xl:flex",
+          : "hidden shrink-0 bg-cream-200/40 xl:flex",
       ].join(" ")}
     >
       <Card title="任务计划">
