@@ -21,6 +21,7 @@ import { createAskUserTool } from "./tools/ask_user";
 import { createLoadSkillTool } from "./tools/load_skill";
 import { createRunScriptTool } from "./tools/run_script";
 import { createReadImageTool } from "./tools/read_image";
+import { createDelegateTaskTool } from "./tools/delegate_task";
 import { resolveScriptSandbox, ScriptSandboxResolution } from "./tools/sandbox_docker";
 import { loadSkills, SkillManifest } from "./skills/loader";
 import { McpAdapter } from "./mcp/adapter";
@@ -79,6 +80,15 @@ export function registerSessionTools(
     sandbox: ScriptSandboxResolution;
     /** 远程收紧：跳过 run_script 注册（工具清单的唯一事实来源，会话与共享栈一致） */
     disableRunScript?: boolean;
+    /** 模型参数（delegate_task 组装子代理用；缺省时不注册委派工具 */
+    config?: {
+      model: string;
+      summaryModel?: string;
+      temperature?: number;
+      maxIterations?: number;
+    };
+    /** 委派子代理的轨迹目录；缺省 .agent-sessions/delegates */
+    delegateTraceDir?: string;
   }
 ): void {
   const sandboxRoot = options.sandboxRoot ?? MCP_SANDBOX_DIR;
@@ -97,6 +107,16 @@ export function registerSessionTools(
   // 不让多模态模型绕道 read_media_file 的 base64 文本或外部视觉服务
   registry.register(createReadImageTool({ sandboxRoot }));
   if (options.skills.length > 0) registry.register(createLoadSkillTool(options.skills, { sandboxRoot }));
+  // 主对话内的子 Agent 委派：只读白名单子代理跑独立调研/复核，报告经围栏回注本对话。
+  // 子代理注册表在委派发生时从本注册表按白名单拷贝（不含 delegate_task 自身，无递归）。
+  if (options.config) {
+    registry.register(createDelegateTaskTool({
+      sourceRegistry: registry,
+      config: options.config,
+      sandboxRoot,
+      ...(options.delegateTraceDir ? { traceDir: options.delegateTraceDir } : {}),
+    }));
+  }
   // 沙箱脚本执行器：技能脚本（load_skill 物化到 .skills/）与模型自写脚本共用的唯一执行面；
   // 执行后端由 AGENT_SANDBOX 解析结果决定（宿主机进程或一次性容器），
   // 两种后端每次执行都经 requestHuman 人工确认，不依赖技能是否安装。
@@ -176,6 +196,7 @@ export async function createAgentStack(options: AgentStackOptions = {}): Promise
     sandbox,
     sandboxRoot,
     disableRunScript: options.disableRunScript === true,
+    config,
   });
 
   // 3. MCP：白名单根目录 + 请求超时都在 adapter 上统一声明

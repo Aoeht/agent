@@ -67,9 +67,9 @@
 | 出错能回滚 | ✓（REPL） | 影子 git 检查点 + `/rewind` |
 | 中断不丢状态 | ✓ | AbortController 全链路透传 + 任务账本 unknown 状态 |
 | 长任务成本可控 | ✓ | RunBudget 越线先问后停 |
-| 多 agent 协作 | ◐ | team 运时只在独立 CLI，主对话够不着 |
+| 多 agent 协作 | ◐ | 轻量委派 delegate_task 已进主对话（2026-10-24）；重 DAG 团队仍在独立 CLI |
 | 会话消息队列 | ✓ | 忙时发送排队、回合结束自动接续、可撤单（2026-10-24） |
-| 主对话内委派子 agent | ✗ | 无 Task/delegate 工具 |
+| 主对话内委派子 agent | ✓ | delegate_task：只读白名单子代理，报告经围栏回注（2026-10-24） |
 
 ---
 
@@ -238,9 +238,9 @@ OpenAI 兼容端（DeepSeek/GLM/DashScope）普遍有隐式前缀缓存：provid
 
 任何路径（回答/拒绝/过滤/取消/错误/预算停/迭代尽）都返回带稳定 stopReason 的 AgentResult，已发生的调用、用量、证据全部保留——见 2.5。
 
-### 6.5 缺什么 ✗
+### 6.5 缺什么 ✗→◐
 
-- 主对话内**委派子 agent**（Claude Code 的 Task 工具）：团队运行时全部现成但只在独立 CLI，`registerSessionTools`（`src/bootstrap.ts`）没有任何 delegate 类工具——这是当前多 agent 投入与日常使用之间最大的断层；
+- ~~主对话内**委派子 agent**~~ **DONE 2026-10-24**：`delegate_task` 工具（`src/tools/delegate_task.ts`）注册进 `registerSessionTools`，REPL/Web 两条入口都能派只读子代理（白名单复用 `createTeamRegistry`，无递归；预算/墙钟/取消齐全；报告经不可信围栏回注；轨迹落盘到会话 delegates 目录）。剩余：重 DAG 团队（多任务+复核+补查）仍只能从 CLI 进；子代理工具调用在 Web UI 内不逐卡展示（有轨迹可查）。
 - **全局后台任务** ◐：Web 会话消息队列已做（忙时发送排队、回合结束自动接续、可撤单，见 12.4），但"把长任务整个放后台、切走再回来"的全局后台任务与跨会话完成通知仍未做；REPL 无队列。
 
 ---
@@ -310,8 +310,8 @@ PlanStore + `update_plan` 工具（全量替换语义，≤1 个 in_progress 由
 
 ### 9.2 结构性缺口 ◐
 
-- **入口断层**：以上全部只能从独立 CLI 进。REPL/Web 主对话没有 Task/delegate 工具，团队结果也不回注主对话——多 agent 投入对日常使用不可见；
-- **子代理同构**：role（researcher/analyst/reviewer）只改提示词一句话，工具白名单全部相同；没有"通用可写型"子代理（刻意的安全取舍）、没有按角色区分预算；
+- **入口断层已补轻量半边**：`delegate_task` 让主对话能派单个只读子代理（复用本层白名单与能力声明，2026-10-24）；但重 DAG 团队（多任务+独立复核+定向补查）仍只能从独立 CLI 进，团队结果也不回注主对话；
+- **子代理同构**：role（researcher/analyst/reviewer）只改提示词（delegate_task 与团队运行时同样如此），工具白名单全部相同；没有"通用可写型"子代理（刻意的安全取舍）、没有按角色区分预算；
 - **复核仍单评审者**：`AGENT_TEAM_REVIEW_MODEL` 可配跨模型但缺省为空=同模型；无多评审者投票；
 - **不支持断点续跑**：团队中断后从头再来。
 
@@ -439,7 +439,7 @@ frontmatter 只解析 name/description（不支持 allowed-tools 等扩展字段
 
 | # | 事项 | 类型 | 一句话理由 |
 |---|---|---|---|
-| 1 | 主对话内 Task 委派工具 | 结构 | 协调器/子代理工厂/投影全部现成，只差注册一个宿主工具让 REPL/Web 能派子代理并把结果回注上下文；消息队列已就位，委派的长任务不再阻塞对话 |
+| 1 | ~~主对话内 Task 委派工具~~ | ✅ 完成 | 2026-10-24 落地 `delegate_task`（只读白名单子代理 + 围栏回注 + 预算/取消 + 委派轨迹）；剩余：重 DAG 团队接入主对话 |
 | 2 | ~~后台任务 + 完成通知~~ | ✅ 完成 | 2026-10-24 落地会话消息队列（排队/自动接续/撤单/重连快照）；剩余：全局后台任务与跨会话通知、REPL 侧队列 |
 | 3 | Web 斜杠命令通道 | 正确性 | RightPanel 正引导用户输 /task resolve，但 Web 把它当普通文本喂给 LLM——正在发生的行为断裂；顺带 /rewind UI 化 |
 | 4 | MCP 配置热载入 + 跨会话传播 | 正确性 | 配置是编译期静态数组；ToolListChanged 不传播到已建会话的注册表，长驻 UI 会话拿不到 MCP 变更 |

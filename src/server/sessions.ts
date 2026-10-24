@@ -481,7 +481,12 @@ export class SessionManager {
     registry.use(createToolEventBridge(this.options.hub, sessionId));
     registry.use(createMcpUseTracker(this.options.bridge, sessionId));
     const planStore = new PlanStore();
-    registerSessionTools(registry, { skills, planStore, sandbox, sandboxRoot, disableRunScript });
+    registerSessionTools(registry, {
+      skills, planStore, sandbox, sandboxRoot, disableRunScript,
+      config,
+      // 委派子代理的轨迹落在本会话目录下，随会话一起可查
+      delegateTraceDir: path.join(entry.store.dir, "delegates"),
+    });
     copyMcpTools(sharedRegistry, registry);
 
     // 工具开关：快照全量定义（关→开的恢复数据源），再应用本会话的关闭集合

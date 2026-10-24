@@ -1,6 +1,6 @@
 # 子 Agent 运行时：任务契约、复核与定向补查
 
-宿主协调层直接创建和管理子 Agent。协调模型通过 JSON 计划描述任务及交付要求，调度器调用 `new Agent()` 和 `Agent.run()`；独立复核 Agent 检查结果，宿主最多安排两轮定向补查。没有注册 `spawn_agent`、`delegate_task` 等工具。
+宿主协调层直接创建和管理子 Agent。协调模型通过 JSON 计划描述任务及交付要求，调度器调用 `new Agent()` 和 `Agent.run()`；独立复核 Agent 检查结果，宿主最多安排两轮定向补查。主对话另有轻量委派工具 `delegate_task`（`src/tools/delegate_task.ts`，2026-10-24）：单次派出一个只读白名单子代理调研/复核并把报告经围栏回注本对话，与本运行时共用 `createTeamRegistry` 白名单与能力声明；多任务 DAG、独立复核与定向补查仍由本运行时承担。
 
 ## 使用
 
