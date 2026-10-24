@@ -32,6 +32,7 @@ bun run src/index.ts
 | [A2A适配性评估](docs/A2A适配性评估.md) | 这套代码适不适合多 agent / A2A：七个已有优势、六层缺口、三种形态的可行性分级、分阶段路线图 |
 | [A2A入门篇](docs/A2A入门篇.md) / [A2A进阶篇](docs/A2A进阶篇.md) | A2A 协议（v1.0.1）：Agent Card、Task 生命周期、Part/Artifact、三种收消息方式；进阶篇含落地骨架与安全模型 |
 | [技能三层辨析](docs/技能三层辨析.md) | `skill` 的三重含义：A2A 的 `AgentSkill`（能力广告）、MCP 的 `Tool`（可执行函数）、Agent Skill（`SKILL.md` 作业指导书）；含四层连接辨析、分发与安装层（`npx skills add`）、**带脚本的 skill 与工具差在哪**、安全排序 |
+| [现代Agent知识框架](docs/现代Agent知识框架.md) | 以本项目为参照系的现代 agent 十二层解剖：模型调用/上下文工程/工具/MCP/主循环/记忆/规划验收/多Agent/人机协作/安全/入口/技能 + 可观测与评测横切面；每层"通用机制 × 本项目实现 × 差距标记"，附体检表、演进路线与术语表 |
 
 ## 常用命令
 
