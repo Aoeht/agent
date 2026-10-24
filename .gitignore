@@ -29,6 +29,8 @@ report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 .sand-box
 .bun-cache
 .agent-sessions
+# 跨会话记忆（记忆条目/向量缓存/会话索引侧车，含对话内容）
+.agent-memory
 # 发现库（对话/分析沉淀的本地标注数据，含对话内容）
 .agent-data
 # 个人文件，与项目无关，不入库

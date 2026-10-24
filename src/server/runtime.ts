@@ -6,6 +6,7 @@ import type { SkillManifest } from "../skills/loader";
 import type { ScriptSandboxResolution } from "../tools/sandbox_docker";
 import type { MemoryStore } from "../core/memory_store";
 import type { MemoryRecall } from "../core/memory_recall";
+import type { MemoryWriter } from "../core/memory_writer";
 import { createAgentStack } from "../bootstrap";
 import type { UiBridge } from "./bridge";
 
@@ -25,6 +26,8 @@ export interface ServerRuntime {
   memoryStore: MemoryStore;
   /** 跨会话情景检索：每会话 Agent 注入同一实例 */
   memoryRecall: MemoryRecall;
+  /** 跨会话记忆写入管线：每会话 Agent 注入同一实例 */
+  memoryWriter: MemoryWriter;
   /** 当前沙箱根（绝对路径）。UI 切换后整栈重建并更新此字段 */
   sandboxRoot: string;
   /**
@@ -57,6 +60,7 @@ export async function createServerRuntime(options: {
     sandbox: stack.sandbox,
     memoryStore: stack.memoryStore,
     memoryRecall: stack.memoryRecall,
+    memoryWriter: stack.memoryWriter,
     sandboxRoot: stack.sandboxRoot,
     disableRunScript: options.disableRunScript === true,
     ...(stack.untrustedContext !== "" ? { untrustedContext: stack.untrustedContext } : {}),
@@ -87,6 +91,7 @@ export async function rebuildRuntimeWithSandboxRoot(
   runtime.sandbox = next.sandbox;
   runtime.memoryStore = next.memoryStore;
   runtime.memoryRecall = next.memoryRecall;
+  runtime.memoryWriter = next.memoryWriter;
   runtime.sandboxRoot = next.sandboxRoot;
   runtime.untrustedContext = next.untrustedContext !== "" ? next.untrustedContext : undefined;
   runtime.dispose = next.dispose;

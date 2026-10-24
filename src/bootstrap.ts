@@ -11,6 +11,7 @@ import { ToolRegistry, ToolCallMiddleware } from "./core/registry";
 import { PlanStore } from "./core/plan_store";
 import { MemoryStore } from "./core/memory_store";
 import { MemoryRecall } from "./core/memory_recall";
+import { MemoryWriter } from "./core/memory_writer";
 import { createMemoryTool } from "./tools/memory";
 import { createToolTelemetry } from "./tools/telemetry";
 import { createSearchWebTool } from "./tools/tavily_search";
@@ -70,6 +71,8 @@ export interface AgentStack {
   memoryStore: MemoryStore;
   /** 跨会话情景检索：按当前问题召回历史会话摘要（embedding 未配置时内部停用） */
   memoryRecall: MemoryRecall;
+  /** 跨会话记忆写入管线：run 尾提取事实入仓（与记忆仓/检索共用 embedding 客户端） */
+  memoryWriter: MemoryWriter;
   mcp: McpClientManager;
   /** MCP 配置热载入 watcher（关停要随 mcp 一起收口，用 dispose()） */
   mcpWatcher: McpConfigWatcher;
@@ -229,6 +232,14 @@ export async function createAgentStack(options: AgentStackOptions = {}): Promise
     cacheDir: memoryStore.dir,
     embeddings: recallEmbeddings ?? null,
   });
+  // 写入管线与检索共用 embedding 客户端（无状态），但查重向量缓存独立成文件
+  const memoryWriter = new MemoryWriter({
+    store: memoryStore,
+    model: config.model,
+    summaryModel: config.summaryModel,
+    embeddings: recallEmbeddings ?? null,
+    cacheDir: memoryStore.dir,
+  });
   console.log(
     `🔍 ${prefix}跨会话情景检索: ${recallEmbeddings ? `已启用（${recallEmbeddings.model}）` : "停用（未配置 EMBEDDING_MODEL）"}`
   );
@@ -308,6 +319,7 @@ export async function createAgentStack(options: AgentStackOptions = {}): Promise
     planStore,
     memoryStore,
     memoryRecall,
+    memoryWriter,
     mcp,
     mcpWatcher,
     untrustedContext,

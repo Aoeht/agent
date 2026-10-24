@@ -10,6 +10,7 @@ import { requestSummaryWithRetry } from "./summary_call";
 import { SessionStore, normalizeSessionName } from "./session_store";
 import { MemoryStore } from "./memory_store";
 import { MemoryRecall } from "./memory_recall";
+import { MemoryWriter } from "./memory_writer";
 import { RunBudget, RunBudgetLimits, BudgetStopReason } from "./run_budget";
 import { wrapUntrustedData, wrapSummaryBlock } from "./untrusted";
 import { PlanStore } from "./plan_store";
@@ -116,6 +117,11 @@ interface AgentConfig {
    * 注入为钉住前缀。embedding 未配置或无命中时自动不注入；缺省不启用。
    */
   memoryRecall?: MemoryRecall;
+  /**
+   * 跨会话记忆写入管线：每个用过工具的 run 结束后异步提取事实写入全局记忆仓
+   * （与 fold 长期摘要同触发、同关停信号）。失败只告警；缺省不启用。
+   */
+  memoryWriter?: MemoryWriter;
   /** 传入后开启多轮会话：历史从本地加载，运行中逐条追加落盘 */
   sessionStore?: SessionStore;
   /**
@@ -244,6 +250,7 @@ export class Agent {
           | "sessionStore"
           | "memoryStore"
           | "memoryRecall"
+          | "memoryWriter"
           | "client"
           | "summaryModel"
           | "budget"
@@ -1318,9 +1325,18 @@ export class Agent {
     if (!this.config.sessionStore || result.toolCallsCount === 0 || runtime?.signal?.aborted ||
         result.taskStatus === "blocked" || result.runStatus === "failed") return;
     this.summaryInFlight = true;
-    this.pendingSummary = this.foldLongTermSummary(userMessage, result, this.backgroundAbort.signal).finally(() => {
-      this.summaryInFlight = false;
-    });
+    const signal = this.backgroundAbort.signal;
+    // 用过工具的 run 结束后做两件后台事：会话内长期摘要 fold + 全局跨会话记忆提取。
+    // 同触发条件、同关停信号；flushSummary/shutdown 等的是合并后的总成本
+    const foldTask = this.foldLongTermSummary(userMessage, result, signal);
+    const memoryTask = this.config.memoryWriter
+      ? this.writeMemories(userMessage, result, signal)
+      : Promise.resolve(0);
+    this.pendingSummary = Promise.all([foldTask, memoryTask])
+      .then(([foldTokens, memoryTokens]) => foldTokens + memoryTokens)
+      .finally(() => {
+        this.summaryInFlight = false;
+      });
   }
 
   /**
@@ -1348,6 +1364,55 @@ export class Agent {
   }
 
   /**
+   * 一轮工作记录的标准摘要（长期摘要 fold 与跨会话记忆提取共用同一份输入）：
+   * 用户请求 + 运行状态 + 本轮结论 + 工具观察。
+   */
+  private buildRunDigest(userMessage: string, result: AgentResult): string {
+    return [
+      `用户请求：${clipText(userMessage, 1500)}`,
+      `运行状态：${result.runStatus}；任务状态：${result.taskStatus}；结束原因：${result.stopReason}。answered 仅代表已回答，未经独立验收；拒绝/过滤不代表网站存在诈骗。`,
+      `本轮结论：${result.finalAnswer ? clipText(result.finalAnswer, 2000) : "（未得出最终答案）"}`,
+      ...(this.lastRunObservations.length
+        ? ["本轮工具观察（截断）：", ...this.lastRunObservations.slice(-10).map((o) => `- ${o}`)]
+        : []),
+    ].join("\n");
+  }
+
+  /**
+   * 跨会话记忆提取（L3）：从本轮工作记录里挑值得跨会话记住的事实写入全局记忆仓。
+   * 失败只告警——与 fold 同语义，记忆更新不该打断结果返回。返回提取调用的 token 成本。
+   */
+  private async writeMemories(userMessage: string, result: AgentResult, signal?: AbortSignal): Promise<number> {
+    const writer = this.config.memoryWriter;
+    if (!writer || signal?.aborted) return 0;
+    try {
+      const report = await writer.writeFromRun(this.buildRunDigest(userMessage, result), {
+        sourceSessionId: this.config.sessionStore
+          ? path.basename(this.config.sessionStore.filePath, ".jsonl")
+          : undefined,
+        signal,
+      });
+      if (report.added > 0 || report.superseded > 0) {
+        this.events.emit("compact", {
+          action: "memory_write",
+          tokens: report.tokens,
+          detail:
+            `跨会话记忆更新：新增 ${report.added} 条，取代 ${report.superseded} 条` +
+            (report.skipped ? `，与已有记忆重复跳过 ${report.skipped} 条` : ""),
+        });
+      }
+      return report.tokens;
+    } catch (error) {
+      if (signal?.aborted) return 0;
+      this.events.emit("compact", {
+        action: "memory_failed",
+        detail: `跨会话记忆提取失败：${error instanceof Error ? error.message : error}`,
+      });
+      return 0;
+    }
+  }
+
+  /**
    * 长期摘要 fold 本体（由 startBackgroundSummary 在后台调用）。
    * 与磁盘 compact 的分工：compact 保留最近 N 个对话轮；窗口之外的历史与所有跨 run
    * 工具发现都折叠在这里，下个 run 开始时作为钉住前缀注入。失败只告警——
@@ -1357,14 +1422,7 @@ export class Agent {
     const store = this.config.sessionStore;
     if (!store || signal?.aborted) return 0;
     try {
-      const digest = [
-        `用户请求：${clipText(userMessage, 1500)}`,
-        `运行状态：${result.runStatus}；任务状态：${result.taskStatus}；结束原因：${result.stopReason}。answered 仅代表已回答，未经独立验收；拒绝/过滤不代表网站存在诈骗。`,
-        `本轮结论：${result.finalAnswer ? clipText(result.finalAnswer, 2000) : "（未得出最终答案）"}`,
-        ...(this.lastRunObservations.length
-          ? ["本轮工具观察（截断）：", ...this.lastRunObservations.slice(-10).map((o) => `- ${o}`)]
-          : []),
-      ].join("\n");
+      const digest = this.buildRunDigest(userMessage, result);
 
       const messages = [
         {
