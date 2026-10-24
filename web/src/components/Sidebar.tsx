@@ -63,7 +63,7 @@ export function Sidebar({
         ＋ 新会话
       </button>
 
-      <nav className="-mx-1 flex-1 space-y-1 overflow-y-auto px-1">
+      <nav className="-mx-1 flex-1 space-y-1 overflow-y-auto overscroll-contain px-1">
         {sessions.map((s) => {
           const active = s.sessionId === currentId;
           return (

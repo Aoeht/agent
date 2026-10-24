@@ -242,7 +242,7 @@ export function ChatPanel({
   const showWaiting = status === "running" && !(last?.kind === "assistant" && last.streaming);
 
   return (
-    <div ref={scrollRef} onScroll={onScroll} className="flex-1 overflow-y-auto px-6 py-5 max-lg:px-3">
+    <div ref={scrollRef} onScroll={onScroll} className="flex-1 overflow-y-auto overscroll-contain px-6 py-5 max-lg:px-3">
       {items.length === 0 ? (
         <EmptyState />
       ) : (

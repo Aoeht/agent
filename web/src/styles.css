@@ -33,6 +33,14 @@ body,
   height: 100%;
 }
 
+html,
+body {
+  /* 页面级滚动一律不开：body 一旦可滚（或可下拉），触摸会从内部滚动容器链式传出，
+     整个视口连同 fixed 抽屉一起滑动，并在顶部触发浏览器下拉刷新 */
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
 body {
   @apply bg-cream-100 font-sans text-ink-900 antialiased;
 }
