@@ -211,7 +211,7 @@ export function Composer({
               }
             }}
             rows={1}
-            placeholder={disabled ? "先选择一个会话" : "给 Agent 派个任务…（Enter 发送，Shift+Enter 换行）"}
+            placeholder={disabled ? "先选择一个会话" : "给 Agent 派个任务…（Enter 发送，Shift+Enter 换行；运行中发送会自动排队）"}
             disabled={disabled}
             className="max-h-40 min-h-[42px] flex-1 resize-none bg-transparent px-2.5 py-2 text-[15px] leading-6 outline-none placeholder:text-ink-400 disabled:opacity-50"
           />

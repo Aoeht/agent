@@ -46,7 +46,7 @@ export default function App() {
           <StatusChip status={current?.status ?? "idle"} />
         </header>
 
-        <ChatPanel items={current?.items ?? []} status={current?.status ?? "idle"} />
+        <ChatPanel items={current?.items ?? []} status={current?.status ?? "idle"} queue={current?.queue} />
 
         <Composer
           sessionId={state.currentId}

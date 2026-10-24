@@ -138,15 +138,23 @@ async function route(
       const text = typeof body.text === "string" ? body.text.trim() : "";
       if (text === "") return json({ error: "text 不能为空" }, 400);
       const sessionId = decodeURIComponent(messagesMatch[1]!);
-      if (sessions.isBusy(sessionId)) return json({ error: "当前会话已有任务在运行" }, 409);
-      // 202：回合在后台跑，过程与结果经 SSE 推送；逃逸的异常兜底成 error 事件
-      void sessions.sendMessage(sessionId, text).catch((error: unknown) => {
-        hub.publish(sessionId, {
-          type: "error",
-          message: error instanceof Error ? error.message : String(error),
-        });
-      });
-      return json({ ok: true }, 202);
+      // 202：回合在后台跑，过程与结果经 SSE 推送。忙时不再 409——消息进会话队列，
+      // 当前回合结束后自动接续（queued=true 时前端展示为排队芯片，run_start.queueId 转正）
+      try {
+        const result = await sessions.sendMessage(sessionId, text);
+        return json({ ok: true, queued: result.queued, queueId: result.queueId }, 202);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return json({ error: message }, message.includes("队列已满") || message.includes("更新配置") ? 409 : 500);
+      }
+    }
+
+    // 撤销一条排队消息（正在跑的回合用 /cancel）
+    const queueMatch = /^\/sessions\/([^/]+)\/queue\/([^/]+)$/.exec(pathname);
+    if (queueMatch && method === "DELETE") {
+      const removed = sessions.removeQueued(decodeURIComponent(queueMatch[1]!), decodeURIComponent(queueMatch[2]!));
+      if (!removed) return json({ error: "队列中没有这条消息" }, 404);
+      return new Response(null, { status: 204 });
     }
 
     const historyMatch = /^\/sessions\/([^/]+)\/history$/.exec(pathname);
@@ -222,7 +230,7 @@ async function route(
         return json(await sessions.applySessionConfig(decodeURIComponent(configMatch[1]!), patch));
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        return json({ error: message }, message.includes("已有任务") ? 409 : 400);
+        return json({ error: message }, message.includes("任务") ? 409 : 400);
       }
     }
 

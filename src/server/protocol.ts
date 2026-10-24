@@ -105,7 +105,9 @@ export const ServerEventSchema = z.discriminatedUnion("type", [
       .array(z.object({ id: z.string(), ok: z.boolean(), tools: z.number().int().optional() }))
       .optional(),
   }),
-  z.object({ type: z.literal("run_start"), userMessage: z.string(), promptHash: z.string().optional() }),
+  z.object({ type: z.literal("run_start"), userMessage: z.string(), promptHash: z.string().optional(),
+    /** 该回合来自排队消息时携带：前端把排队芯片转成正式用户气泡（等待过的消息才有，立即执行的不带） */
+    queueId: z.string().optional() }),
   /** 流式增量文本；与 step.llmContent 二选一消费（流式开启时消费方忽略 step.llmContent） */
   z.object({ type: z.literal("token"), delta: z.string() }),
   /** 工具开始执行（UI 渲染转圈状态）；由服务器侧工具中间件桥接发布 */
@@ -213,6 +215,14 @@ export const ServerEventSchema = z.discriminatedUnion("type", [
   }),
   /** 会话名生成完成（新会话第一轮结束后） */
   z.object({ type: z.literal("session_name"), name: z.string() }),
+  /**
+   * 会话消息队列快照：忙时发送的消息先排队，当前回合结束后自动按序接续。
+   * 每次变化（入队 / 撤销 / 出队开跑）都发全量列表；SSE（重）连后也补发一次。
+   */
+  z.object({
+    type: z.literal("queue_changed"),
+    items: z.array(z.object({ id: z.string(), text: z.string() })),
+  }),
   z.object({ type: z.literal("error"), message: z.string() }),
 ]);
 

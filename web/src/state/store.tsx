@@ -65,6 +65,10 @@ export interface SessionUIState {
   lastCachedTokens?: number;
   /** 本次页面会话里累计消耗（每次 run_end 累加） */
   accumulatedTokens?: number;
+  /** 排队中的消息（忙时发送；回合结束后自动按序执行，run_start.queueId 到达时转正） */
+  queue?: Array<{ id: string; text: string }>;
+  /** 最近一次开始执行的排队消息 id：撤掉"响应比 SSE 慢"时重复补芯片的竞态 */
+  lastRunQueueId?: string;
   /** 工具清单与本会话的关闭集合（切换会话时加载） */
   tools?: Array<{ name: string; description: string }>;
   disabledTools?: string[];
@@ -105,6 +109,9 @@ type Action =
   | { type: "session_opened"; detail: SessionDetailDTO }
   | { type: "select"; id: string }
   | { type: "user_sent"; id: string; text: string }
+  /** POST /messages 返回 queued=true 后补芯片（SSE 的 queue_changed 可能先/后到，按 id 幂等） */
+  | { type: "queue_item_synced"; id: string; item: { id: string; text: string } }
+  | { type: "queue_item_removed"; id: string; queueId: string }
   | { type: "event"; id: string; event: ServerEvent }
   | { type: "approval_resolved"; id: string }
   | { type: "input_resolved"; id: string }
@@ -178,8 +185,26 @@ export function applyEvent(s: SessionUIState, e: ServerEvent): SessionUIState {
         temperature: e.temperature ?? s.temperature,
         maxIterations: e.maxIterations ?? s.maxIterations,
       };
-    case "run_start":
-      return { ...s, status: "running", stats: undefined, cancelledByUser: false, runStartIndex: s.items.length };
+    case "run_start": {
+      // 排队消息转正：芯片移除、正式用户气泡此刻进入聊天流（未排队路径的气泡由 user_sent 先加）
+      const queued = e.queueId !== undefined;
+      const items = queued
+        ? [...s.items, { kind: "user" as const, id: uid(), text: e.userMessage }]
+        : s.items;
+      const queue = queued ? s.queue?.filter((item) => item.id !== e.queueId) : s.queue;
+      return {
+        ...s,
+        items,
+        queue,
+        ...(queued ? { lastRunQueueId: e.queueId } : {}),
+        status: "running",
+        stats: undefined,
+        cancelledByUser: false,
+        runStartIndex: items.length,
+      };
+    }
+    case "queue_changed":
+      return { ...s, queue: e.items };
     case "token": {
       const items = [...s.items];
       const last = items[items.length - 1];
@@ -408,6 +433,26 @@ function reducer(state: AppState, action: Action): AppState {
         },
       };
     }
+    case "queue_item_synced": {
+      const s = state.byId[action.id] ?? emptySession();
+      // SSE 的 run_start 已把它转正（fetch 响应比事件慢）：不补芯片，也不回滚气泡
+      if (s.lastRunQueueId === action.item.id) return state;
+      // 发送时以为是空闲加了乐观气泡、实际服务端在忙：气泡收回，改由芯片承载
+      const items = [...s.items];
+      const last = items[items.length - 1];
+      if (last?.kind === "user" && last.text === action.item.text) items.pop();
+      const queue = [...(s.queue ?? [])];
+      if (!queue.some((item) => item.id === action.item.id)) queue.push(action.item);
+      return { ...state, byId: { ...state.byId, [action.id]: { ...s, items, queue } } };
+    }
+    case "queue_item_removed": {
+      const s = state.byId[action.id];
+      if (!s?.queue) return state;
+      return {
+        ...state,
+        byId: { ...state.byId, [action.id]: { ...s, queue: s.queue.filter((item) => item.id !== action.queueId) } },
+      };
+    }
     case "event": {
       const s = state.byId[action.id] ?? emptySession();
       const next = applyEvent(s, action.event);
@@ -455,6 +500,8 @@ export interface Store {
     selectSession(id: string): void;
     newSession(): Promise<void>;
     send(text: string): Promise<void>;
+    /** 撤销一条排队中的消息 */
+    removeQueued(queueId: string): Promise<void>;
     cancel(): Promise<void>;
     resolveApproval(decision: ApprovalDecisionBody): Promise<void>;
     resolveInput(text: string): Promise<void>;
@@ -542,15 +589,28 @@ export function StoreProvider({
       async send(text: string) {
         const id = stateRef.current.currentId;
         if (!id) return;
-        dispatch({ type: "user_sent", id, text });
+        // 空闲时保留即时本地回显；忙时不加气泡——消息进队列，等 run_start.queueId 转正
+        const busy = (stateRef.current.byId[id]?.status ?? "idle") !== "idle";
+        if (!busy) dispatch({ type: "user_sent", id, text });
         try {
-          await resolvedTransport.sendMessage(id, text);
+          const result = await resolvedTransport.sendMessage(id, text);
+          if (result.queued) dispatch({ type: "queue_item_synced", id, item: { id: result.queueId, text } });
         } catch (error) {
           dispatch({
             type: "run_failed_local",
             id,
             message: error instanceof Error ? error.message : String(error),
           });
+        }
+      },
+      async removeQueued(queueId: string) {
+        const id = stateRef.current.currentId;
+        if (!id) return;
+        dispatch({ type: "queue_item_removed", id, queueId }); // 乐观移除，服务端 queue_changed 会纠正
+        try {
+          await resolvedTransport.removeQueuedMessage(id, queueId);
+        } catch {
+          // 撤单迟到（已开跑/已结束）：忽略，以服务端事件为准
         }
       },
       async cancel() {

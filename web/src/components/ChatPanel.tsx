@@ -185,7 +185,45 @@ function EmptyState() {
   );
 }
 
-export function ChatPanel({ items, status }: { items: ChatItem[]; status: RunStatus }) {
+/** 排队中的消息芯片：当前回合结束后按序执行；✕ 撤单（不影响正在跑的回合） */
+function QueueChips({ queue }: { queue: Array<{ id: string; text: string }> }) {
+  const { actions } = useStore();
+  if (queue.length === 0) return null;
+  return (
+    <div className="flex flex-col items-end gap-1.5">
+      {queue.map((item, index) => (
+        <div
+          key={item.id}
+          className="flex max-w-[80%] items-center gap-2 rounded-2xl rounded-br-md border border-dashed border-clay-400/60 bg-clay-50/70 px-3.5 py-2"
+        >
+          <span className="shrink-0 text-xs text-clay-500">
+            {index === 0 ? "⏳ 下一个执行" : `⏳ 排队中（第 ${index + 1} 位）`}
+          </span>
+          <span className="truncate text-sm text-ink-600" title={item.text}>
+            {item.text}
+          </span>
+          <button
+            onClick={() => void actions.removeQueued(item.id)}
+            title="撤销这条排队消息"
+            className="shrink-0 rounded-full px-1.5 text-sm text-ink-400 transition hover:bg-cream-200 hover:text-terra-500"
+          >
+            ✕
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export function ChatPanel({
+  items,
+  status,
+  queue,
+}: {
+  items: ChatItem[];
+  status: RunStatus;
+  queue?: Array<{ id: string; text: string }>;
+}) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
 
@@ -212,6 +250,7 @@ export function ChatPanel({ items, status }: { items: ChatItem[]; status: RunSta
           {items.map((item) => (
             <ChatItemView key={item.id} item={item} />
           ))}
+          {(queue?.length ?? 0) > 0 && <QueueChips queue={queue!} />}
           {showWaiting && (
             <div className="flex items-center gap-1.5 self-start rounded-full bg-cream-200 px-3.5 py-1.5">
               {[0, 1, 2].map((i) => (

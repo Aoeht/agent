@@ -17,6 +17,7 @@ import type { ServerEvent, SessionConfigEvent, SessionDetailDTO, SessionSummaryD
 import { RunOutcomeSchema } from "./protocol";
 import { TaskStore } from "../core/task_store";
 import { formatBudgetExtensionPrompt } from "../core/budget_prompt";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 
 /**
@@ -67,6 +68,17 @@ export class EventHub {
   }
 }
 
+/** 排队中的待发消息：当前回合结束后按 FIFO 接续执行 */
+interface QueuedMessage {
+  id: string;
+  text: string;
+  /** 入队时会话正忙（这条消息等待过）：run_start 才带 queueId，前端据此把芯片转成气泡 */
+  waited: boolean;
+}
+
+/** 单会话排队上限：防失控堆积；满了拒绝并提示 */
+const MAX_QUEUE_LENGTH = 8;
+
 interface SessionEntry {
   initializing?: Promise<Agent> | undefined;
   configuring?: boolean;
@@ -83,6 +95,8 @@ interface SessionEntry {
   /** 会话还没有任何对话时为 true：第一个成功的回合结束后起一次名 */
   needsName: boolean;
   controller?: AbortController | undefined;
+  /** 忙时到达的消息排队处（FIFO）；当前回合 finally 里自动接续下一条 */
+  queue: QueuedMessage[];
 }
 
 export interface SessionManagerOptions {
@@ -109,26 +123,28 @@ export class SessionManager {
 
   constructor(private readonly options: SessionManagerOptions) {}
 
-  /** 该会话是否正有回合在跑（每会话独立，跨会话并行不受限） */
+  /** 该会话是否正有回合在跑（每会话独立，跨会话并行不受限）；排队中的消息也算"有事要做" */
   isBusy(sessionId: string): boolean {
-    return this.entries.get(sessionId)?.controller !== undefined;
+    const entry = this.entries.get(sessionId);
+    return entry !== undefined && (entry.controller !== undefined || entry.queue.length > 0);
   }
 
   /** 是否任意会话都在跑（切换沙箱目录前检查） */
   anyBusy(): boolean {
     return [...this.entries.values()].some((entry) =>
-      entry.controller !== undefined || entry.configuring || entry.initializing !== undefined);
+      entry.controller !== undefined || entry.queue.length > 0 || entry.configuring || entry.initializing !== undefined);
   }
 
   /**
    * 丢弃全部会话 Agent（切换沙箱根后调用）：下个回合用新根重建注册表与提示词。
-   * 对话历史都在磁盘上，重建无损失；调用前须确认 anyBusy() 为 false。
+   * 对话历史都在磁盘上，重建无损失；调用前须确认 anyBusy() 为 false（队列空才允许切换）。
    */
   resetAgents(): void {
     for (const entry of this.entries.values()) {
       entry.agent = undefined;
       entry.registry = undefined;
       entry.toolDefs = undefined;
+      entry.queue = [];
     }
   }
 
@@ -183,7 +199,7 @@ export class SessionManager {
     patch: { model?: string; temperature?: number; maxIterations?: number }
   ): Promise<SessionConfigEvent> {
     const entry = this.entry(sessionId);
-    if (entry.controller !== undefined || entry.configuring) throw new Error("当前会话已有任务或配置更新在运行");
+    if (entry.controller !== undefined || entry.queue.length > 0 || entry.configuring) throw new Error("当前会话还有任务在运行或排队");
     entry.configuring = true;
     try {
       const agent = await this.ensureAgent(entry, sessionId);
@@ -279,7 +295,7 @@ export class SessionManager {
     };
   }
 
-  /** SSE 订阅：建立后立即发 hello（运行环境）与该会话的未决审批/输入请求 */
+  /** SSE 订阅：建立后立即发 hello（运行环境）、该会话的未决审批/输入请求与排队消息快照 */
   subscribe(sessionId: string, listener: (event: ServerEvent) => void): () => void {
     this.entry(sessionId);
     const unsubscribe = this.options.hub.subscribe(sessionId, listener);
@@ -287,44 +303,107 @@ export class SessionManager {
     void this.helloFor(sessionId).then((hello) => {
       if (!subscribed) return;
       listener(hello);
-      const task = this.taskStoreFor(this.entry(sessionId)).current();
+      const entry = this.entry(sessionId);
+      const task = this.taskStoreFor(entry).current();
       if (task) listener({ type: "task_update", task });
       for (const event of this.options.bridge.pendingEventsFor(sessionId)) {
         listener(event);
       }
+      // 排队消息是纯内存态：刷新/重连后靠这里的快照恢复芯片显示
+      if (entry.queue.length > 0) this.publishQueue(entry, sessionId, listener);
     }).catch((error: unknown) => {
       if (subscribed) listener({ type: "error", message: error instanceof Error ? error.message : String(error) });
     });
     return () => { subscribed = false; unsubscribe(); };
   }
 
-  /** 跑一个回合；该会话忙时抛错（HTTP 层映射 409）。事件全程经 hub 推给订阅者。 */
-  async sendMessage(sessionId: string, text: string): Promise<void> {
+  /**
+   * 发消息：统一入队再派发。会话空闲时立即开跑（与旧行为一致）；正忙时排队，
+   * 当前回合结束后自动按序接续——不再用 409 把消息打回。返回 queued=true 表示
+   * 这条消息在队列里等待（前端展示为排队芯片，run_start.queueId 到达时转正）。
+   */
+  async sendMessage(sessionId: string, text: string): Promise<{ queued: boolean; queueId: string }> {
     const entry = this.entry(sessionId);
-    if (entry.controller !== undefined || entry.configuring) throw new Error("当前会话已有任务或配置更新在运行");
-    const controller = new AbortController();
-    entry.controller = controller;
-    try {
-      await this.runTurn(entry, sessionId, text, controller.signal);
-    } finally {
-      this.options.bridge.disposeSession(sessionId);
-      entry.controller = undefined;
-    }
+    if (entry.configuring) throw new Error("当前会话正在更新配置，请稍后再发");
+    if (entry.queue.length >= MAX_QUEUE_LENGTH) throw new Error(`发送队列已满（${MAX_QUEUE_LENGTH} 条），请等当前回合结束`);
+    const item: QueuedMessage = {
+      id: `q-${randomUUID().slice(0, 8)}`,
+      text,
+      waited: entry.controller !== undefined,
+    };
+    // 先取快照再派发：runNext 会同步置位 controller，派发后再读会把"立即执行"误判成"已排队"
+    const dispatchNow = entry.controller === undefined;
+    entry.queue.push(item);
+    this.publishQueue(entry, sessionId);
+    if (dispatchNow) void this.runNext(entry, sessionId);
+    return { queued: !dispatchNow, queueId: item.id };
+  }
+
+  /** 撤销一条排队消息（只影响未开始的；正在跑的用 cancel）。返回是否真的撤到了。 */
+  removeQueued(sessionId: string, queueId: string): boolean {
+    const entry = this.entries.get(sessionId);
+    if (!entry) return false;
+    const index = entry.queue.findIndex((item) => item.id === queueId);
+    if (index === -1) return false;
+    entry.queue.splice(index, 1);
+    this.publishQueue(entry, sessionId);
+    return true;
+  }
+
+  /** 当前队列快照（测试与诊断用） */
+  queueSnapshot(sessionId: string): Array<{ id: string; text: string }> {
+    return this.entry(sessionId).queue.map(({ id, text }) => ({ id, text }));
   }
 
   cancel(sessionId: string): void {
+    // 只停当前回合：排队中的消息保留，当前回合收尾后按序接续（要撤排队用 removeQueued）
     this.entries.get(sessionId)?.controller?.abort();
     this.options.bridge.disposeSession(sessionId);
   }
 
   /** 服务器关停：中止在飞回合、收口未决审批、回收 MCP 子进程与长连接 */
   async shutdown(): Promise<void> {
-    for (const entry of this.entries.values()) entry.controller?.abort();
+    for (const entry of this.entries.values()) {
+      entry.controller?.abort();
+      entry.queue = [];
+    }
     for (const sessionId of this.entries.keys()) this.options.bridge.disposeSession(sessionId);
     await this.options.runtime.mcp.closeAll();
   }
 
   // ---------- 内部 ----------
+
+  /**
+   * 取队首开跑；回合收尾（含取消/失败）后若队列还有消息则自动接续下一条。
+   * 链式调用不 await：sendMessage 只负责入队与首次触发，全程事件经 hub 可观测。
+   */
+  private async runNext(entry: SessionEntry, sessionId: string): Promise<void> {
+    const next = entry.queue.shift();
+    if (!next) return;
+    this.publishQueue(entry, sessionId);
+    const controller = new AbortController();
+    entry.controller = controller;
+    try {
+      await this.runTurn(entry, sessionId, next.text, controller.signal, next.waited ? next.id : undefined);
+    } catch (error) {
+      // runTurn 内部已把 agent.run 的失败兜成 error 事件；这里只兜逃逸异常，链条继续
+      this.options.hub.publish(sessionId, {
+        type: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      this.options.bridge.disposeSession(sessionId);
+      entry.controller = undefined;
+      if (entry.queue.length > 0) void this.runNext(entry, sessionId);
+    }
+  }
+
+  /** 队列快照广播；直连 listener 的重放变体用于订阅建立时（走 hub 会让别的订阅者收到两遍） */
+  private publishQueue(entry: SessionEntry, sessionId: string, listener?: (event: ServerEvent) => void): void {
+    const event: ServerEvent = { type: "queue_changed", items: entry.queue.map(({ id, text }) => ({ id, text })) };
+    if (listener) listener(event);
+    else this.options.hub.publish(sessionId, event);
+  }
 
   private taskStoreFor(entry: SessionEntry): TaskStore {
     return entry.agent?.taskStore ?? new TaskStore(path.join(entry.store.dir, "tasks", `${path.basename(entry.store.filePath, ".jsonl")}.sqlite`));
@@ -334,7 +413,7 @@ export class SessionManager {
     let entry = this.entries.get(sessionId);
     if (!entry) {
       entry = { store: new SessionStore({ dir: this.options.sessionDir, sessionId }), needsName: false,
-        configRevision: this.nextConfigRevision() };
+        configRevision: this.nextConfigRevision(), queue: [] };
       this.entries.set(sessionId, entry);
     }
     return entry;
@@ -483,12 +562,19 @@ export class SessionManager {
     });
   }
 
-  private async runTurn(entry: SessionEntry, sessionId: string, text: string, signal: AbortSignal): Promise<void> {
+  private async runTurn(
+    entry: SessionEntry,
+    sessionId: string,
+    text: string,
+    signal: AbortSignal,
+    queueId?: string
+  ): Promise<void> {
     const agent = await this.ensureAgent(entry, sessionId);
     this.options.hub.publish(sessionId, {
       type: "run_start",
       userMessage: text,
       promptHash: agent.systemPromptHash,
+      ...(queueId !== undefined ? { queueId } : {}),
     });
     const runtime: ToolRuntime = {
       signal,

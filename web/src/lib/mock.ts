@@ -357,6 +357,9 @@ export class MockTransport implements Transport {
   private listeners = new Map<string, Set<(event: ServerEvent) => void>>();
   private runs = new Map<string, AbortController>();
   private approvals = new Map<string, (body: ApprovalDecisionBody) => void>();
+  /** 忙时消息的会话队列（FIFO），回合结束后自动接续——与真实服务器同语义 */
+  private queues = new Map<string, Array<{ id: string; text: string; waited: boolean }>>();
+  private queueSeq = 0;
   private sessions: SessionDetailDTO[];
   private seq = 0;
   /** 会话级配置（内存态）；applySessionConfig 更新并广播 session_config */
@@ -472,21 +475,45 @@ export class MockTransport implements Transport {
       const config = this.sessionConfig.get(sessionId);
       onEvent({ ...helloEvent, ...config,
         contextWindow: mockContextWindow(config?.model ?? helloEvent.model) });
+      // 排队消息快照（刷新/重连恢复），与真实服务器 subscribe 的补发一致
+      const queue = this.queues.get(sessionId);
+      if (queue && queue.length > 0) {
+        onEvent({ type: "queue_changed", items: queue.map(({ id, text }) => ({ id, text })) });
+      }
     });
     return () => {
       set.delete(onEvent);
     };
   }
 
-  async sendMessage(sessionId: string, text: string): Promise<void> {
-    if (this.runs.has(sessionId)) throw new Error("当前会话已有任务在运行");
+  private publishQueue(sessionId: string): void {
+    const queue = this.queues.get(sessionId) ?? [];
+    this.emit(sessionId, { type: "queue_changed", items: queue.map(({ id, text }) => ({ id, text })) });
+  }
+
+  async sendMessage(sessionId: string, text: string): Promise<{ queued: boolean; queueId: string }> {
+    const queue = this.queues.get(sessionId) ?? [];
+    this.queues.set(sessionId, queue);
+    const item = { id: `mock-q-${++this.queueSeq}`, text, waited: this.runs.has(sessionId) };
+    queue.push(item);
+    this.publishQueue(sessionId);
+    if (this.runs.has(sessionId)) return { queued: true, queueId: item.id };
+    void this.startRun(sessionId);
+    return { queued: false, queueId: item.id };
+  }
+
+  private async startRun(sessionId: string): Promise<void> {
+    const queue = this.queues.get(sessionId) ?? [];
+    const next = queue.shift();
+    this.publishQueue(sessionId);
+    if (!next) return;
     const controller = new AbortController();
     this.runs.set(sessionId, controller);
     try {
       await runDemoScript(
-        (event) => this.emit(sessionId, event),
+        (event) => this.emit(sessionId, event.type === "run_start" && next.waited ? { ...event, queueId: next.id } : event),
         controller.signal,
-        text,
+        next.text,
         (id) =>
           new Promise<ApprovalDecisionBody>((resolve) => {
             this.approvals.set(id, resolve);
@@ -494,7 +521,16 @@ export class MockTransport implements Transport {
       );
     } finally {
       this.runs.delete(sessionId);
+      if ((this.queues.get(sessionId) ?? []).length > 0) void this.startRun(sessionId);
     }
+  }
+
+  async removeQueuedMessage(sessionId: string, queueId: string): Promise<void> {
+    const queue = this.queues.get(sessionId);
+    const index = queue?.findIndex((item) => item.id === queueId) ?? -1;
+    if (index === -1 || !queue) throw new Error("队列中没有这条消息");
+    queue.splice(index, 1);
+    this.publishQueue(sessionId);
   }
 
   /** 取消进行中的回合；未决审批一并按 decline 收口（与真实服务器的取消语义一致） */

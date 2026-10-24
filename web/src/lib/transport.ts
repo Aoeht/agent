@@ -47,8 +47,11 @@ export interface Transport {
     onEvent: (event: ServerEvent) => void,
     onStatus?: (status: "connected" | "reconnecting") => void
   ): () => void;
-  /** 会话忙时 reject（协议里的 409） */
-  sendMessage(sessionId: string, text: string): Promise<void>;
+  /** 发送消息：会话忙时不报错而是排队（服务端 FIFO，回合结束后自动接续）；
+   *  queued=true 表示这条消息在等待，queueId 用于撤单与 run_start 转正 */
+  sendMessage(sessionId: string, text: string): Promise<{ queued: boolean; queueId: string }>;
+  /** 撤销一条排队中的消息（不影响正在运行的回合） */
+  removeQueuedMessage(sessionId: string, queueId: string): Promise<void>;
   cancel(sessionId: string): Promise<void>;
   respondApproval(sessionId: string, approvalId: string, body: ApprovalDecisionBody): Promise<void>;
   respondInput(sessionId: string, requestId: string, text: string): Promise<void>;

@@ -102,11 +102,19 @@ export class HttpTransport implements Transport {
     return () => source.close();
   }
 
-  async sendMessage(sessionId: string, text: string): Promise<void> {
-    await this.request(`/sessions/${encodeURIComponent(sessionId)}/messages`, {
+  async sendMessage(sessionId: string, text: string): Promise<{ queued: boolean; queueId: string }> {
+    const resp = await this.request(`/sessions/${encodeURIComponent(sessionId)}/messages`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ text }),
+    });
+    const parsed = (await resp.json()) as { queued?: boolean; queueId?: string };
+    return { queued: parsed.queued === true, queueId: parsed.queueId ?? "" };
+  }
+
+  async removeQueuedMessage(sessionId: string, queueId: string): Promise<void> {
+    await this.request(`/sessions/${encodeURIComponent(sessionId)}/queue/${encodeURIComponent(queueId)}`, {
+      method: "DELETE",
     });
   }
 
