@@ -238,11 +238,21 @@ function Env({ session, sandboxRoot, onChangeSandbox }: { session: SessionUIStat
   );
 }
 
-export function RightPanel() {
+export function RightPanel({ drawer = false, drawerOpen = false }: { drawer?: boolean; drawerOpen?: boolean }) {
   const { state, current, actions } = useStore();
   const [sandboxModalOpen, setSandboxModalOpen] = useState(false);
   return (
-    <aside className="hidden w-80 shrink-0 flex-col gap-4 overflow-y-auto border-l border-cream-300 bg-cream-200/40 p-4 xl:flex">
+    <aside
+      className={[
+        "flex w-80 flex-col gap-4 overflow-y-auto border-l border-cream-300 bg-cream-200/40 p-4",
+        // 窄屏（<1280）抽屉滑入；桌面保持原样：xl 以下隐藏、xl 起静态展示
+        drawer
+          ? `fixed inset-y-0 right-0 z-40 shrink-0 shadow-xl transition-transform duration-200 ${
+              drawerOpen ? "translate-x-0" : "invisible translate-x-full"
+            }`
+          : "hidden shrink-0 xl:flex",
+      ].join(" ")}
+    >
       <Card title="任务计划">
         {current?.task && (
           <div className="mb-3 space-y-2 text-xs leading-5 text-ink-600">

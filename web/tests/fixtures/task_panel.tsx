@@ -1,5 +1,6 @@
+import { useEffect } from "react";
 import { createRoot } from "react-dom/client";
-import { StoreProvider } from "../../src/state/store";
+import { StoreProvider, useStore } from "../../src/state/store";
 import { RightPanel } from "../../src/components/RightPanel";
 import { MockTransport } from "../../src/lib/mock";
 import type { ServerEvent } from "../../../src/server/protocol";
@@ -29,4 +30,17 @@ class FixtureTransport extends MockTransport {
     return () => {};
   }
 }
-createRoot(document.getElementById("root")!).render(<StoreProvider transport={new FixtureTransport()}><RightPanel /></StoreProvider>);
+// store 不再自动选中会话：夹具里模拟用户点开这条持久化会话
+function OpenPersisted() {
+  const { actions } = useStore();
+  useEffect(() => {
+    actions.selectSession("persisted-session");
+  }, [actions]);
+  return null;
+}
+createRoot(document.getElementById("root")!).render(
+  <StoreProvider transport={new FixtureTransport()}>
+    <OpenPersisted />
+    <RightPanel />
+  </StoreProvider>
+);

@@ -52,6 +52,8 @@ body {
 /* markdown 正文排版（.md 容器内），与米白色板同调 */
 .md {
   @apply text-[15px] leading-7;
+  /* 长 URL / 长单词在窄屏气泡内换行而不是撑破 */
+  overflow-wrap: anywhere;
 }
 .md > :first-child {
   margin-top: 0;
@@ -95,8 +97,9 @@ body {
 .md pre code {
   @apply bg-transparent p-0 text-cream-50;
 }
+/* display:block + overflow-x:auto：宽表格在容器内横向滚动，窄屏不撑破气泡 */
 .md table {
-  @apply my-3 w-full border-collapse text-sm;
+  @apply my-3 block w-full overflow-x-auto border-collapse text-sm;
 }
 .md th {
   @apply border border-cream-300 bg-cream-200 px-3 py-1.5 text-left font-medium;

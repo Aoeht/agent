@@ -25,15 +25,29 @@ export function Sidebar({
   kind,
   onSelect,
   onNew,
+  drawer = false,
+  drawerOpen = false,
 }: {
   sessions: SessionSummaryDTO[];
   currentId: string | null;
   kind: Transport["kind"];
   onSelect: (id: string) => void;
   onNew: () => void;
+  /** 窄屏抽屉模式：fixed 滑入滑出，不占布局；桌面保持静态 w-72 */
+  drawer?: boolean;
+  drawerOpen?: boolean;
 }) {
   return (
-    <aside className="flex w-72 shrink-0 flex-col gap-3 border-r border-cream-300 bg-cream-200/40 p-4">
+    <aside
+      className={[
+        "flex w-72 flex-col gap-3 border-r border-cream-300 bg-cream-200/40 p-4",
+        drawer
+          ? `fixed inset-y-0 left-0 z-40 shrink-0 shadow-xl transition-transform duration-200 ${
+              drawerOpen ? "translate-x-0" : "invisible -translate-x-full"
+            }`
+          : "shrink-0",
+      ].join(" ")}
+    >
       <div className="px-1">
         <h1 className="text-lg font-semibold tracking-tight">Agent 工作台</h1>
         <p className="mt-0.5 text-xs text-ink-400">

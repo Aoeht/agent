@@ -17,6 +17,8 @@ export function Composer({
   onSend,
   onCancel,
   onApplyConfig,
+  onDraftConfig,
+  placeholder,
 }: {
   sessionId: string | null;
   running: boolean;
@@ -26,6 +28,10 @@ export function Composer({
   onSend: (text: string) => void;
   onCancel: () => void;
   onApplyConfig: (config: SessionConfigInput) => Promise<void>;
+  /** 欢迎态（sessionId=null）专用：草稿一变就上报，由上层暂存、随首条消息经 createAndSend 落地 */
+  onDraftConfig?: (config: SessionConfigInput) => void;
+  /** 覆盖默认占位文案（欢迎界面用它换一行短句） */
+  placeholder?: string;
 }) {
   const [text, setText] = useState("");
   const [panelOpen, setPanelOpen] = useState(false);
@@ -88,8 +94,27 @@ export function Composer({
     }
   };
 
+  // 欢迎态（sessionId=null）没有会话可应用配置：只上报草稿，跳过 temperature/maxIterations 未动过的字段
+  const reportDraftConfig = (next: typeof draft) => {
+    if (sessionId !== null || !onDraftConfig) return;
+    const payload: SessionConfigInput = {};
+    if (draftDirty.current.has("model") && next.model) payload.model = next.model;
+    const temperature = Number.parseFloat(next.temperature);
+    if (draftDirty.current.has("temperature") && Number.isFinite(temperature)) payload.temperature = temperature;
+    const maxIterations = next.maxIterations.trim() === "" ? Number.NaN : Number.parseInt(next.maxIterations, 10);
+    if (draftDirty.current.has("maxIterations") && Number.isInteger(maxIterations) && maxIterations >= 0) {
+      payload.maxIterations = maxIterations;
+    }
+    onDraftConfig(payload);
+  };
+
   const applyConfig = async () => {
     if (applying) return;
+    if (sessionId === null) {
+      // 欢迎态：配置随首条消息由 createAndSend 应用，这里只需收起面板
+      setPanelOpen(false);
+      return;
+    }
     const requestedSession = sessionId;
     const payload: SessionConfigInput = {};
     if (draftDirty.current.has("model") && draft.model && draft.model !== config.model) payload.model = draft.model;
@@ -117,13 +142,13 @@ export function Composer({
   };
 
   return (
-    <div className="border-t border-cream-300 bg-cream-200/40 px-6 py-4">
+    <div className="border-t border-cream-300 bg-cream-200/40 px-6 py-4 max-lg:px-3 max-lg:pb-[max(1rem,env(safe-area-inset-bottom))]">
       <div className="relative mx-auto max-w-3xl">
         {/* 模型/参数弹层 */}
         {panelOpen && (
           <div
             ref={panelRef}
-            className="absolute bottom-full left-0 z-20 mb-2 w-80 rounded-2xl border border-cream-300 bg-cream-50 p-4 shadow-xl"
+            className="absolute bottom-full left-0 z-20 mb-2 max-h-[60vh] w-80 max-w-[calc(100vw-1.5rem)] overflow-y-auto rounded-2xl border border-cream-300 bg-cream-50 p-4 shadow-xl"
           >
             <h3 className="mb-3 text-sm font-semibold">模型与参数</h3>
             <label className="block">
@@ -131,7 +156,12 @@ export function Composer({
               <select
                 value={draft.model}
                 disabled={applying}
-                onChange={(e) => { draftDirty.current.add("model"); setDraft((d) => ({ ...d, model: e.target.value })); }}
+                onChange={(e) => {
+                  draftDirty.current.add("model");
+                  const next = { ...draft, model: e.target.value };
+                  setDraft(next);
+                  reportDraftConfig(next);
+                }}
                 className="mt-1 w-full rounded-xl border border-cream-300 bg-white/70 px-3 py-2 font-mono text-xs outline-none focus:border-clay-500"
               >
                 {models.map((model) => (
@@ -151,7 +181,12 @@ export function Composer({
                   max="2"
                   value={draft.temperature}
                   disabled={applying}
-                  onChange={(e) => { draftDirty.current.add("temperature"); setDraft((d) => ({ ...d, temperature: e.target.value })); }}
+                  onChange={(e) => {
+                    draftDirty.current.add("temperature");
+                    const next = { ...draft, temperature: e.target.value };
+                    setDraft(next);
+                    reportDraftConfig(next);
+                  }}
                   className="mt-1 w-full rounded-xl border border-cream-300 bg-white/70 px-3 py-2 text-sm outline-none focus:border-clay-500"
                 />
               </label>
@@ -163,7 +198,12 @@ export function Composer({
                   placeholder="不限"
                   value={draft.maxIterations}
                   disabled={applying}
-                  onChange={(e) => { draftDirty.current.add("maxIterations"); setDraft((d) => ({ ...d, maxIterations: e.target.value })); }}
+                  onChange={(e) => {
+                    draftDirty.current.add("maxIterations");
+                    const next = { ...draft, maxIterations: e.target.value };
+                    setDraft(next);
+                    reportDraftConfig(next);
+                  }}
                   className="mt-1 w-full rounded-xl border border-cream-300 bg-white/70 px-3 py-2 text-sm outline-none focus:border-clay-500"
                 />
               </label>
@@ -192,7 +232,7 @@ export function Composer({
             }}
             disabled={disabled || !config.model || applying}
             title="模型与参数"
-            className="shrink-0 rounded-full bg-cream-200 px-3 py-2 text-xs font-medium text-ink-600 transition hover:bg-cream-300 disabled:opacity-40"
+            className="max-w-32 shrink-0 truncate rounded-full bg-cream-200 px-3 py-2 text-xs font-medium text-ink-600 transition hover:bg-cream-300 disabled:opacity-40"
           >
             ⚙ {(config.model ?? models[0] ?? "模型").split("/").pop()}
           </button>
@@ -211,9 +251,11 @@ export function Composer({
               }
             }}
             rows={1}
-            placeholder={disabled ? "先选择一个会话" : "给 Agent 派个任务…（Enter 发送，Shift+Enter 换行；运行中发送会自动排队）"}
+            placeholder={
+              placeholder ?? (disabled ? "先选择一个会话" : "给 Agent 派个任务…（Enter 发送，Shift+Enter 换行；运行中发送会自动排队）")
+            }
             disabled={disabled}
-            className="max-h-40 min-h-[42px] flex-1 resize-none bg-transparent px-2.5 py-2 text-[15px] leading-6 outline-none placeholder:text-ink-400 disabled:opacity-50"
+            className="max-h-40 min-h-[42px] flex-1 resize-none bg-transparent px-2.5 py-2 text-[15px] max-lg:text-base leading-6 outline-none placeholder:text-ink-400 disabled:opacity-50"
           />
           {running ? (
             <button

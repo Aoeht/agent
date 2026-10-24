@@ -107,7 +107,7 @@ type Action =
   | { type: "tools_loaded"; id: string; tools: Array<{ name: string; description: string }>; disabled: string[] }
   | { type: "session_created"; summary: SessionSummaryDTO }
   | { type: "session_opened"; detail: SessionDetailDTO }
-  | { type: "select"; id: string }
+  | { type: "select"; id: string | null }
   | { type: "user_sent"; id: string; text: string }
   /** POST /messages 返回 queued=true 后补芯片（SSE 的 queue_changed 可能先/后到，按 id 幂等） */
   | { type: "queue_item_synced"; id: string; item: { id: string; text: string } }
@@ -419,7 +419,14 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, byId: { ...state.byId, [action.detail.summary.sessionId]: merged } };
     }
     case "select":
-      return { ...state, currentId: action.id, byId: { ...state.byId, [action.id]: state.byId[action.id] ?? emptySession() } };
+      // id=null = 回到欢迎界面：不选中任何会话，也不往 byId 塞 null 键
+      return {
+        ...state,
+        currentId: action.id,
+        byId: action.id
+          ? { ...state.byId, [action.id]: state.byId[action.id] ?? emptySession() }
+          : state.byId,
+      };
     case "user_sent": {
       const s = state.byId[action.id] ?? emptySession();
       return {
@@ -501,7 +508,11 @@ export interface Store {
   current: SessionUIState | null;
   actions: {
     selectSession(id: string): void;
+    /** 回到欢迎界面（不选中任何会话；不创建空会话） */
+    goWelcome(): void;
     newSession(): Promise<void>;
+    /** 欢迎界面首发：创建会话 →（可选）应用模型等配置 → 发送第一条消息 */
+    createAndSend(text: string, config?: SessionConfigInput): Promise<void>;
     send(text: string): Promise<void>;
     /** 撤销一条排队中的消息 */
     removeQueued(queueId: string): Promise<void>;
@@ -538,13 +549,13 @@ export function StoreProvider({
   const stateRef = useRef(state);
   stateRef.current = state;
 
-  // 首次加载：拉会话列表并自动打开最近的一个；顺带拉模型清单与服务器设置
+  // 首次加载：拉会话列表、模型清单与服务器设置；不自动选中——首页停在欢迎界面，
+  // 点左侧会话进入，或发首条消息时才创建会话（createAndSend）
   useEffect(() => {
     let alive = true;
     void resolvedTransport.listSessions().then((sessions) => {
       if (!alive) return;
       dispatch({ type: "sessions_loaded", sessions });
-      if (sessions[0]) dispatch({ type: "select", id: sessions[0].sessionId });
     });
     void resolvedTransport.listModels().then((models) => {
       if (!alive) return;
@@ -586,32 +597,54 @@ export function StoreProvider({
     };
   }, [currentId, resolvedTransport]);
 
-  const actions = useMemo<Store["actions"]>(
-    () => ({
+  const actions = useMemo<Store["actions"]>(() => {
+    // 发送主体按会话 id 操作：send 走当前会话，createAndSend 在刚建的新会话上复用同一段逻辑
+    const sendMessageTo = async (id: string, text: string) => {
+      // 空闲时保留即时本地回显；忙时不加气泡——消息进队列，等 run_start.queueId 转正
+      const busy = (stateRef.current.byId[id]?.status ?? "idle") !== "idle";
+      if (!busy) dispatch({ type: "user_sent", id, text });
+      try {
+        const result = await resolvedTransport.sendMessage(id, text);
+        if (result.queued) dispatch({ type: "queue_item_synced", id, item: { id: result.queueId, text } });
+      } catch (error) {
+        dispatch({
+          type: "run_failed_local",
+          id,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    };
+    return {
       selectSession(id: string) {
         dispatch({ type: "select", id });
+      },
+      goWelcome() {
+        dispatch({ type: "select", id: null });
       },
       async newSession() {
         const summary = await resolvedTransport.createSession();
         dispatch({ type: "session_created", summary });
         dispatch({ type: "select", id: summary.sessionId });
       },
+      async createAndSend(text: string, config?: SessionConfigInput) {
+        const summary = await resolvedTransport.createSession();
+        dispatch({ type: "session_created", summary });
+        dispatch({ type: "select", id: summary.sessionId });
+        // 欢迎界面选的模型/参数还没有会话可落：建会话后立刻应用，失败不阻断首条消息
+        if (config && Object.keys(config).length > 0) {
+          try {
+            const applied = await resolvedTransport.applySessionConfig(summary.sessionId, config);
+            dispatch({ type: "event", id: summary.sessionId, event: applied });
+          } catch {
+            // 模型名失效等情况：会话沿用服务器默认配置继续
+          }
+        }
+        await sendMessageTo(summary.sessionId, text);
+      },
       async send(text: string) {
         const id = stateRef.current.currentId;
         if (!id) return;
-        // 空闲时保留即时本地回显；忙时不加气泡——消息进队列，等 run_start.queueId 转正
-        const busy = (stateRef.current.byId[id]?.status ?? "idle") !== "idle";
-        if (!busy) dispatch({ type: "user_sent", id, text });
-        try {
-          const result = await resolvedTransport.sendMessage(id, text);
-          if (result.queued) dispatch({ type: "queue_item_synced", id, item: { id: result.queueId, text } });
-        } catch (error) {
-          dispatch({
-            type: "run_failed_local",
-            id,
-            message: error instanceof Error ? error.message : String(error),
-          });
-        }
+        await sendMessageTo(id, text);
       },
       async removeQueued(queueId: string) {
         const id = stateRef.current.currentId;
@@ -673,9 +706,8 @@ export function StoreProvider({
           dispatch({ type: "tools_loaded", id, ...toolState });
         }
       },
-    }),
-    [resolvedTransport]
-  );
+    };
+  }, [resolvedTransport]);
 
   const current = state.currentId ? (state.byId[state.currentId] ?? null) : null;
   const value = useMemo<Store>(() => ({ state, current, actions }), [state, current, actions]);

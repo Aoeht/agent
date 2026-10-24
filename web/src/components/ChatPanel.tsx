@@ -82,13 +82,13 @@ function ChatItemView({ item }: { item: ChatItem }) {
   switch (item.kind) {
     case "user":
       return (
-        <div className="max-w-[80%] self-end whitespace-pre-wrap rounded-2xl rounded-br-md bg-clay-100 px-4 py-2.5 text-[15px] leading-7">
+        <div className="max-w-[80%] self-end whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-clay-100 px-4 py-2.5 text-[15px] leading-7">
           {item.text}
         </div>
       );
     case "assistant":
       return (
-        <div className="max-w-[85%] self-start rounded-2xl rounded-bl-md border border-cream-300 bg-cream-50 px-4 py-2.5 shadow-sm">
+        <div className="max-w-[85%] self-start break-words rounded-2xl rounded-bl-md border border-cream-300 bg-cream-50 px-4 py-2.5 shadow-sm">
           <div className="md">
             <Markdown remarkPlugins={[remarkGfm]}>{item.text || "…"}</Markdown>
           </div>
@@ -242,7 +242,7 @@ export function ChatPanel({
   const showWaiting = status === "running" && !(last?.kind === "assistant" && last.streaming);
 
   return (
-    <div ref={scrollRef} onScroll={onScroll} className="flex-1 overflow-y-auto px-6 py-5">
+    <div ref={scrollRef} onScroll={onScroll} className="flex-1 overflow-y-auto px-6 py-5 max-lg:px-3">
       {items.length === 0 ? (
         <EmptyState />
       ) : (
