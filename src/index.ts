@@ -9,7 +9,7 @@ import path from "node:path";
 import readline from "node:readline/promises";
 import { SessionStore } from "./core/session_store";
 import { newSession, pickSession, PickedSession } from "./core/session_picker";
-import { loadAgentConfig } from "./config";
+import { loadAgentConfig, resolveSessionDir } from "./config";
 import { createAgentStack } from "./bootstrap";
 import { buildSystemPrompt } from "./prompts/system";
 import { handlePromptCommand } from "./prompts/commands";
@@ -456,15 +456,13 @@ async function main() {
   //      与 Web UI 服务器共用同一装配点（src/bootstrap.ts），两条入口的差别只剩
   //      Confirmer（终端逐个询问 vs UI 审批桥）与日志前缀
   const stack = await createAgentStack({ confirmer: createCliConfirmer(), config });
-  const { skills, registry: tools, planStore, memoryStore, mcp, untrustedContext } = stack;
+  const { skills, registry: tools, planStore, memoryStore, memoryRecall, mcp, untrustedContext } = stack;
   // 提示词里的文件操作分工按实际挂载情况生成：server 下线时不再提不存在的工具
   const filesystemTools = tools.list().map((def) => def.name).filter((name) => name.startsWith("filesystem__"));
 
   try {
     // 4. 多轮会话：先问续聊哪个（回车默认新会话），历史落盘到 .agent-sessions/<sessionId>.jsonl，重启进程后仍带着上文继续
-    const session = await chooseSession(
-      process.env.AGENT_SESSION_DIR ?? path.join(process.cwd(), ".agent-sessions")
-    );
+    const session = await chooseSession(resolveSessionDir());
     console.log(`📂 会话历史: ${session.store.filePath}`);
 
     // 启动快照（只读一次，供三处使用）：
@@ -516,6 +514,7 @@ async function main() {
       tools,
       planStore,
       memoryStore,
+      memoryRecall,
       stream: config.stream,
       ...(checkpoints
         ? {

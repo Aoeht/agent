@@ -10,6 +10,7 @@ import path from "node:path";
 import { ToolRegistry, ToolCallMiddleware } from "./core/registry";
 import { PlanStore } from "./core/plan_store";
 import { MemoryStore } from "./core/memory_store";
+import { MemoryRecall } from "./core/memory_recall";
 import { createMemoryTool } from "./tools/memory";
 import { createToolTelemetry } from "./tools/telemetry";
 import { createSearchWebTool } from "./tools/tavily_search";
@@ -33,7 +34,8 @@ import { MCP_SANDBOX_DIR, McpServers } from "./mcp/config";
 import { McpConfigWatcher, resolveMcpServers } from "./mcp/hot_reload";
 import { createPolicyMatrix } from "./mcp/policy_matrix";
 import type { Confirmer, McpResourceInfo } from "./mcp/types";
-import { loadAgentConfig, AgentRunConfig, resolveMemoryDir } from "./config";
+import { loadAgentConfig, AgentRunConfig, resolveMemoryDir, resolveSessionDir } from "./config";
+import { createEmbeddingClientFromEnv, EmbeddingClient } from "./rag/embeddings";
 
 export interface AgentStackOptions {
   /** 人工确认器：CLI 用终端版（createCliConfirmer），Web UI 用审批桥。缺省时策略 ask 直接拒绝 */
@@ -66,6 +68,8 @@ export interface AgentStack {
   planStore: PlanStore;
   /** 跨会话核心记忆仓：全局一份，注入 Agent 上下文并绑定 memory 工具 */
   memoryStore: MemoryStore;
+  /** 跨会话情景检索：按当前问题召回历史会话摘要（embedding 未配置时内部停用） */
+  memoryRecall: MemoryRecall;
   mcp: McpClientManager;
   /** MCP 配置热载入 watcher（关停要随 mcp 一起收口，用 dispose()） */
   mcpWatcher: McpConfigWatcher;
@@ -212,6 +216,22 @@ export async function createAgentStack(options: AgentStackOptions = {}): Promise
   const memoryStore = new MemoryStore({ dir: resolveMemoryDir() });
   const memoryCount = await memoryStore.active().then((entries) => entries.length, () => 0);
   console.log(`🧠 ${prefix}跨会话记忆: ${memoryCount} 条（${memoryStore.dir}）`);
+  // 情景检索的 embedding 客户端在此解析一次：未配置 EMBEDDING_MODEL 静默停用，
+  // 配置错误（缺地址/Key）当面告警但不阻塞启动
+  let recallEmbeddings: EmbeddingClient | undefined;
+  try {
+    recallEmbeddings = createEmbeddingClientFromEnv();
+  } catch (error) {
+    console.warn(`⚠️ ${prefix}跨会话情景检索停用: ${error instanceof Error ? error.message : error}`);
+  }
+  const memoryRecall = new MemoryRecall({
+    sessionDir: resolveSessionDir(),
+    cacheDir: memoryStore.dir,
+    embeddings: recallEmbeddings ?? null,
+  });
+  console.log(
+    `🔍 ${prefix}跨会话情景检索: ${recallEmbeddings ? `已启用（${recallEmbeddings.model}）` : "停用（未配置 EMBEDDING_MODEL）"}`
+  );
   registerSessionTools(registry, {
     skills,
     planStore,
@@ -287,6 +307,7 @@ export async function createAgentStack(options: AgentStackOptions = {}): Promise
     registry,
     planStore,
     memoryStore,
+    memoryRecall,
     mcp,
     mcpWatcher,
     untrustedContext,

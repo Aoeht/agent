@@ -17,6 +17,7 @@
  */
 import path from "node:path";
 import OpenAI from "openai";
+import { resolveSessionDir } from "../config";
 import { UiBridge } from "./bridge";
 import { AuthGate, assertUsableToken, bindRefusal, sandboxRefusal } from "./auth";
 import { createServerRuntime, rebuildRuntimeWithSandboxRoot, type ServerRuntime } from "./runtime";
@@ -27,7 +28,7 @@ const PORT = intEnv("AGENT_UI_PORT", 8787);
 const HOST = process.env.AGENT_UI_HOST?.trim() || "127.0.0.1";
 const REMOTE_HARDENING = boolEnv("AGENT_UI_REMOTE_HARDENING", false);
 const APPROVAL_TIMEOUT_MS = intEnv("AGENT_UI_APPROVAL_TIMEOUT_MS", 120_000);
-const SESSION_DIR = process.env.AGENT_SESSION_DIR ?? path.join(process.cwd(), ".agent-sessions");
+const SESSION_DIR = resolveSessionDir();
 const TRACE_DIR = process.env.AGENT_TRACE_DIR ?? path.join(process.cwd(), ".traces");
 const DIST_DIR = path.resolve(import.meta.dir, "../../web/dist");
 

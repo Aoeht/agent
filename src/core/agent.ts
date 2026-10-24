@@ -9,6 +9,7 @@ import { ContextManager } from "./context_manager";
 import { requestSummaryWithRetry } from "./summary_call";
 import { SessionStore, normalizeSessionName } from "./session_store";
 import { MemoryStore } from "./memory_store";
+import { MemoryRecall } from "./memory_recall";
 import { RunBudget, RunBudgetLimits, BudgetStopReason } from "./run_budget";
 import { wrapUntrustedData, wrapSummaryBlock } from "./untrusted";
 import { PlanStore } from "./plan_store";
@@ -110,6 +111,11 @@ interface AgentConfig {
    * （压缩永不折叠），memory 工具的写入对所有会话可见。缺省不启用。
    */
   memoryStore?: MemoryStore;
+  /**
+   * 跨会话情景记忆检索：按当前用户问题从历史会话的【长期摘要】里向量召回相关经验，
+   * 注入为钉住前缀。embedding 未配置或无命中时自动不注入；缺省不启用。
+   */
+  memoryRecall?: MemoryRecall;
   /** 传入后开启多轮会话：历史从本地加载，运行中逐条追加落盘 */
   sessionStore?: SessionStore;
   /**
@@ -237,6 +243,7 @@ export class Agent {
           | "tools"
           | "sessionStore"
           | "memoryStore"
+          | "memoryRecall"
           | "client"
           | "summaryModel"
           | "budget"
@@ -662,6 +669,31 @@ export class Agent {
         });
       }
     }
+    // 跨会话情景检索：按本轮问题从历史会话的长期摘要里召回相关经验（排除当前会话自身，
+    // 它的摘要在 longTermBlock 里）。命中集随问题变化，但体量小（top-3 × 600 字符），
+    // 与记忆块同段注入，前缀缓存失效范围仍局部
+    let recallBlock: Message[] = [];
+    if (this.config.memoryRecall) {
+      try {
+        const recallText = await this.config.memoryRecall.recallBlock(userMessage, {
+          excludeSessionId: this.config.sessionStore
+            ? path.basename(this.config.sessionStore.filePath, ".jsonl")
+            : undefined,
+        });
+        if (recallText) {
+          recallBlock = [
+            { role: "user", content: wrapSummaryBlock("相关记忆（按当前问题检索）", recallText) },
+            { role: "assistant", content: "收到，我会参考这些相关经验；与当前对话或工具实测冲突时以后者为准。" },
+          ];
+        }
+      } catch (error) {
+        // 检索失败（embedding 接口异常等）不拦 run：本轮不带情景记忆继续
+        this.events.emit("compact", {
+          action: "memory_failed",
+          detail: `跨会话情景检索失败：${error instanceof Error ? error.message : error}`,
+        });
+      }
+    }
     // Fresh plain chat has no task state worth injecting. Include actual work or
     // resumed durable instructions, without repeating the very first user message.
     const needsTaskContext = this.activeTask && (this.activeTask.criteria.length || this.activeTask.plan.length ||
@@ -676,7 +708,7 @@ export class Agent {
       })) },
       { role: "assistant", content: "我会按当前用户目标核对已有进度；工具返回不等于验收通过。" },
     ] : [];
-    this.contextManager.setPinnedPrefix([...longTermBlock, ...memoryBlock, ...taskBlock]);
+    this.contextManager.setPinnedPrefix([...longTermBlock, ...memoryBlock, ...recallBlock, ...taskBlock]);
     this.sessionLongTermSummary = stored?.longTermSummary;
     this.lastRunObservations = [];
     // The plan is restored from the task record by runManaged, including across restarts.
@@ -686,9 +718,10 @@ export class Agent {
 
     // 消息顺序服务于服务端前缀缓存（DeepSeek/GLM 等按 64-token 块做最长前缀命中）：
     // [system + 进程内稳定的注入 + history] 是跨轮只增不变的前缀，全部排在前半段；
-    // 长期摘要块、跨会话记忆块与任务记录每轮内容都可能更新（fold 落地 / 记忆增改 / actions
-    // 增长），排在 history 之后——它们一变只废掉尾部几个小块的缓存，整段 history 的命中
-    // 前缀跨轮保持有效。若反过来放在 history 之前（旧顺序），每次更新都会让全部历史按全价重读。
+    // 长期摘要块、跨会话记忆块、情景检索块与任务记录每轮内容都可能更新（fold 落地 /
+    // 记忆增改 / 检索命中 / actions 增长），排在 history 之后——它们一变只废掉尾部几个
+    // 小块的缓存，整段 history 的命中前缀跨轮保持有效。若反过来放在 history 之前（旧顺序），
+    // 每次更新都会让全部历史按全价重读。
     // 钉住属性（压缩永不折叠）由 setPinnedPrefix 的对象集合保证，与消息位置无关。
     const messages: Message[] = [
       { role: "system", content: this.config.systemPrompt },
@@ -697,6 +730,7 @@ export class Agent {
       ...history,
       ...longTermBlock,
       ...memoryBlock,
+      ...recallBlock,
       ...taskBlock,
       userMsg,
     ];

@@ -33,6 +33,11 @@ export function resolveMemoryDir(): string {
   return process.env.AGENT_MEMORY_DIR?.trim() || path.join(process.cwd(), ".agent-memory");
 }
 
+/** 会话目录：AGENT_SESSION_DIR 可改，缺省 .agent-sessions（与 main.ts/index.ts 原内联逻辑一致） */
+export function resolveSessionDir(): string {
+  return process.env.AGENT_SESSION_DIR?.trim() || path.join(process.cwd(), ".agent-sessions");
+}
+
 /** run_script 执行沙箱模式，语义见 tools/sandbox_docker.ts 的 resolveScriptSandbox */
 export type ScriptSandboxMode = "host" | "docker" | "auto";
 

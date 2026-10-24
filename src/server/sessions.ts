@@ -470,7 +470,7 @@ export class SessionManager {
   }
 
   private async createAgent(entry: SessionEntry, sessionId: string): Promise<Agent> {
-    const { config, registry: sharedRegistry, skills, sandbox, sandboxRoot, disableRunScript, memoryStore } = this.options.runtime;
+    const { config, registry: sharedRegistry, skills, sandbox, sandboxRoot, disableRunScript, memoryStore, memoryRecall } = this.options.runtime;
     const startup = await entry.store.load();
     entry.needsName = startup.messages.length === 0;
 
@@ -513,6 +513,7 @@ export class SessionManager {
       tools: registry,
       planStore,
       memoryStore,
+      memoryRecall,
       verificationRoot: sandboxRoot,
       requireHostAcceptanceCriteria: config.requireHostAcceptanceCriteria,
       stream: config.stream,
