@@ -33,6 +33,12 @@ import { STOP_REASONS } from "../core/run_outcome";
 import type { RunOutcome } from "../core/run_outcome";
 import { TaskSchema, VerificationSchema } from "../core/task_types";
 import type { TaskRecord } from "../core/task_types";
+import { THINKING_EFFORTS } from "../utils/thinking_effort";
+import type { ThinkingEffort } from "../utils/thinking_effort";
+
+/** 统一思考程度档位：default 跟随厂商默认，off/low/medium/high 按当前模型映射厂商参数 */
+export const ThinkingEffortSchema = z.enum(THINKING_EFFORTS);
+export type { ThinkingEffort };
 
 // ---------- 共享小结构 ----------
 
@@ -99,6 +105,7 @@ export const ServerEventSchema = z.discriminatedUnion("type", [
     contextWindow: z.number().int().optional(),
     temperature: z.number().optional(),
     maxIterations: z.number().int().optional(),
+    thinkingEffort: ThinkingEffortSchema.optional(),
     promptHash: z.string().optional(),
     skills: z.array(z.string()).optional(),
     mcpServers: z
@@ -142,7 +149,7 @@ export const ServerEventSchema = z.discriminatedUnion("type", [
       })
       .optional(),
   }),
-  /** 会话级配置变化（模型/温度/迭代上限，POST /sessions/:id/config 后广播） */
+  /** 会话级配置变化（模型/温度/迭代上限/思考程度，POST /sessions/:id/config 后广播） */
   z.object({
     type: z.literal("session_config"),
     model: z.string(),
@@ -150,6 +157,7 @@ export const ServerEventSchema = z.discriminatedUnion("type", [
     contextWindow: z.number().int().optional(),
     temperature: z.number().optional(),
     maxIterations: z.number().int().optional(),
+    thinkingEffort: ThinkingEffortSchema.optional(),
   }),
   z.object({ type: z.literal("plan_update"), steps: z.array(PlanStepSchema) }),
   /** 上下文压缩动作：action 枚举与 core/events.ts 的 CompactEvent 对齐 */

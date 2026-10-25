@@ -6,13 +6,15 @@ import type {
   SessionConfigEvent,
   SessionDetailDTO,
   SessionSummaryDTO,
+  ThinkingEffort,
 } from "@protocol";
 
-/** 会话级可调配置（模型/温度/迭代上限） */
+/** 会话级可调配置（模型/温度/迭代上限/思考程度） */
 export interface SessionConfigInput {
   model?: string;
   temperature?: number;
   maxIterations?: number;
+  thinkingEffort?: ThinkingEffort;
 }
 
 /** 工具开关面板的数据：清单 + 本会话的关闭集合 */

@@ -16,6 +16,7 @@ import type {
   ServerEvent,
   SessionDetailDTO,
   SessionSummaryDTO,
+  ThinkingEffort,
 } from "@protocol";import type { SessionConfigInput, Transport } from "../lib/transport";
 import { MockTransport } from "../lib/mock";
 import { STOP_REASON_LABELS, type RunOutcome } from "../../../src/core/run_outcome";
@@ -57,6 +58,8 @@ export interface SessionUIState {
   configRevision?: number;
   temperature?: number;
   maxIterations?: number;
+  /** 思考程度档位（hello / session_config 更新；default 跟随厂商默认） */
+  thinkingEffort?: ThinkingEffort;
   /** 该模型上下文窗口（token）；配合 lastPromptTokens 画上下文占用 */
   contextWindow?: number;
   /** 最近一次 step 的 promptTokens ≈ 发送时的上下文长度 */
@@ -178,6 +181,7 @@ export function applyEvent(s: SessionUIState, e: ServerEvent): SessionUIState {
           contextWindow: e.contextWindow ?? s.contextWindow,
           temperature: e.temperature ?? s.temperature,
           maxIterations: e.maxIterations ?? s.maxIterations,
+          thinkingEffort: e.thinkingEffort ?? s.thinkingEffort,
         }),
       };
     case "session_config":
@@ -189,6 +193,7 @@ export function applyEvent(s: SessionUIState, e: ServerEvent): SessionUIState {
         contextWindow: e.contextWindow ?? s.contextWindow,
         temperature: e.temperature ?? s.temperature,
         maxIterations: e.maxIterations ?? s.maxIterations,
+        thinkingEffort: e.thinkingEffort ?? s.thinkingEffort,
       };
     case "run_start": {
       // 排队消息转正：芯片移除、正式用户气泡此刻进入聊天流（未排队路径的气泡由 user_sent 先加）

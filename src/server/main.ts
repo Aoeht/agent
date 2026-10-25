@@ -20,7 +20,8 @@ import OpenAI from "openai";
 import { resolveSessionDir } from "../config";
 import { candidateModels, fetchZhipuAccountQuota, probeModels } from "../core/model_probe";
 import { UiBridge } from "./bridge";
-import type { ModelProbeStatusResponse } from "./protocol";
+import type { ModelProbeStatusResponse, ThinkingEffort } from "./protocol";
+import { THINKING_EFFORTS } from "../utils/thinking_effort";
 import { AuthGate, assertUsableToken, bindRefusal, sandboxRefusal } from "./auth";
 import { createServerRuntime, rebuildRuntimeWithSandboxRoot, type ServerRuntime } from "./runtime";
 import { EventHub, SessionManager } from "./sessions";
@@ -238,14 +239,18 @@ async function route(
       return json(payload);
     }
 
-    // 会话级配置（模型/温度/迭代上限）
+    // 会话级配置（模型/温度/迭代上限/思考程度）
     const configMatch = /^\/sessions\/([^/]+)\/config$/.exec(pathname);
     if (configMatch && method === "POST") {
       const body = await readJson(req);
-      const patch: { model?: string; temperature?: number; maxIterations?: number } = {};
+      const patch: { model?: string; temperature?: number; maxIterations?: number; thinkingEffort?: ThinkingEffort } = {};
       if (typeof body.model === "string") patch.model = body.model;
       if (typeof body.temperature === "number") patch.temperature = body.temperature;
       if (typeof body.maxIterations === "number") patch.maxIterations = body.maxIterations;
+      if (typeof body.thinkingEffort === "string" &&
+          (THINKING_EFFORTS as readonly string[]).includes(body.thinkingEffort)) {
+        patch.thinkingEffort = body.thinkingEffort as ThinkingEffort;
+      }
       if (Object.keys(patch).length === 0) return json({ error: "没有可应用的配置" }, 400);
       try {
         return json(await sessions.applySessionConfig(decodeURIComponent(configMatch[1]!), patch));

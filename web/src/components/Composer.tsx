@@ -1,6 +1,6 @@
 // web/src/components/Composer.tsx
 import { useEffect, useRef, useState } from "react";
-import type { ModelProbeStatus } from "@protocol";
+import type { ModelProbeStatus, ThinkingEffort } from "@protocol";
 import type { SessionConfigInput } from "../lib/transport";
 import { visibleModelOptions } from "../lib/modelOptions";
 import { useMediaQuery } from "../lib/useMediaQuery";
@@ -9,7 +9,17 @@ export interface ComposerConfig {
   model?: string;
   temperature?: number;
   maxIterations?: number;
+  thinkingEffort?: ThinkingEffort;
 }
+
+/** 思考程度档位文案：default 不下发、跟随厂商默认 */
+const THINKING_EFFORT_OPTIONS: ReadonlyArray<{ value: ThinkingEffort; label: string }> = [
+  { value: "default", label: "默认（跟随厂商）" },
+  { value: "off", label: "关闭" },
+  { value: "low", label: "低" },
+  { value: "medium", label: "中" },
+  { value: "high", label: "高" },
+];
 
 /** 探测结果的展示标记：ok 不加前缀（默认即正常），失败档位给前缀与 tooltip 说明 */
 function modelOptionLabel(model: string, probe: ModelProbeStatus | undefined): string {
@@ -55,10 +65,11 @@ export function Composer({
   const statusMap = new Map((modelStatus ?? []).map((probe) => [probe.model, probe]));
   const [text, setText] = useState("");
   const [panelOpen, setPanelOpen] = useState(false);
-  const [draft, setDraft] = useState<{ model: string; temperature: string; maxIterations: string }>({
+  const [draft, setDraft] = useState<{ model: string; temperature: string; maxIterations: string; thinkingEffort: string }>({
     model: "",
     temperature: "",
     maxIterations: "",
+    thinkingEffort: "default",
   });
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -86,9 +97,12 @@ export function Composer({
         maxIterations: draftDirty.current.has("maxIterations")
           ? current.maxIterations
           : (config.maxIterations ?? 0) > 0 ? String(config.maxIterations) : "",
+        thinkingEffort: draftDirty.current.has("thinkingEffort")
+          ? current.thinkingEffort
+          : config.thinkingEffort ?? "default",
       }));
     }
-  }, [panelOpen, config.model, config.temperature, config.maxIterations, models]);
+  }, [panelOpen, config.model, config.temperature, config.maxIterations, config.thinkingEffort, models]);
 
   // 点击面板外部关闭
   useEffect(() => {
@@ -127,6 +141,10 @@ export function Composer({
     if (draftDirty.current.has("maxIterations") && Number.isInteger(maxIterations) && maxIterations >= 0) {
       payload.maxIterations = maxIterations;
     }
+    if (draftDirty.current.has("thinkingEffort") &&
+        THINKING_EFFORT_OPTIONS.some((option) => option.value === next.thinkingEffort)) {
+      payload.thinkingEffort = next.thinkingEffort as ThinkingEffort;
+    }
     onDraftConfig(payload);
   };
 
@@ -148,6 +166,11 @@ export function Composer({
     if (draftDirty.current.has("maxIterations") && Number.isInteger(maxIterations) && maxIterations >= 0 &&
         maxIterations !== (config.maxIterations ?? 0)) {
       payload.maxIterations = maxIterations;
+    }
+    if (draftDirty.current.has("thinkingEffort") &&
+        draft.thinkingEffort !== (config.thinkingEffort ?? "default") &&
+        THINKING_EFFORT_OPTIONS.some((option) => option.value === draft.thinkingEffort)) {
+      payload.thinkingEffort = draft.thinkingEffort as ThinkingEffort;
     }
     setApplying(true);
     setConfigError(null);
@@ -234,8 +257,28 @@ export function Composer({
                 />
               </label>
             </div>
+            <label className="mt-3 block">
+              <span className="text-xs text-ink-600">思考程度</span>
+              <select
+                value={draft.thinkingEffort}
+                disabled={applying}
+                onChange={(e) => {
+                  draftDirty.current.add("thinkingEffort");
+                  const next = { ...draft, thinkingEffort: e.target.value };
+                  setDraft(next);
+                  reportDraftConfig(next);
+                }}
+                className="mt-1 w-full rounded-xl border border-cream-300 bg-white/70 px-3 py-2 text-sm outline-none focus:border-clay-500"
+              >
+                {THINKING_EFFORT_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+            </label>
             <p className="mt-2 text-[11px] leading-4 text-ink-400">
-              模型切换会随会话保存；温度与迭代上限仅当前运行有效。迭代上限留空表示不限，由 token / 工具次数预算兜底。
+              模型切换会随会话保存；温度、迭代上限与思考程度仅当前运行有效。迭代上限留空表示不限，由 token / 工具次数预算兜底。
+              思考程度按当前模型映射厂商参数：qwen=enable_thinking+预算、glm=思考开关、deepseek=思考开关+effort，
+              其它厂商或无法生效的组合（如非流式下的 qwen 思考档）自动跳过并在服务端告警。
             </p>
             {configError && <p role="alert" className="mt-2 text-xs text-terra-500">{configError}</p>}
             <div className="mt-3 flex justify-end">

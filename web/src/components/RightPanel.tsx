@@ -188,6 +188,13 @@ function Env({ session, sandboxRoot, onChangeSandbox }: { session: SessionUIStat
           </span>
         </div>
       )}
+      {(session?.thinkingEffort ?? meta.thinkingEffort) !== undefined &&
+        (session?.thinkingEffort ?? meta.thinkingEffort) !== "default" && (
+        <div className="flex items-baseline justify-between gap-2">
+          <span className="text-ink-400">思考程度</span>
+          <span className="font-mono text-xs">{session?.thinkingEffort ?? meta.thinkingEffort}</span>
+        </div>
+      )}
       <div className="flex items-baseline justify-between gap-2">
         <span className="text-ink-400">脚本沙箱</span>
         <span className="text-right text-xs leading-5">{meta.sandbox}</span>

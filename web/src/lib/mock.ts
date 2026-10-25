@@ -5,6 +5,7 @@ import type {
   ServerEvent,
   SessionDetailDTO,
   SessionSummaryDTO,
+  ThinkingEffort,
 } from "@protocol";
 import type { Transport } from "./transport";
 
@@ -364,7 +365,7 @@ export class MockTransport implements Transport {
   private sessions: SessionDetailDTO[];
   private seq = 0;
   /** 会话级配置（内存态）；applySessionConfig 更新并广播 session_config */
-  private sessionConfig = new Map<string, { model: string; temperature: number; maxIterations: number; configRevision: number }>();
+  private sessionConfig = new Map<string, { model: string; temperature: number; maxIterations: number; thinkingEffort: ThinkingEffort; configRevision: number }>();
   private configRevision = Date.now();
   private disabledTools = new Map<string, Set<string>>();
   private sandboxRoot = "A:/ai_agent/.mcp-sandbox（演示）";
@@ -417,18 +418,20 @@ export class MockTransport implements Transport {
 
   async applySessionConfig(
     sessionId: string,
-    config: { model?: string; temperature?: number; maxIterations?: number }
+    config: { model?: string; temperature?: number; maxIterations?: number; thinkingEffort?: ThinkingEffort }
   ): Promise<Extract<ServerEvent, { type: "session_config" }>> {
     const current = this.sessionConfig.get(sessionId) ?? {
       model: helloEvent.model,
       temperature: 0.1,
       maxIterations: 0,
+      thinkingEffort: "default" as ThinkingEffort,
     };
     const next = {
       configRevision: ++this.configRevision,
       model: config.model?.trim() || current.model,
       temperature: config.temperature ?? current.temperature,
       maxIterations: config.maxIterations ?? current.maxIterations,
+      thinkingEffort: config.thinkingEffort ?? current.thinkingEffort,
     };
     this.sessionConfig.set(sessionId, next);
     const applied = {
@@ -438,6 +441,7 @@ export class MockTransport implements Transport {
       contextWindow: mockContextWindow(next.model),
       temperature: next.temperature,
       maxIterations: next.maxIterations,
+      thinkingEffort: next.thinkingEffort,
     };
     // 稍微延迟，走一遍真实的事件路径
     setTimeout(() => {

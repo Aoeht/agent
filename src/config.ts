@@ -8,6 +8,9 @@
  *   AGENT_SUMMARY_MODEL            历史压缩摘要用的模型（默认 qwen3.6-plus）
  *   AGENT_MAX_ITERATIONS           单次 run 的最大 ReAct 迭代数，0/负数表示不限（默认 0）
  *   AGENT_TEMPERATURE              采样温度（默认 0.1）
+ *   AGENT_THINKING_EFFORT          思考程度：default（跟随厂商默认）/ off / low / medium / high，
+ *                                  按当前模型映射成厂商请求字段（qwen=enable_thinking+thinking_budget、
+ *                                  glm=thinking.type、deepseek=thinking+reasoning_effort，其余厂商不注入）
  *   AGENT_MAX_HISTORY_TURNS        跨进程续聊保留的完整对话轮数（默认 20）
  *   AGENT_MAX_TOTAL_TOKENS         单次 run 的 token 硬预算，<=0 表示不限（默认 500000）
  *   AGENT_MAX_TOOL_CALLS           单次 run 的工具调用总次数上限，<=0 表示不限（默认 40）
@@ -28,6 +31,7 @@
 
 import path from "node:path";
 import type { RunBudgetLimits } from "./core/run_budget";
+import { parseThinkingEffort, type ThinkingEffort } from "./utils/thinking_effort";
 
 /** 跨会话记忆目录：AGENT_MEMORY_DIR 可改，缺省落在工作区 .agent-memory（与 .agent-sessions 同级） */
 export function resolveMemoryDir(): string {
@@ -55,6 +59,8 @@ export interface AgentRunConfig {
   summaryModel: string;
   maxIterations: number;
   temperature: number;
+  /** 思考程度档位：default 跟随厂商默认，off/low/medium/high 按厂商映射（见 utils/thinking_effort.ts） */
+  thinkingEffort: ThinkingEffort;
   maxHistoryTurns: number;
   stream: boolean;
   /** Agent Skill 目录：目录不存在视为没有技能，运行时行为与未开启技能完全一致 */
@@ -107,6 +113,7 @@ export function loadAgentConfig(): AgentRunConfig {
     // 默认不设轮数上限：长任务的完成度优先，花费由 token / 工具次数预算兜底
     maxIterations: Math.max(0, intEnv("AGENT_MAX_ITERATIONS", 0)),
     temperature: floatEnv("AGENT_TEMPERATURE", 0.1),
+    thinkingEffort: parseThinkingEffort(process.env.AGENT_THINKING_EFFORT),
     maxHistoryTurns: intEnv("AGENT_MAX_HISTORY_TURNS", 20),
     stream: boolEnv("AGENT_STREAM", true),
     skillsDir: process.env.AGENT_SKILLS_DIR?.trim() || ".agents/skills",

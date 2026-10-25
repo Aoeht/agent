@@ -102,6 +102,7 @@ export default function App() {
                 model: current.model ?? current.meta?.model,
                 temperature: current.temperature,
                 maxIterations: current.maxIterations,
+                thinkingEffort: current.thinkingEffort,
               }}
               onSend={(text) => void actions.send(text)}
               onCancel={() => void actions.cancel()}

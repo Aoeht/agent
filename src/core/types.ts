@@ -110,7 +110,10 @@ export function defineTool<T extends z.ZodType>(config: {
 export type Message =
   | { role: "system"; content: string }
   | { role: "user"; content: string | ContentPart[] }          // ← 允许数组
-  | { role: "assistant"; content: string | null; tool_calls?: ToolCall[] }
+  | { role: "assistant"; content: string | null; tool_calls?: ToolCall[];
+      /** 思考文本回传：DeepSeek 思考模式带 tools 的下一轮必须原样带回，否则 400。
+       *  只在带 tool_calls 的消息上存在（当前 ReAct 循环内），不落盘。 */
+      reasoning_content?: string }
   | { role: "tool"; tool_call_id: string; content: string };
 
 // ✅ 只保留 function call 类型，排除 custom tool call

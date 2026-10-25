@@ -499,6 +499,9 @@ async function main() {
     if (config.requireHostAcceptanceCriteria) {
       console.log("🔒 验收口径: 只采信宿主设定的条件；模型自设条件即使实测全部通过，也只记「已回答，未验收」");
     }
+    if (config.thinkingEffort !== "default") {
+      console.log(`🧠 思考程度: ${config.thinkingEffort}（AGENT_THINKING_EFFORT，按当前模型映射厂商参数）`);
+    }
 
     // 流式增量实时输出由 token 事件驱动；runTurn 依据 streamState 补换行、避免与最终回答重复打印
     const streamState = { active: false };
@@ -509,6 +512,7 @@ async function main() {
       systemPrompt: buildSystemPrompt(MCP_SANDBOX_DIR, skills, { filesystemTools }),
       maxIterations: config.maxIterations,
       temperature: config.temperature,
+      thinkingEffort: config.thinkingEffort,
       maxHistoryTurns: config.maxHistoryTurns,
       sessionStore: session.store,
       verificationRoot: stack.sandboxRoot,

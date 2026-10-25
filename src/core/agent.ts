@@ -16,6 +16,7 @@ import { wrapUntrustedData, wrapSummaryBlock } from "./untrusted";
 import { PlanStore } from "./plan_store";
 import { systemPromptFingerprint } from "./trace";
 import { contextWindowFor } from "../utils/model_registry";
+import { thinkingEffortPatch, requiresReasoningThread, type ThinkingEffort } from "../utils/thinking_effort";
 import { CommercialTokenCounter } from "../utils/token_counter";
 import { processToolOutput } from "./tool_outputs";
 import { LONGTERM_FRESH_PROMPT, LONGTERM_MERGE_PROMPT } from "./summary_prompts";
@@ -87,6 +88,12 @@ interface AgentConfig {
   /** 单次 run 的最大 ReAct 迭代数；<=0 表示不设上限（token / 工具次数预算仍会兜底） */
   maxIterations?: number;
   temperature?: number;
+  /**
+   * 统一思考程度档位：default 不下发（跟随厂商默认），off/low/medium/high 按当前模型
+   * 映射成厂商请求字段（见 utils/thinking_effort.ts）。只作用于主对话的 ReAct 调用；
+   * 压缩摘要、会话命名等辅助调用保持厂商默认（非流式下 qwen 思考档也无法下发）。
+   */
+  thinkingEffort?: ThinkingEffort;
   /** 单次 run 的硬预算（token / 墙钟 / 工具次数），越线时优雅停止并在结果里记 budgetStopped */
   budget?: RunBudgetLimits;
   /**
@@ -192,6 +199,8 @@ interface CompletionResult {
   refusal: string | null;
   interrupted?: boolean;
   toolCalls: ToolCall[];
+  /** 思考阶段的推理文本（厂商经 reasoning_content 下发时才有；DeepSeek 思考模式带 tools 的下一轮必须回传） */
+  reasoning?: string;
   tokens: {
     promptTokens: number;
     completionTokens: number;
@@ -316,6 +325,7 @@ export class Agent {
       maxIterations: 0,
       maxHistoryTurns: 20,
       temperature: 0.1,
+      thinkingEffort: "default",
       stream: false,
       maxRetries: 2,
       retryBaseDelayMs: 500,
@@ -375,6 +385,33 @@ export class Agent {
   setTemperature(temperature: number): void {
     if (!Number.isFinite(temperature)) return;
     this.config.temperature = Math.min(Math.max(temperature, 0), 2);
+  }
+
+  /** 当前思考程度档位（UI/宿主可经 setThinkingEffort 调整，只影响后续 run） */
+  get thinkingEffort(): ThinkingEffort {
+    return this.config.thinkingEffort ?? "default";
+  }
+
+  /** 调思考程度档位：只认统一枚举字面量，其余忽略 */
+  setThinkingEffort(effort: ThinkingEffort): void {
+    this.config.thinkingEffort = effort;
+  }
+
+  /** 已提示过的思考档位 note，防止 ReAct 每轮重复刷屏 */
+  private thinkingNotes = new Set<string>();
+
+  /** 主循环请求合入思考程度字段；档位无法按语义生效时一次性告警 */
+  private withThinkingEffort(params: ChatParams): ChatParams {
+    const { params: extra, note } = thinkingEffortPatch(
+      this.config.model,
+      this.config.thinkingEffort,
+      { stream: this.config.stream }
+    );
+    if (note && !this.thinkingNotes.has(note)) {
+      this.thinkingNotes.add(note);
+      console.warn(`⚠️ 思考程度: ${note}`);
+    }
+    return extra ? { ...params, ...extra } : params;
   }
 
   /** 当前迭代上限（UI/宿主可经 setMaxIterations 调整，只影响后续 run） */
@@ -796,14 +833,14 @@ export class Agent {
         // 统一走带重试的调用入口（stream: true 时内部走流式，token 事件实时发布）；
         // API 报上下文超限时强制压缩重试一次
         const completion = await this.completeWithOverflowGuard(
-          {
+          this.withThinkingEffort({
             model: this.config.model,
             messages: [...compressedMessages, ...imageMessages] as any,
             tools: this.tools.toOpenAITools(),
             temperature: this.config.temperature,
             // 仅显式关闭时才下发，避免给不支持该参数的 OpenAI 兼容服务端添麻烦
             ...(this.config.parallelToolCalls === false ? { parallel_tool_calls: false } : {}),
-          },
+          }),
           runtime,
           messages,
           [...imageMessages]
@@ -870,6 +907,12 @@ export class Agent {
         };
 
         assistantMessage.tool_calls = validToolCalls;
+        // DeepSeek 思考模式 + tools 的硬约束：带 tool_calls 的 assistant 消息必须原样回传
+        // reasoning_content，否则下一轮 400。只在带工具调用的消息上回传（终答不带），
+        // 思考文本与工具调用一样只活在当前 ReAct 循环里，不落盘。
+        if (completion.reasoning && requiresReasoningThread(this.config.model)) {
+          assistantMessage.reasoning_content = completion.reasoning;
+        }
         messages.push(assistantMessage);
 
         // 用于记录当前 iteration 执行的每个工具的详情
@@ -1038,7 +1081,7 @@ export class Agent {
           temperature: this.config.temperature,
         };
         let forcedCompletion = await this.completeWithOverflowGuard(
-          { ...forcedParams, tools: this.tools.toOpenAITools(), tool_choice: "none" as const },
+          this.withThinkingEffort({ ...forcedParams, tools: this.tools.toOpenAITools(), tool_choice: "none" as const }),
           runtime,
           messages,
           [...imageMessages]
@@ -1052,7 +1095,7 @@ export class Agent {
         if (!responseStopReason(forcedCompletion) && !runtime?.signal?.aborted &&
             !forcedCompletion.content?.trim()) {
           forcedCompletion = await this.completeWithOverflowGuard(
-            { ...forcedParams },
+            this.withThinkingEffort({ ...forcedParams }),
             runtime,
             messages,
             [...imageMessages]
@@ -1167,11 +1210,14 @@ export class Agent {
     if (!choice) throw new Error("No response from LLM");
 
     const cached = cachedTokensOf(response.usage);
+    // 思考输出是厂商私有字段（reasoning_content），不在 SDK 类型里：字符串才采信
+    const reasoning = (choice.message as { reasoning_content?: unknown }).reasoning_content;
     return {
       content: choice.message.content ?? null,
       finishReason: choice.finish_reason ?? null,
       refusal: choice.message.refusal ?? null,
       toolCalls: extractFunctionToolCalls(choice.message.tool_calls),
+      ...(typeof reasoning === "string" && reasoning ? { reasoning } : {}),
       tokens: {
         promptTokens: response.usage?.prompt_tokens ?? 0,
         completionTokens: response.usage?.completion_tokens ?? 0,
@@ -1192,6 +1238,7 @@ export class Agent {
     );
 
     let content = "";
+    let reasoning = "";
     let refusal = "";
     let finishReason: string | null = null;
     let usage: CompletionResult["tokens"] | undefined;
@@ -1218,6 +1265,8 @@ export class Agent {
         const delta = choice?.delta;
         if (!delta) continue;
         if (delta.refusal) refusal += delta.refusal;
+        const reasoningDelta = (delta as { reasoning_content?: unknown }).reasoning_content;
+        if (typeof reasoningDelta === "string") reasoning += reasoningDelta;
 
         if (delta.content) {
           content += delta.content;
@@ -1245,6 +1294,7 @@ export class Agent {
 
     const response = { content: content || null, refusal: refusal || null, finishReason,
       interrupted: finishReason === null,
+      ...(reasoning ? { reasoning } : {}),
       tokens: usage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 } };
     if (responseStopReason(response)) return { ...response, toolCalls: [] };
 

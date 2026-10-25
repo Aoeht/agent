@@ -13,7 +13,7 @@ import type { AgentResult, ToolDefinition, ToolRuntime } from "../core/types";
 import type { UiBridge } from "./bridge";
 import { runSessionStore } from "./run_context";
 import type { ServerRuntime } from "./runtime";
-import type { ServerEvent, SessionConfigEvent, SessionDetailDTO, SessionSummaryDTO, StatusDTO, Citation } from "./protocol";
+import type { ServerEvent, SessionConfigEvent, SessionDetailDTO, SessionSummaryDTO, StatusDTO, Citation, ThinkingEffort } from "./protocol";
 import { RunOutcomeSchema } from "./protocol";
 import { TaskStore } from "../core/task_store";
 import { formatBudgetExtensionPrompt } from "../core/budget_prompt";
@@ -190,13 +190,13 @@ export class SessionManager {
   }
 
   /**
-   * 应用会话级配置（模型/温度/迭代上限）。模型切换与 REPL /model 同语义：
-   * agent.setModel + 落盘 recordModel，续聊自动恢复；温度与迭代上限仅内存态。
+   * 应用会话级配置（模型/温度/迭代上限/思考程度）。模型切换与 REPL /model 同语义：
+   * agent.setModel + 落盘 recordModel，续聊自动恢复；其余仅内存态。
    * 成功后广播 session_config（含当前生效的全量值与该模型的上下文窗口）。
    */
   async applySessionConfig(
     sessionId: string,
-    patch: { model?: string; temperature?: number; maxIterations?: number }
+    patch: { model?: string; temperature?: number; maxIterations?: number; thinkingEffort?: ThinkingEffort }
   ): Promise<SessionConfigEvent> {
     const entry = this.entry(sessionId);
     if (entry.controller !== undefined || entry.queue.length > 0 || entry.configuring) throw new Error("当前会话还有任务在运行或排队");
@@ -210,6 +210,7 @@ export class SessionManager {
       }
       if (patch.temperature !== undefined) agent.setTemperature(patch.temperature);
       if (patch.maxIterations !== undefined) agent.setMaxIterations(patch.maxIterations);
+      if (patch.thinkingEffort !== undefined) agent.setThinkingEffort(patch.thinkingEffort);
 
       entry.configRevision = this.nextConfigRevision();
       const applied: SessionConfigEvent = {
@@ -219,6 +220,7 @@ export class SessionManager {
         contextWindow: contextWindowFor(agent.model),
         temperature: agent.temperature,
         maxIterations: agent.maxIterations,
+        thinkingEffort: agent.thinkingEffort,
       };
       this.options.hub.publish(sessionId, applied);
       return applied;
@@ -433,7 +435,8 @@ export class SessionManager {
       sandboxRoot: this.options.runtime.sandboxRoot,
       contextWindow: contextWindowFor(model),
       ...(agent !== undefined
-        ? { temperature: agent.temperature, maxIterations: agent.maxIterations }
+        ? { temperature: agent.temperature, maxIterations: agent.maxIterations,
+            thinkingEffort: agent.thinkingEffort }
         : {}),
       ...(agent !== undefined ? { promptHash: agent.systemPromptHash } : {}),
       skills: status.skills,
@@ -503,6 +506,7 @@ export class SessionManager {
       systemPrompt: buildSystemPrompt(sandboxRoot, skills, { filesystemTools }),
       maxIterations: config.maxIterations,
       temperature: config.temperature,
+      thinkingEffort: config.thinkingEffort,
       maxHistoryTurns: config.maxHistoryTurns,
       budget: config.budget,
       sessionStore: entry.store,
