@@ -104,6 +104,8 @@ export function registerSessionTools(
       summaryModel?: string;
       temperature?: number;
       maxIterations?: number;
+      /** 子代理委派总开关（AGENT_DELEGATE 解析结果）：false 时不注册 delegate_task */
+      delegateEnabled?: boolean;
     };
     /** 委派子代理的轨迹目录；缺省 .agent-sessions/delegates */
     delegateTraceDir?: string;
@@ -136,8 +138,9 @@ export function registerSessionTools(
   registry.register(createReadImageTool({ sandboxRoot }));
   if (options.skills.length > 0) registry.register(createLoadSkillTool(options.skills, { sandboxRoot }));
   // 主对话内的子 Agent 委派：只读白名单子代理跑独立调研/复核，报告经围栏回注本对话。
-  // 子代理注册表在委派发生时从本注册表按白名单拷贝（不含 delegate_task 自身，无递归）。
-  if (options.config) {
+  // 子代理注册表在委派发生时从本注册表按白名单拷贝（不含 delegate_task 自身，无递归）；
+  // AGENT_DELEGATE=off（config.delegateEnabled=false）时整体不注册，scanner 委派随之不可用。
+  if (options.config && options.config.delegateEnabled !== false) {
     registry.register(createDelegateTaskTool({
       sourceRegistry: registry,
       config: options.config,
@@ -246,6 +249,9 @@ export async function createAgentStack(options: AgentStackOptions = {}): Promise
   });
   console.log(
     `🔍 ${prefix}跨会话情景检索: ${recallEmbeddings ? `已启用（${recallEmbeddings.model}）` : "停用（未配置 EMBEDDING_MODEL）"}`
+  );
+  console.log(
+    `🤝 ${prefix}子代理委派: ${config.delegateEnabled ? "已启用（delegate_task）" : "已关闭（AGENT_DELEGATE）"}`
   );
   registerSessionTools(registry, {
     skills,

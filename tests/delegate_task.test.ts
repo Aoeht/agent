@@ -1,6 +1,6 @@
 // tests/delegate_task.test.ts
 // 主对话内的子 Agent 委派工具：
-//   - 注册：registerSessionTools 传 config 才注册
+//   - 注册：registerSessionTools 传 config 才注册；AGENT_DELEGATE 关闭（config.delegateEnabled=false）不注册
 //   - 子代理工具集是只读白名单且不含 delegate_task（无递归）
 //   - goal 自包含进入子代理、报告套不可信围栏回注、token 记入观察头
 //   - 预算越线：强制收尾后仍带回（可能不完整的）结果并标注
@@ -16,6 +16,7 @@ import { ToolRegistry } from "../src/core/registry";
 import { PlanStore } from "../src/core/plan_store";
 import { defineTool } from "../src/core/types";
 import { registerSessionTools } from "../src/bootstrap";
+import { loadAgentConfig } from "../src/config";
 import { createDelegateTaskTool, loadDelegateBudget } from "../src/tools/delegate_task";
 
 async function tempDir(prefix: string): Promise<string> {
@@ -24,7 +25,7 @@ async function tempDir(prefix: string): Promise<string> {
 
 const HOST_SANDBOX = { backend: "host", reason: "test" } as const;
 
-function registryWith(config?: { model: string }): ToolRegistry {
+function registryWith(config?: { model: string; delegateEnabled?: boolean }): ToolRegistry {
   const registry = new ToolRegistry();
   registerSessionTools(registry, {
     skills: [], planStore: new PlanStore(), sandbox: HOST_SANDBOX, ...(config ? { config } : {}),
@@ -76,6 +77,28 @@ function sourceRegistry(): ToolRegistry {
 test("registerSessionTools 传 config 才注册 delegate_task", () => {
   expect(registryWith({ model: "m" }).get("delegate_task")).toBeDefined();
   expect(registryWith().get("delegate_task")).toBeUndefined();
+});
+
+test("registerSessionTools config.delegateEnabled=false 时不注册 delegate_task", () => {
+  expect(registryWith({ model: "m", delegateEnabled: false }).get("delegate_task")).toBeUndefined();
+  expect(registryWith({ model: "m", delegateEnabled: true }).get("delegate_task")).toBeDefined();
+});
+
+test("loadAgentConfig 解析 AGENT_DELEGATE 开关（默认开，0/false/off/no 关）", () => {
+  const saved = process.env.AGENT_DELEGATE;
+  try {
+    delete process.env.AGENT_DELEGATE;
+    expect(loadAgentConfig().delegateEnabled).toBe(true);
+    for (const value of ["0", "false", "off", "no", "OFF"]) {
+      process.env.AGENT_DELEGATE = value;
+      expect(loadAgentConfig().delegateEnabled).toBe(false);
+    }
+    process.env.AGENT_DELEGATE = "1";
+    expect(loadAgentConfig().delegateEnabled).toBe(true);
+  } finally {
+    if (saved === undefined) delete process.env.AGENT_DELEGATE;
+    else process.env.AGENT_DELEGATE = saved;
+  }
 });
 
 test("loadDelegateBudget 读环境变量，非法值回退默认", () => {

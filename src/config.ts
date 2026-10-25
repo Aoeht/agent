@@ -27,6 +27,8 @@
  *   AGENT_TOOL_SEARCH              按需加载（Tool Search）：auto（默认，工具 schema 超过模型
  *                                  上下文窗口 10% 时自动切换）/ on（强制）/ off（关闭）；
  *                                  切换后每轮只暴露第一方工具 + tool_search + 已激活的 MCP 工具
+ *   AGENT_DELEGATE                 主对话内子 Agent 委派工具 delegate_task，"0"/"false"/"off"/"no"
+ *                                  关闭（默认开启）；关闭后不注册该工具，scanner 委派随之不可用
  *   AGENT_CHECKPOINTS              是否开启回合级回滚检查点（/rewind），"0"/"false" 关闭（默认开启）
  *   AGENT_MEMORY_DIR               跨会话记忆目录（缺省 .agent-memory；记忆条目 memory.jsonl + MEMORY.md 视图）
  *   AGENT_MODEL_PROBE              对话开始时探测候选模型可用性（微型补全），"0"/"false" 关闭（默认开启）
@@ -66,6 +68,8 @@ export interface AgentRunConfig {
   thinkingEffort: ThinkingEffort;
   /** 按需加载模式：auto 按上下文 10% 阈值自动切换，on 强制，off 关闭（见 core/agent.ts computeToolExposure） */
   toolSearch: "auto" | "on" | "off";
+  /** 主对话内子 Agent 委派（delegate_task）：false 时整体不注册该工具 */
+  delegateEnabled: boolean;
   maxHistoryTurns: number;
   stream: boolean;
   /** Agent Skill 目录：目录不存在视为没有技能，运行时行为与未开启技能完全一致 */
@@ -121,6 +125,7 @@ export function loadAgentConfig(): AgentRunConfig {
     temperature: floatEnv("AGENT_TEMPERATURE", 0.1),
     thinkingEffort: parseThinkingEffort(process.env.AGENT_THINKING_EFFORT),
     toolSearch: toolSearchRaw === "on" || toolSearchRaw === "off" ? toolSearchRaw : "auto",
+    delegateEnabled: boolEnv("AGENT_DELEGATE", true),
     maxHistoryTurns: intEnv("AGENT_MAX_HISTORY_TURNS", 20),
     stream: boolEnv("AGENT_STREAM", true),
     skillsDir: process.env.AGENT_SKILLS_DIR?.trim() || ".agents/skills",
