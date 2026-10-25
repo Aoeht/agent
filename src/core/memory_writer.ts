@@ -7,7 +7,7 @@ import type { EmbeddingClient } from "../rag/embeddings";
 import { cosineTopK, VectorCache } from "../rag/vector_store";
 
 /**
- * 跨会话记忆写入管线（L3）：每个用过工具的 run 结束后，从本轮工作记录里单遍提取
+ * 跨会话记忆写入管线（L3）：每个可记忆的 run（含纯聊天）结束后，从本轮工作记录里单遍提取
  * 「值得跨会话记住的事实」（mem0 的 ADD-only 路线 + Zep 的 supersede 标记），写入全局记忆仓。
  *
  * 判断纪律（写进提取提示词，宁缺毋滥）：大多数轮次应该是 []——只记用户偏好、纠正/确认的

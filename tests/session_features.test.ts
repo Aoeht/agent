@@ -111,7 +111,9 @@ test("setModel 切换后后续 run 用新模型；续聊时按会话记录恢复
   expect(agent.model).toBe("switched-model");
   await store.recordModel("switched-model"); // REPL 的 /model 会同时落盘
   await agent.run("二");
-  expect(first.requests[1].model).toBe("switched-model");
+  // 纯聊天现在也会发后台摘要请求；这里只检查主对话，不按所有请求的下标取值。
+  expect(first.requests.filter(r => r.messages[0]?.content === "系统规则")[1].model).toBe("switched-model");
+  await agent.flushSummary();
 
   // 新进程续聊同一个会话：模型从记录恢复，而不是回到配置默认值
   const second = makeClient();
@@ -126,7 +128,8 @@ test("setModel 切换后后续 run 用新模型；续聊时按会话记录恢复
   // 进程内显式切换优先于会话记录
   resumed.setModel("override-model");
   await resumed.run("四");
-  expect(second.requests[1].model).toBe("override-model");
+  expect(second.requests.filter(r => r.messages[0]?.content === "系统规则")[1].model).toBe("override-model");
+  await resumed.flushSummary();
 
   await fs.rm(dir, { recursive: true, force: true });
 });
@@ -142,6 +145,7 @@ test("没有会话记录（新会话）时用配置里的默认模型", async ()
 
   await agent.run("新会话第一轮");
   expect(requests[0].model).toBe("config-model");
+  await agent.flushSummary();
   await fs.rm(dir, { recursive: true, force: true });
 });
 

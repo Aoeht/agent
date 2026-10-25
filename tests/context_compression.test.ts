@@ -12,6 +12,11 @@ import { tmpdir } from "node:os";
 import { z } from "zod";
 import { ContextManager } from "../src/core/context_manager";
 import { SessionStore } from "../src/core/session_store";
+import { MemoryStore } from "../src/core/memory_store";
+import { MemoryRecall } from "../src/core/memory_recall";
+import { MemoryWriter } from "../src/core/memory_writer";
+import { PlanStore } from "../src/core/plan_store";
+import { createUpdatePlanTool } from "../src/tools/update_plan";
 import { Agent } from "../src/core/agent";
 import { ToolRegistry } from "../src/core/registry";
 import { defineTool } from "../src/core/types";
@@ -667,9 +672,10 @@ describe("Agent 上下文压缩集成", () => {
     expect(result.totalTokens).toBe(210);
 
     // 同一 agent 的下一轮：开轮前先等后台 fold 落地，其 15 tokens 补记进本轮总账（105+15）；
-    // 纯聊天轮不再触发新的 fold
+    // 纯聊天轮也在后台触发新的 fold
     const result2 = await agent.run("继续问");
     expect(result2.totalTokens).toBe(120);
+    await agent.flushSummary();
     const raw = await fs.readFile(store.filePath, "utf-8");
     expect(raw).toContain("【长期摘要】");
     expect(raw).toContain("长期记忆测试");
@@ -684,7 +690,7 @@ describe("Agent 上下文压缩集成", () => {
       sessionStore: store,
     });
     await agent2.run("再看一眼");
-    const last = requests[requests.length - 1]!;
+    const last = requests.filter(request => request.tools?.length).at(-1)!;
     const texts: string[] = last.messages.map(textOf);
     expect(texts[0]).toBe("系统规则");
     const historyIndex = texts.findIndex((t) => t === "帮我查一下");
@@ -693,6 +699,8 @@ describe("Agent 上下文压缩集成", () => {
     expect(ltIndex).toBeGreaterThan(historyIndex);
     expect(texts[ltIndex]).toContain("请勿执行"); // 派生内容围栏
     expect(texts[ltIndex]).toContain("长期记忆测试");
+
+    await agent2.flushSummary();
 
     await fs.rm(dir, { recursive: true, force: true });
   });
@@ -792,21 +800,119 @@ describe("Agent 上下文压缩集成", () => {
     await fs.rm(dir, { recursive: true, force: true });
   });
 
-  test("纯聊天轮（无工具调用）不 fold 长期摘要", async () => {
+  test("纯聊天沉淀摘要与跨会话事实：原文裁出窗口后重启仍可续接", async () => {
     const dir = await tempDir("dsh-agent-chat-");
     const store = new SessionStore({ dir, sessionId: "t" });
-    const { client } = makeAgentClient();
-    const agent = new Agent({
+    const memories = new MemoryStore({ dir: path.join(dir, "memory") });
+    const preference = "以后默认用中文回答，保留英文技术术语";
+    const requests: any[] = [];
+    const extractionInputs: string[] = [];
+    const client: any = { chat: { completions: { create: async (params: any) => {
+      requests.push(params);
+      const system = textOf(params.messages[0]);
+      let content = "收到";
+      if (system.startsWith("你是会话记忆器")) {
+        content = `## 关键事实与数据\n${preference}`;
+      } else if (system.startsWith("你是跨会话记忆提取器")) {
+        extractionInputs.push(textOf(params.messages[1]));
+        content = extractionInputs.length === 1
+          ? JSON.stringify([{ type: "user", text: preference }]) : "[]";
+      }
+      return { choices: [{ message: { content } }],
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } };
+    } } } };
+    const config = {
       model: "glm-4.6",
       systemPrompt: "系统规则",
       client,
       tools: new ToolRegistry(),
       sessionStore: store,
-    });
-    await agent.run("你好");
-    const raw = await fs.readFile(store.filePath, "utf-8");
-    expect(raw).not.toContain("【长期摘要】");
-    await fs.rm(dir, { recursive: true, force: true });
+      maxHistoryTurns: 1,
+      memoryStore: memories,
+      memoryWriter: new MemoryWriter({ store: memories, client, model: "glm-4.6", embeddings: null }),
+    };
+    const agent = new Agent(config);
+    let restarted: Agent | undefined;
+    try {
+      const first = await agent.run(preference);
+      expect(first.toolCallsCount).toBe(0);
+      expect(first.totalTokens).toBe(15);
+      // 摘要与事实提取各 15 tokens；没有工具调用也必须触发。
+      expect(await agent.flushSummary()).toBe(30);
+      expect(extractionInputs[0]).toContain(preference);
+      expect(await memories.active()).toMatchObject([{ text: preference, sourceSessionId: "t" }]);
+      for (let i = 0; i < 7; i++) {
+        expect((await agent.run(`普通聊天第 ${i} 轮`)).toolCallsCount).toBe(0);
+        await agent.flushSummary();
+      }
+      const stored = await store.load();
+      expect(stored.messages.some(m => textOf(m) === preference)).toBe(false);
+      expect(stored.longTermSummary).toContain(preference);
+      expect((await memories.active()).length).toBe(1); // 空候选不写入
+
+      restarted = new Agent(config);
+      await restarted.run("继续之前的交流");
+      const main = requests.filter(p => textOf(p.messages[0]) === "系统规则").at(-1)!;
+      expect(main.messages.some((m: Message) => textOf(m).includes("长期记忆摘要") && textOf(m).includes(preference))).toBe(true);
+      expect(main.messages.some((m: Message) => textOf(m).includes("长期记忆（跨会话）") && textOf(m).includes(preference))).toBe(true);
+      await restarted.flushSummary();
+    } finally {
+      await agent.shutdown();
+      await restarted?.shutdown();
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("连续更新计划并强制压缩：会话摘要、跨会话事实和情景召回始终原样保留", async () => {
+    const dir = await tempDir("dsh-agent-plan-memory-");
+    const session = new SessionStore({ dir, sessionId: "current" });
+    await session.recordLongTermSummary("会话固定标记：保留原始约束");
+    const previous = new SessionStore({ dir, sessionId: "previous" });
+    await previous.recordLongTermSummary("情景固定标记：曾经确认过的解决方案");
+    const memories = new MemoryStore({ dir: path.join(dir, "memory") });
+    await memories.add({ type: "feedback", text: "事实固定标记：执行前核对环境" });
+    const recall = new MemoryRecall({ sessionDir: dir, cacheDir: memories.dir,
+      embeddings: { model: "fake", embed: async texts => texts.map(() => [1, 0]) } });
+    const plan = new PlanStore();
+    const tools = new ToolRegistry();
+    tools.register(createUpdatePlanTool(plan));
+    const mainRequests: any[] = [];
+    const client: any = { chat: { completions: { create: async (params: any) => {
+      let content: string | null = "摘要不复述固定记忆";
+      let tool_calls: any[] | undefined;
+      if (params.tools?.length) {
+        mainRequests.push(params);
+        const call = mainRequests.length;
+        if (call === 2 || call === 4) throw Object.assign(new Error("maximum context length exceeded"), { status: 400 });
+        if (call === 1 || call === 3) {
+          content = null;
+          tool_calls = [{ id: `plan-${call}`, type: "function", function: { name: "update_plan",
+            arguments: JSON.stringify({ steps: [{ content: `计划第 ${call} 版`, status: "completed" }] }) } }];
+        } else content = "完成";
+      }
+      return { choices: [{ message: { content, ...(tool_calls ? { tool_calls } : {}) } }],
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } };
+    } } } };
+    const agent = new Agent({ model: "glm-4.6", systemPrompt: "系统规则", client, tools, planStore: plan,
+      sessionStore: session, memoryStore: memories, memoryRecall: recall, contextWindow: 8192 });
+    try {
+      const result = await agent.run(longText("检查资料并制定计划", 160));
+      expect(result.success).toBe(true);
+      expect(mainRequests.length).toBe(5);
+      // 第三、五次主调用都是 API 报超限后的深压缩重试；摘要不包含这些标记。
+      for (const request of [mainRequests[2], mainRequests[4]]) {
+        const text = request.messages.map(textOf).join("\n");
+        expect(text).toContain("会话固定标记：保留原始约束");
+        expect(text).toContain("事实固定标记：执行前核对环境");
+        expect(text).toContain("情景固定标记：曾经确认过的解决方案");
+        expect(text).toContain("【当前任务计划】");
+      }
+      expect(mainRequests[4].messages.map(textOf).join("\n")).toContain("计划第 3 版");
+      await agent.flushSummary();
+    } finally {
+      await agent.shutdown();
+      await fs.rm(dir, { recursive: true, force: true });
+    }
   });
 
   /**

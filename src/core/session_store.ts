@@ -40,7 +40,7 @@ export const SESSION_NAME_PREFIX = "【会话名】";
 export const MODEL_PREFIX = "【模型】";
 
 /**
- * 跨 run 长期摘要记录：每个用过工具的 run 结束时增量更新一份。
+ * 跨 run 长期摘要记录：每个可记忆的 run（含纯聊天）结束时增量更新一份。
  * 磁盘层 compact 只保留最近 N 个对话轮，更早的历史（以及所有跨 run 的工具发现）
  * 没有它就无声丢失；有了它，run 开始时注入钉住前缀，20 轮之前的世界仍然可见。
  */
@@ -194,7 +194,7 @@ export class SessionStore {
   }
 
   /**
-   * 记录跨 run 长期摘要（每个用过工具的 run 结束时更新一次）。
+   * 记录跨 run 长期摘要（包含纯聊天轮，具体触发与失败处理由 Agent 管理）。
    * 内容每次都在变，不做去重；compact 会保留最新一条。
    */
   async recordLongTermSummary(summary: string): Promise<void> {

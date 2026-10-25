@@ -125,7 +125,7 @@ interface AgentConfig {
    */
   memoryRecall?: MemoryRecall;
   /**
-   * 跨会话记忆写入管线：每个用过工具的 run 结束后异步提取事实写入全局记忆仓
+   * 跨会话记忆写入管线：每个可记忆的 run（含纯聊天）结束后异步提取事实写入全局记忆仓
    * （与 fold 长期摘要同触发、同关停信号）。失败只告警；缺省不启用。
    */
   memoryWriter?: MemoryWriter;
@@ -752,7 +752,9 @@ export class Agent {
       })) },
       { role: "assistant", content: "我会按当前用户目标核对已有进度；工具返回不等于验收通过。" },
     ] : [];
-    this.contextManager.setPinnedPrefix([...longTermBlock, ...memoryBlock, ...recallBlock, ...taskBlock]);
+    // 本轮固定资料共用一份基底；计划更新只替换计划块，不能解除记忆的固定保留。
+    const pinnedContext = [...longTermBlock, ...memoryBlock, ...recallBlock, ...taskBlock];
+    this.contextManager.setPinnedPrefix(pinnedContext);
     this.sessionLongTermSummary = stored?.longTermSummary;
     this.lastRunObservations = [];
     // The plan is restored from the task record by runManaged, including across restarts.
@@ -1031,7 +1033,7 @@ export class Agent {
             { role: "assistant", content: "收到，我已了解当前任务计划，将按计划推进并保持各步状态更新。" },
           ];
           messages.push(...planBlock);
-          this.contextManager.setPinnedPrefix([...longTermBlock, ...taskBlock, ...planBlock]);
+          this.contextManager.setPinnedPrefix([...pinnedContext, ...planBlock]);
           this.events.emit("plan_update", { steps: planStore.getSteps() });
         }
 
@@ -1367,16 +1369,17 @@ export class Agent {
   }
 
   /**
-   * 起一个后台长期摘要 fold：本轮用过工具才值得写记忆（纯聊天轮靠磁盘对话轮就够）。
+   * 起一个后台长期摘要 fold：纯聊天也可能包含偏好与纠正，不能以工具调用作为更新门槛。
+   * 跨会话事实仍由提取器筛选，没有值得记的内容就返回空数组。
    * 只挂关停信号——fold 仅在轮次正常结束后起飞，此时本轮的 runtime.signal 不会再 abort；
    * quit/Ctrl+C 关停时由 backgroundAbort 真正取消在飞的请求。
    */
   private startBackgroundSummary(userMessage: string, result: AgentResult, runtime?: ToolRuntime): void {
-    if (!this.config.sessionStore || result.toolCallsCount === 0 || runtime?.signal?.aborted ||
+    if (!this.config.sessionStore || runtime?.signal?.aborted ||
         result.taskStatus === "blocked" || result.runStatus === "failed") return;
     this.summaryInFlight = true;
     const signal = this.backgroundAbort.signal;
-    // 用过工具的 run 结束后做两件后台事：会话内长期摘要 fold + 全局跨会话记忆提取。
+    // 可记忆的 run 结束后做两件后台事：会话内长期摘要 fold + 全局跨会话记忆提取。
     // 同触发条件、同关停信号；flushSummary/shutdown 等的是合并后的总成本
     const foldTask = this.foldLongTermSummary(userMessage, result, signal);
     const memoryTask = this.config.memoryWriter
