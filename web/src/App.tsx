@@ -97,6 +97,7 @@ export default function App() {
               disabled={false}
               models={state.models}
               modelStatus={state.modelStatus}
+              accountQuota={state.modelAccountQuota}
               config={{
                 model: current.model ?? current.meta?.model,
                 temperature: current.temperature,

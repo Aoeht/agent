@@ -1,7 +1,7 @@
 // web/src/lib/mock.ts
 import type {
   ApprovalDecisionBody,
-  ModelProbeStatus,
+  ModelProbeStatusResponse,
   ServerEvent,
   SessionDetailDTO,
   SessionSummaryDTO,
@@ -403,14 +403,16 @@ export class MockTransport implements Transport {
     return [...MOCK_MODELS];
   }
 
-  async listModelStatus(): Promise<ModelProbeStatus[]> {
-    // 演示数据：第二个模型模拟配额耗尽，让标注逻辑在 mock 下也能看到
-    return MOCK_MODELS.map((model, index) => ({
-      model,
-      ok: index !== 1,
-      kind: index === 1 ? ("quota" as const) : ("ok" as const),
-      ...(index === 1 ? { detail: "Free quota exhausted (mock)" } : {}),
-    }));
+  async listModelStatus(): Promise<ModelProbeStatusResponse> {
+    // 演示数据：第二个模型模拟配额耗尽，让过滤与标注逻辑在 mock 下也能看到
+    return {
+      models: MOCK_MODELS.map((model, index) => ({
+        model,
+        ok: index !== 1,
+        kind: index === 1 ? ("quota" as const) : ("ok" as const),
+        ...(index === 1 ? { detail: "Free quota exhausted (mock)" } : {}),
+      })),
+    };
   }
 
   async applySessionConfig(

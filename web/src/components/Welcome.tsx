@@ -4,6 +4,7 @@ import { useStore } from "../state/store";
 import { Composer } from "./Composer";
 import { SandboxModal } from "./Modals";
 import type { SessionConfigInput } from "../lib/transport";
+import { firstAvailableModel } from "../lib/modelOptions";
 
 /**
  * 欢迎界面（首页）：左侧会话栏照旧，主区是居中的"新建会话"窗口——
@@ -44,8 +45,9 @@ export function Welcome() {
           disabled={false}
           models={state.models}
           modelStatus={state.modelStatus}
-          // 模型回退到第一个可选项：⚙ 按钮在无 config.model 时会禁用，欢迎态要能直接打开选模型
-          config={{ ...config, model: config.model ?? state.models[0] }}
+          accountQuota={state.modelAccountQuota}
+          // 模型回退到第一个探测可用的选项：⚙ 按钮在无 config.model 时会禁用，欢迎态要能直接打开选模型
+          config={{ ...config, model: config.model ?? firstAvailableModel(state.models, state.modelStatus) }}
           onSend={(text) => void actions.createAndSend(text, Object.keys(config).length > 0 ? config : undefined)}
           onCancel={() => {}}
           onApplyConfig={async () => {}}

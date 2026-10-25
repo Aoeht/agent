@@ -16,8 +16,7 @@ import type {
   ServerEvent,
   SessionDetailDTO,
   SessionSummaryDTO,
-} from "@protocol";
-import type { SessionConfigInput, Transport } from "../lib/transport";
+} from "@protocol";import type { SessionConfigInput, Transport } from "../lib/transport";
 import { MockTransport } from "../lib/mock";
 import { STOP_REASON_LABELS, type RunOutcome } from "../../../src/core/run_outcome";
 import type { TaskRecord } from "../../../src/core/task_types";
@@ -94,8 +93,10 @@ interface AppState {
   byId: Record<string, SessionUIState>;
   /** 可选模型清单（GET /models，启动时拉一次） */
   models: string[];
-  /** 模型可用性探测（GET /models/status）：对话开始时刷新，配额耗尽的模型在前端标出 */
+  /** 模型可用性探测（GET /models/status）：对话开始时刷新，探测失败的模型从下拉列表剔除 */
   modelStatus: ModelProbeStatus[];
+  /** 账户级配额/余额（服务商支持时才有，如智谱 trial_balance） */
+  modelAccountQuota?: string;
   /** 服务器级设置（目前只有沙箱根目录） */
   appSettings: { sandboxRoot?: string };
 }
@@ -105,7 +106,7 @@ interface AppState {
 type Action =
   | { type: "sessions_loaded"; sessions: SessionSummaryDTO[] }
   | { type: "models_loaded"; models: string[] }
-  | { type: "model_status_loaded"; status: ModelProbeStatus[] }
+  | { type: "model_status_loaded"; status: ModelProbeStatus[]; accountQuota?: string }
   | { type: "settings_loaded"; sandboxRoot?: string }
   | { type: "sandbox_root_changed"; sandboxRoot: string }
   | { type: "tools_loaded"; id: string; tools: Array<{ name: string; description: string }>; disabled: string[] }
@@ -389,7 +390,11 @@ function reducer(state: AppState, action: Action): AppState {
     case "models_loaded":
       return { ...state, models: action.models };
     case "model_status_loaded":
-      return { ...state, modelStatus: action.status };
+      return {
+        ...state,
+        modelStatus: action.status,
+        ...(action.accountQuota !== undefined ? { modelAccountQuota: action.accountQuota } : {}),
+      };
     case "settings_loaded":
       return {
         ...state,
@@ -570,12 +575,16 @@ export function StoreProvider({
     });
     void resolvedTransport
       .listModelStatus()
-      .then((status) => {
+      .then((result) => {
         if (!alive) return;
-        dispatch({ type: "model_status_loaded", status });
+        dispatch({
+          type: "model_status_loaded",
+          status: result.models,
+          ...(result.accountQuota !== undefined ? { accountQuota: result.accountQuota } : {}),
+        });
       })
       .catch(() => {
-        // 探测端点不可用（老版本后端）不拦 UI：下拉框只是没有可用性标注
+        // 探测端点不可用（老版本后端）不拦 UI：下拉框只是没有可用性过滤与标注
       });
     void resolvedTransport.getSettings().then((settings) => {
       if (!alive) return;
@@ -597,8 +606,12 @@ export function StoreProvider({
     // 每次对话开始刷新模型可用性（服务端 60s 缓存，切换会话的重复拉取几乎零成本）
     void resolvedTransport
       .listModelStatus()
-      .then((status) => {
-        if (alive) dispatch({ type: "model_status_loaded", status });
+      .then((result) => {
+        if (alive) dispatch({
+          type: "model_status_loaded",
+          status: result.models,
+          ...(result.accountQuota !== undefined ? { accountQuota: result.accountQuota } : {}),
+        });
       })
       .catch(() => {});
     void resolvedTransport.listTools(currentId).then((toolState) => {

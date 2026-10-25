@@ -248,7 +248,7 @@ export interface SessionSummaryDTO {
 }
 
 /**
- * 模型可用性探测结果（GET /models/status）：对候选模型真发一条微型补全请求。
+ * 模型可用性探测结果（GET /models/status 里的单条）：对候选模型真发一条微型补全请求。
  * 服务商 /models 清单里"有"不等于"能用"（免费配额按模型计），对话开始前先探一次。
  * 结构与 core/model_probe.ts 的 ModelProbeResult 一致——DTO 在协议层独立声明，
  * web/ 只允许经 @protocol 跨边界拿类型。
@@ -260,6 +260,15 @@ export interface ModelProbeStatus {
   /** 失败时的错误摘要，前端 tooltip 用 */
   detail?: string;
   latencyMs?: number;
+  /** 剩余配额（响应头限流字段，能拿到才有；DashScope 实测不返回） */
+  quota?: string;
+}
+
+/** GET /models/status 的响应体：探测结果 + 账户级配额（智谱 trial_balance，能拿到才有） */
+export interface ModelProbeStatusResponse {
+  models: ModelProbeStatus[];
+  /** 账户级剩余配额/余额的可读描述（服务商支持时才有，如智谱 trial_balance） */
+  accountQuota?: string;
 }
 
 export interface HistoryMessageDTO {

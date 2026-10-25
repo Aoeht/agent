@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ModelProbeStatus } from "@protocol";
 import type { SessionConfigInput } from "../lib/transport";
+import { visibleModelOptions } from "../lib/modelOptions";
 import { useMediaQuery } from "../lib/useMediaQuery";
 
 export interface ComposerConfig {
@@ -10,12 +11,17 @@ export interface ComposerConfig {
   maxIterations?: number;
 }
 
-/** 探测结果的展示标记：ok 不标注（默认即正常），失败档位给前缀与 tooltip 说明 */
+/** 探测结果的展示标记：ok 不加前缀（默认即正常），失败档位给前缀与 tooltip 说明 */
 function modelOptionLabel(model: string, probe: ModelProbeStatus | undefined): string {
   if (!probe || probe.ok) return model;
   if (probe.kind === "quota") return `⛔ ${model}（配额耗尽）`;
   if (probe.kind === "unavailable") return `⚠️ ${model}（不可用）`;
   return `⚠️ ${model}（探测异常）`;
+}
+
+/** 可用模型的配额后缀（响应头限流字段，服务商返回才有） */
+function modelOptionQuotaSuffix(probe: ModelProbeStatus | undefined): string {
+  return probe?.ok && probe.quota ? `（${probe.quota}）` : "";
 }
 
 export function Composer({
@@ -24,6 +30,7 @@ export function Composer({
   disabled,
   models,
   modelStatus,
+  accountQuota,
   config,
   onSend,
   onCancel,
@@ -34,8 +41,10 @@ export function Composer({
   running: boolean;
   disabled: boolean;
   models: string[];
-  /** 模型可用性探测结果（对话开始时拉取；探测失败的模型在下拉框里标注出来） */
+  /** 模型可用性探测结果（对话开始时拉取）：探测失败的模型直接从下拉列表剔除 */
   modelStatus?: ModelProbeStatus[];
+  /** 账户级配额/余额（服务商支持时才有） */
+  accountQuota?: string;
   config: ComposerConfig;
   onSend: (text: string) => void;
   onCancel: () => void;
@@ -43,7 +52,7 @@ export function Composer({
   /** 欢迎态（sessionId=null）专用：草稿一变就上报，由上层暂存、随首条消息经 createAndSend 落地 */
   onDraftConfig?: (config: SessionConfigInput) => void;
 }) {
-  const statusByModel = new Map((modelStatus ?? []).map((probe) => [probe.model, probe]));
+  const statusMap = new Map((modelStatus ?? []).map((probe) => [probe.model, probe]));
   const [text, setText] = useState("");
   const [panelOpen, setPanelOpen] = useState(false);
   const [draft, setDraft] = useState<{ model: string; temperature: string; maxIterations: string }>({
@@ -164,6 +173,7 @@ export function Composer({
             className="absolute bottom-full left-0 z-20 mb-2 max-h-[60vh] w-80 max-w-[calc(100vw-1.5rem)] overflow-y-auto rounded-2xl border border-cream-300 bg-cream-50 p-4 shadow-xl"
           >
             <h3 className="mb-3 text-sm font-semibold">模型与参数</h3>
+            {accountQuota && <p className="mb-2 text-xs text-ink-400">💰 {accountQuota}</p>}
             <label className="block">
               <span className="text-xs text-ink-600">模型</span>
               <select
@@ -177,11 +187,11 @@ export function Composer({
                 }}
                 className="mt-1 w-full rounded-xl border border-cream-300 bg-white/70 px-3 py-2 font-mono text-xs outline-none focus:border-clay-500"
               >
-                {models.map((model) => {
-                  const probe = statusByModel.get(model);
+                {visibleModelOptions(models, modelStatus, draft.model).map((model) => {
+                  const probe = statusMap.get(model);
                   return (
                     <option key={model} value={model} title={probe && !probe.ok ? probe.detail : undefined}>
-                      {modelOptionLabel(model, probe)}
+                      {modelOptionLabel(model, probe) + modelOptionQuotaSuffix(probe)}
                     </option>
                   );
                 })}

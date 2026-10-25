@@ -18,8 +18,9 @@
 import path from "node:path";
 import OpenAI from "openai";
 import { resolveSessionDir } from "../config";
-import { candidateModels, probeModels, type ModelProbeResult } from "../core/model_probe";
+import { candidateModels, fetchZhipuAccountQuota, probeModels } from "../core/model_probe";
 import { UiBridge } from "./bridge";
+import type { ModelProbeStatusResponse } from "./protocol";
 import { AuthGate, assertUsableToken, bindRefusal, sandboxRefusal } from "./auth";
 import { createServerRuntime, rebuildRuntimeWithSandboxRoot, type ServerRuntime } from "./runtime";
 import { EventHub, SessionManager } from "./sessions";
@@ -220,13 +221,21 @@ async function route(
     }
 
     // 模型可用性探测：清单里有 ≠ 能用（免费配额按模型计）。对候选模型真发微型补全，
-    // 前端在对话开始（页面加载/切换会话）时拉取，把配额耗尽的模型在下拉框里标出来。缓存 60s。
+    // 没配额/不可用的模型前端直接从下拉列表剔除。缓存 60s。智谱直连时附账户余额。
     if (pathname === "/models/status" && method === "GET") {
       const now = Date.now();
-      if (now - probeCache.at < 60_000) return json(probeCache.results);
-      const results = await probeModels({ models: candidateModels(runtime.config) });
-      probeCache = { at: Date.now(), results };
-      return json(results);
+      if (now - probeCache.at < 60_000) return json(probeCache.payload);
+      const models = await probeModels({ models: candidateModels(runtime.config) });
+      const accountQuota = await fetchZhipuAccountQuota(
+        process.env.OPENAI_BASE_URL?.trim() ?? "",
+        process.env.OPENAI_API_KEY?.trim() ?? ""
+      );
+      const payload: ModelProbeStatusResponse = {
+        models,
+        ...(accountQuota !== undefined ? { accountQuota } : {}),
+      };
+      probeCache = { at: Date.now(), payload };
+      return json(payload);
     }
 
     // 会话级配置（模型/温度/迭代上限）
@@ -309,7 +318,7 @@ function json(data: unknown, status = 200): Response {
 
 let modelsCache: { at: number; models: string[] } = { at: 0, models: [] };
 /** 模型可用性探测缓存：60s 内的对话开始共享一次探测结果（微型补全 × N 模型，省着点配额） */
-let probeCache: { at: number; results: ModelProbeResult[] } = { at: 0, results: [] };
+let probeCache: { at: number; payload: ModelProbeStatusResponse } = { at: 0, payload: { models: [] } };
 
 function dedupeKeepOrder(models: string[]): string[] {
   return [...new Set(models.filter((model) => model !== ""))];

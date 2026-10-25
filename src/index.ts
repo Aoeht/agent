@@ -14,7 +14,7 @@ import { createAgentStack } from "./bootstrap";
 import { buildSystemPrompt } from "./prompts/system";
 import { handlePromptCommand } from "./prompts/commands";
 import { handleModelCommand } from "./core/model_command";
-import { candidateModels, formatModelProbeLine, probeModels } from "./core/model_probe";
+import { candidateModels, fetchZhipuAccountQuota, formatModelProbeLine, probeModels } from "./core/model_probe";
 import { TraceRecorder } from "./core/trace";
 import { CheckpointStore } from "./core/checkpoint_store";
 import { handleRewindCommand } from "./core/rewind_command";
@@ -572,7 +572,14 @@ async function main() {
     if (modelProbeEnabled()) {
       try {
         const probes = await probeModels({ models: candidateModels(config) });
-        const line = formatModelProbeLine(probes);
+        // 账户级配额（智谱直连才有）：函数内部按 base URL host 门控，其它服务商零开销
+        const accountQuota = await fetchZhipuAccountQuota(
+          process.env.OPENAI_BASE_URL?.trim() ?? "",
+          process.env.OPENAI_API_KEY?.trim() ?? ""
+        );
+        const line = [formatModelProbeLine(probes), accountQuota ? `💰 ${accountQuota}` : undefined]
+          .filter(Boolean)
+          .join(" ｜ ");
         if (line) console.log(`🩺 ${line}`);
       } catch (error) {
         console.warn(`⚠️ 模型可用性探测失败（不影响会话）: ${error instanceof Error ? error.message : error}`);
