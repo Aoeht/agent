@@ -4,13 +4,13 @@
 >
 > **前置阅读**：`docs/MCP入门篇.md`。A2A 和 MCP 是**一对**协议，本文会反复拿它们对照。如果你还没读 MCP 那篇，先读它第 0～7 章。
 >
-> **配套代码**：`A:\ai_agent`。文中出现的 `文件:行号` 都指向你的真实代码，方便边读边对照自己在哪一步会用到这个协议。
+> **项目快照**：2026-10-25，`A:\ai_agent`。本地子 Agent 运行时已实现；A2A 服务与客户端尚未实现。代码引用使用文件与符号名，避免旧行号误导。
 >
 > **本文的定位**：只讲"名词和直觉"，帮你把 A2A 的世界观建立起来。**凡是"规范字段的精确语义""某处实现与规范的偏差""怎么落到你现有代码"这类工程细节，本文一律点到为止，把展开留给 `docs/A2A进阶篇.md`。** 读完本文再读进阶篇，就不会有跳跃感。
 >
-> **怎么读**：第 0～3 章是"为什么要它"，第 4～6 章是"三个核心概念"，第 7～9 章是"协议怎么运转"，第 10 章把一切串成一次真实调用，第 11～12 章用来动手和自测。遇到不认识的词先往下读，很多词会在后面反复出现中变清楚。
+> **怎么读**：第 0～3 章建立概念，第 4～9 章讲协议对象与交互，第 10 章展示协议示例，第 11 章区分本地实操与远端调用，第 12～13 章用于自测和延伸阅读。
 >
-> **规范版本**：本文与进阶篇对齐 **A2A v1.0.x**（`1.0.0` 发布于 2026-03-12，当前补丁 `1.0.1` 发布于 2026-05-26）。v0.3 到 v1.0 有一批**破坏性变更**（枚举值改名、`Part` 类型合并、方法名改 PascalCase、`kind` 判别字段删除、Agent Card 结构重组），网上大量教程还是 v0.3 的写法。凡是有版本陷阱的地方，本文都会明确标注 **⚠️ v1.0 变更**。
+> **规范版本**：本文与进阶篇固定以 **A2A v1.0.1** 为基线（CHANGELOG 日期为 2026-05-26）。2026-10-25 复核了固定 tag 的 proto、变更记录及在线规范；在线 `latest` 会变化，已知差异见进阶篇。v0.3 与 v1.0 的字段和方法有破坏性差异，示例不可混用。
 
 ---
 
@@ -18,7 +18,7 @@
 
 | 章 | 内容 | 读完你能回答 |
 |---|---|---|
-| 0 | A2A 到底解决什么问题 | 为什么需要它，把 Agent 包成工具为什么不够 |
+| 0 | A2A 到底解决什么问题 | 本地编排、Agent-as-tool 与 A2A 有什么区别 |
 | 1 | 三个角色：User / Client Agent / Remote Agent | 我在这套协议里是哪一个 |
 | 2 | A2A ≠ MCP：横着连 vs 竖着连 | 什么时候该用哪个 |
 | 3 | 九个词，先混个脸熟 | Agent Card / Task / Message / Part / Artifact / Context / Skill / Extension / Binding |
@@ -29,7 +29,7 @@
 | 8 | 任务状态机：九个枚举值 | `INPUT_REQUIRED` 为什么是多 Agent 的关键 |
 | 9 | 错误：出错了怎么说话 | 九个错误类型、一到九号错误码的直觉 |
 | 10 | 串起来：一次"帮我写份报告"全程直播 | 从发现问题到拿到产物经过哪些步骤 |
-| 11 | 三个你自己能跑的小观察 | 亲眼看到本文讲的东西 |
+| 11 | 四个可操作的小观察 | 区分已有本地运行时与未来协议端点 |
 | 12 | 自测 20 题（答案在最后） | 检验是否真懂了 |
 | 13 | 接下来读进阶篇哪几章 | 按需跳读的路线 |
 
@@ -37,50 +37,29 @@
 
 # 第 0 章 A2A 到底解决什么问题
 
-## 0.1 先回忆：MCP 解决了什么，又没解决什么
+## 0.1 先回忆：MCP 与 A2A 分别标准化什么
 
-`docs/MCP入门篇.md` 第 0 章讲过一个 N×M 的故事：N 个 AI 应用要接 M 个外部能力（文件系统、GitHub、数据库……），没有标准就要写 N×M 套胶水代码。MCP 把中间那层标准化，组合数降到 N+M。
+MCP 帮应用接入工具、资源和提示模板；A2A 帮不同 Agent 服务交换消息、任务状态与交付物。它们解决的是不同接口的互操作问题，可以同时使用。[官方对照说明](https://a2a-protocol.org/latest/topics/a2a-and-mcp/)
 
-**但 MCP 有个前提**：它连接的是**「一个 Agent」和「一堆工具」**。工具是什么？是**没有自主性**的东西——你给它参数，它给你结果，它不会跟你商量、不会问你问题、不会拒绝你、不会自己决定去做点别的。
+不要把“工具”理解成必然没有状态、不能提问或不能取消。工具背后可以运行复杂服务甚至完整 Agent；MCP 也有进度通知和取消机制。比如 MCP 的请求取消是尽力而为，不能据此保证远端计算已停止。[MCP 取消规范](https://modelcontextprotocol.io/specification/2025-06-18/basic/utilities/cancellation)
 
-现在换个场景。你要做一个「差旅助手」，它需要：
+以差旅助手为例，查一个航班可建模为工具调用；把“根据预算安排整个行程”交给另一个服务，则需要约定任务如何查询、补充信息和交付。A2A 提供这套公共语言，但不替你决定如何拆任务、选择执行者或验收结果。
 
-- 查航班 → 有个**航班 Agent**
-- 订酒店 → 有个**酒店 Agent**
-- 换汇 → 有个**换汇 Agent**
-- 推荐当地玩乐 → 有个**玩乐 Agent**
+## 0.2 多 Agent 不必先包装成工具
 
-这四个东西**不是工具，是 Agent**。它们的区别很具体：
+有三种独立的工程选择：
 
-| | 工具（MCP 的领域） | Agent（A2A 的领域） |
+| 方式 | 谁负责启动与协调 | 本项目的选择 |
 |---|---|---|
-| 自主性 | 无。参数进，结果出 | 有。会推理、会规划、会拒绝 |
-| 状态 | 通常无状态 | 长时运行，跨多轮保持状态 |
-| 交互 | 一次调用一次返回 | 可能来回问你好几轮 |
-| 时长 | 毫秒到秒 | 秒到小时到天 |
-| 内部 | 你可以看它的实现 | **不透明**——你只能看它声明的能力 |
-| 出错 | 返回错误码 | 可能说"我需要授权才能继续" |
-| 谁写的 | 通常是工具方 | 可能是别人、别的团队、别的公司 |
+| Agent-as-tool | 主 Agent 通过工具调用启动子 Agent | 当前未采用 |
+| 宿主运行时编排 | 协调器和调度器直接创建、运行子 Agent | **已经实现** |
+| A2A 互操作 | 客户端通过协议调用独立 Agent 服务 | 后续跨进程接入方向，尚未实现 |
 
-**关键差别是最后两行。** 工具是「你的下属」，Agent 是「你的同事」。你跟下属说"把这个文件读了"，他读完就完了；你跟同事说"帮我订个酒店"，他可能回你"预算多少？住几晚？"
+把 Agent 包成工具，本身不会强迫你暴露完整历史，也不会自动消除上下文隔离。风险在于你具体传了什么、返回了什么、如何处理权限和状态。换成 A2A 也不会自动消除提示注入。
 
-## 0.2 把 Agent 包成工具，为什么不够
+当前项目走第二条路线：`TeamCoordinator` 生成任务契约，`AgentScheduler` 按依赖启动独立 Agent，独立复核后最多两轮定向补查，再汇总。模型不通过 `spawn_agent` 或 `delegate` 工具管理子 Agent；调度权在宿主代码中。
 
-绝大多数人的第一反应是：「那我就把这四个 Agent 各包成一个 MCP 工具不就行了？」
-
-**短期能跑，长期会撞墙。** 官方文档专门为此写了一篇（[Why Agents Are Not Tools](https://discuss.google.dev/t/why-agents-are-not-tools/192812)）。撞的墙具体是这几面：
-
-**第一面：包成工具就丢掉了多轮。** 工具的契约是「一次调用 → 一个返回值」。但「帮我订酒店」这件事天然要多轮：Agent 要先问清楚日期、人数、预算，才能给出报价。你把「问日期」做成工具返回值，调用方（大模型）就得自己理解"这是一个问题，我要去问用户，然后把答案塞回下一次调用"——**这个逻辑现在跑在提示词里，也就是跑在模型的自由发挥里，而不是跑在代码里**。
-
-**第二面：包成工具就丢掉了进度。** 「生成本季度销售报告」要跑十分钟。工具调用是阻塞的：调用方要么干等十分钟（浪费、可能超时），要么放弃。A2A 的做法是**立刻返回一个任务句柄**，然后你可以轮询、可以订阅流、可以让对方在完成时回调你的 webhook。这三件事工具契约都没有。
-
-**第三面：包成工具就丢掉了取消。** 用户说"算了别做了"。工具调用没有标准的取消语义——你可以 abort 本地等待，但**对方还在跑、还在烧钱**。A2A 有 `CancelTask`。
-
-**第四面（最要紧）：包成工具就把对方的内部暴露在你的上下文里了。** 工具调用要求你把「工具的输入输出描述」放进自己的上下文，而且工具返回的内容会直接进你的消息历史。当你把另一个 Agent 包成工具时，等于**让它的输出长驱直入你的上下文**，这在安全上是个大洞（详见 `docs/A2A适配性评估.md` 第 5.1 节）。A2A 的核心原则之一是 **Opaque Execution（不透明执行）**：双方协作只交换"声明过的能力"和"交换的内容"，**不需要**知道对方内部怎么想、有什么工具、记着什么。
-
-一句话总结：
-
-> **MCP 让 Agent 能"用"东西，A2A 让 Agent 能"找人"。**
+将来需要接远端服务时，可以在 `ChildFactory` 边界实现 A2A 执行适配器，继续复用任务契约和复核流程。**本地多 Agent 是运行机制，A2A 是跨服务协议，两者不是升级前后关系。** 当前操作说明见 [子 Agent 运行时](子Agent运行时.md)。
 
 ## 0.3 没有 A2A 会怎样：又是 N×M
 
@@ -228,39 +207,24 @@ MCP 有三个角色（Host / Client / Server）。A2A 也有三个，但**其中
 
 ## 2.3 一张对照表
 
-| 维度     | MCP                       | A2A                                |
-| ------ | ------------------------- | ---------------------------------- |
-| 连接方向   | 竖（Agent → 工具/数据）          | 横（Agent ↔ Agent）                   |
-| 对端性质   | 无自主性的能力                   | 有自主性的对等方                           |
-| 对端可见性  | 你可以看它的实现                  | **不透明**（Opaque Execution）          |
-| 交互时长   | 毫秒～秒                      | 秒～小时～天                             |
-| 状态     | 通常无状态                     | **Task 有完整生命周期**                   |
-| 多轮     | 无协议级多轮                    | **协议级多轮**（`INPUT_REQUIRED`）        |
-| 进度     | `notifications/progress`  | SSE 流 + 推送通知                       |
-| 取消     | `notifications/cancelled` | `CancelTask` + `SubscribeToTask`   |
-| 发现     | 配置里写死 Server 列表           | **Agent Card**（`.well-known` 自动发现） |
-| 身份/鉴权  | 由 Host 自己管                | **协议声明** `securitySchemes`         |
-| 传输     | stdio / Streamable HTTP   | JSON-RPC over HTTP、gRPC、HTTP/REST  |
-| 底层消息格式 | JSON-RPC 2.0              | JSON-RPC 2.0（或 gRPC / REST）        |
-| 出身     | Anthropic（2024 年底）        | Google（2025 年 4 月），后捐给 Linux 基金会   |
+| 维度 | MCP | A2A |
+|---|---|---|
+| 主要接口 | 工具、资源、提示模板 | Agent 能力、消息、任务、产物 |
+| 典型应用 | 给应用接入外部能力 | 与独立 Agent 服务协作 |
+| 内部实现 | 不要求客户端知道服务端实现 | 同样不要求暴露执行过程 |
+| 状态与时长 | 取决于具体能力和所用协议版本 | Task 明确定义生命周期，不规定任务必须很长 |
+| 进度与取消 | 有进度通知、请求取消等机制 | 任务事件与 `CancelTask`；`SubscribeToTask` 用于观察 |
+| 能力发现 | 服务端能力协商与列表接口 | Agent Card 描述能力及接口 |
+| 身份与授权 | 需要按传输和授权规范实现 | Card 声明认证方案，服务端实际执行鉴权 |
+| 传输 | stdio、Streamable HTTP 等 | JSON-RPC over HTTP、gRPC、HTTP+JSON |
 
-**最后一行值得单独说**：两者**都用 JSON-RPC 2.0**。这不是巧合——它意味着如果你已经理解了 MCP 的报文长什么样（`docs/MCP入门篇.md` 第 3 章），A2A 的报文你基本上已经会读了。差异在**方法名**和**数据结构**，不在"怎么把一条消息装进 HTTP 请求"这件事上。
+方向上的“竖/横”帮助理解用途，不能拿来证明某系统是否合规；是否支持某项交互，应看固定协议版本和实际实现。
 
-## 2.4 一个反过来的证据：Agent-as-Tool 不是错的
+## 2.4 Agent-as-tool 与直接编排是不同选择
 
-既然两个协议都基于 JSON-RPC，那**「把 A2A Agent 伪装成 MCP 工具」在技术上完全可行**——官方文档甚至专门讲了这个做法（[Representing A2A Agents as MCP Resources](https://a2a-protocol.org/latest/topics/a2a-and-mcp/)）：
+Agent-as-tool 是一种调用组织方式，不是 A2A 的“降级特例”。一个工具可以调用 A2A 服务；一个宿主调度器也可以直接调用同一服务。A2A 不要求必须把对端注册进模型的工具列表。
 
-> An A2A Server (a remote agent) can expose some skills as MCP-compatible resources. This works best when the skills are well-defined and can be called in a tool-like, stateless way.
-
-**官方自己承认这个做法在"技能定义良好、可当无状态调用"时是合适的。** 但它紧接着补了一句：
-
-> Still, A2A's main strength is its support for flexible, stateful, collaborative interactions that go beyond a typical tool call.
-
-所以正确的理解不是「A2A 比 Agent-as-Tool 高级」，而是：
-
-> **Agent-as-Tool 是 A2A 的一个降级特例。** 短任务用前者（便宜），长任务/多轮任务用后者（贵但对）。
-
-这条判断对你有实际价值，因为它意味着**你不必一步到位**：先把远端 Agent 当工具用起来，等真遇到"多轮/长时/要进度"的需求再升级。`docs/A2A适配性评估.md` 第 3 章就是这个分级。
+本项目已经选择宿主编排。工作子 Agent 和复核 Agent 都有独立上下文与只读能力，协调器通过结构化提交与它们协作。新增远端执行能力应沿用这个边界，不能把 `createSubAgentTool()` 当作接入前置步骤。
 
 ## 2.5 一条历史：为什么现在是"两家说了算"
 
@@ -294,41 +258,17 @@ MCP 有三个角色（Host / Client / Server）。A2A 也有三个，但**其中
 
 > 顺带一个**命名陷阱**，你在搜索时会撞上：**有两个都叫 ACP 的东西**。一个是 **IBM 的 Agent Communication Protocol**（2025 年 8 月并入 A2A）；另一个是 **OpenAI 的 Agentic Commerce Protocol**（2025 年 12 月随 AAIF 新闻稿提及，管的是商业支付，不是 Agent 通信）。缩写一样，东西完全不同。
 
-## 2.6 四层辨析：别把所有"连接"都当成 A2A
+## 2.6 五类连接：先看实际接口
 
-第 2.1 节的"竖着连 / 横着连"是一条判据，但现实里有**四种**容易互相混淆的"连接"，它们分属不同层次。分清楚这个，能挡住八成概念混淆。
+| 类别 | 实际发生的事 | 是否自动构成 A2A |
+|---|---|---|
+| 工件迁移 | 导入配置、聊天记录或文件 | 否 |
+| 模型调用 | 向模型 API 发送推理请求 | 否 |
+| Agent-as-tool | 工具执行器内部运行 Agent | 否 |
+| 宿主多 Agent 编排 | 调度器运行多个 Agent，管理依赖、复核和预算 | 否；本项目属于这一类 |
+| A2A 互操作 | 按约定版本交换 Card、消息、任务或产物 | 需验证实际协议行为 |
 
-| 层次 | 是什么 | 运行时判据 | 例子 |
-|---|---|---|---|
-| **一、工件迁移** | 搬配置、搬记录、转格式 | **一方离线**，纯文件读写；对方不知道发生了什么 | ChatGPT 的 [Import from another agent](https://learn.chatgpt.com/docs/import)（读 Cursor / Claude Code 的本地配置转成自己的格式） |
-| **二、模型即工具** | 调一个远端 LLM | 没有自主性、无状态、一问一答 | 任何一个 Agent 调模型 API |
-| **三、Agent 即工具** | 调一个完整 Agent，但按工具语义用 | 有自主性，但**不能被回问**、无任务生命周期 | 把子 Agent 包成一个 `ToolDefinition` |
-| **四、A2A** | 和对等 Agent 协作 | 有 **Task 生命周期** + 能中断（`INPUT_REQUIRED`）+ 能力发现 | 你的助手 ↔ 酒店 Agent |
-
-### 一句话判据（比看架构图快）
-
-> **对方能被问、也能反过来问你吗？**
->
-> 只能被读 → **工件迁移**
-> 能被调、能返回结果 → **Agent 即工具**
-> 能被调、还会**反过来问你问题**、还会**拒绝**你 → **A2A**
-
-第三档就是 `TASK_STATE_INPUT_REQUIRED` / `TASK_STATE_REJECTED` 存在的意义。**一个不会反驳你的东西，不是同事，是下属或资料。**
-
-### 三个容易误判的实例
-
-- **"ChatGPT 和 Cursor 同步了"** → 是**第一层**。那个功能是读本地配置文件（`CLAUDE.md` → `AGENTS.md`、`settings.json` → `config.toml`、最近 30 天聊天记录 → ChatGPT chats），**单向、离线、对方不参与**。跟 git pull 读仓库没有本质区别。
-- **"Cursor 里挂了 ChatGPT"** → 是**第二层**或根本没有连接（同一个助手换了个壳）。
-- **"把 Agent 挂成 MCP 工具"** → 是**第三层**。官方文档自己承认这可行，但限定在"skill 定义良好、可以像工具一样无状态调用"时。
-
-### 重要：这四层不是"先进程度"的排序
-
-**别把它们读成"第一层最土、第四层最高级"。** 它们是**运行时语义的分类**，各有各的适用场景：
-
-- 工件迁移**根本不需要** A2A
-- Agent 即工具在很多场景下比 A2A **更理性**（短任务、无状态、省掉任务生命周期和鉴权的全部开销）
-
-官方文档自己就说过：把 A2A 的 skill 暴露成 MCP 资源，**"最适合那些定义良好、可像工具一样无状态调用的 skill"**。所以判据不是"双方是不是 AI 产品"，而是**运行时到底在发生什么**。
+“能追问”“会拒绝”“有多个模型”都不是 A2A 的充分条件。反过来，支持 A2A 的服务也可以只提供一次性 Message 响应，不必每次都创建长任务。这些类别可以组合，选择取决于系统边界和交付要求。
 
 ## 2.7 MCP 的 sampling 是 A2A 的前身吗？
 
@@ -717,7 +657,7 @@ A2A 的防线是**给名片签名**，用标准 JWS（JSON Web Signature，RFC 7
 - Task 3：基于 Task 1 订雪地摩托
 - Task 4：基于 Task 2 给酒店加个 SPA
 
-**这就是多 Agent 编排的样子。** 注意 Task 2/3 依赖 Task 1，Task 4 依赖 Task 2——依赖关系通过 `referenceTaskIds` 表达，而**协议本身不做调度**。调度是你的编排逻辑的事。
+这些任务可以用 `referenceTaskIds` 关联，但引用本身不规定执行先后，也不会自动形成可执行 DAG。本项目通过 `TeamTask.dependsOn` 声明依赖，由 `AgentScheduler` 校验和调度。
 
 > 自查：用户对上一轮的结果不满意，说"再改改"。你该往老 task 发消息，还是开新 task？为什么？
 
@@ -742,7 +682,7 @@ A2A 的防线是**给名片签名**，用标准 JWS（JSON Web Signature，RFC 7
 - `filename`：文件名
 - `metadata`：自定义键值对
 
-**⚠️ v1.0 变更（这是最大的破坏性变更）**：v0.3 里这四种内容是四种子类型（`TextPart` / `FilePart` / `DataPart`，文件还分 `FileWithBytes` / `FileWithUri`）。v1.0 **合并成一个统一的 `Part`**，直接用 `text` / `raw` / `url` / `data` 字段。
+**⚠️ v1.0 变更**：v0.3 使用 TextPart、FilePart、DataPart 等结构，文件再区分字节和 URI；v1.0 合并为统一 Part，以 `text/raw/url/data` 区分内容。
 
 对比一下（[a2a-python 迁移指南](https://a2aproject.github.io/a2a-python/docs/migrations/v1_0/)）：
 
@@ -1004,7 +944,7 @@ Content-Type: application/a2a+json
 | 任务可能跑很久，客户端可能断线/退出 | **推送通知** |
 | 不确定 | **先轮询**。它永远不会错，只是不实时。 |
 
-**给你的具体建议**：`A:\ai_agent` 现在的形态是 CLI（`src/index.ts` 的 REPL 与 stdin 单次模式，`index.ts:566-572`）。你最先该实现的是**轮询**，因为它不需要常驻连接、不需要新的事件循环、不需要 webhook 服务。等你真的需要看进度了再上 SSE——而且你的事件总线（`src/core/events.ts`）已经是现成的映射源。
+**给当前团队入口的建议**：`src/team.ts` 是一次性 CLI。远端接入可先用查询任务的方式实现可靠收尾，再按需要增加 SSE；团队事件应经过公开投影，不能直接转发底层 Agent 事件。项目另外还有主 Agent CLI 与 Web 界面，团队入口尚未接入 Web。
 
 > 自查：SSE 和推送通知的 payload 格式一样吗？为什么这样设计？
 
@@ -1034,9 +974,13 @@ Content-Type: application/a2a+json
 - **中断态**：**卡住了，等你**。这是多轮协作的关键。
 - **终态**：结束了，**不可复活**（第 5.3 节）
 
+## 8.1.1 本地状态不等于协议状态
+
+当前团队的 `answered/incomplete/cancelled/failed`、复核的 `passed/needs_work/blocked` 都是本地语义。`answered` 要求最新工作提交完整、复核通过且汇总成功，但不等于独立验收的 `verified`。团队没有追问后恢复通道，因此复核 `blocked` 不能自动变成可续接的 A2A `INPUT_REQUIRED`。
+
 ## 8.2 为什么 `INPUT_REQUIRED` 是多 Agent 的关键
 
-回忆第 0.1 节那张表：「工具是下属，Agent 是同事。」
+任务可能需要补充信息才能继续；协议提供这个状态，但追问界面、持久化与恢复仍由系统实现。
 
 下属不会说"我需要更多信息"。同事会说。
 
@@ -1084,7 +1028,7 @@ Content-Type: application/a2a+json
 2. **问的话在 `status.message` 里。** 也就是说问题本身是一条结构化的 Message（有 role 有 parts），不是塞在某个 `error` 字符串里。
 3. **续话的方式是带 `taskId` 再发一条消息。** 同一个 task 继续，不是开新 task。
 
-**对你的直接含义**：`A:\ai_agent` 现在有一个非常接近的机制——`requestHuman`（`src/core/types.ts:16`，CLI 实现在 `src/index.ts:383`）。你的 Agent 在工具执行中途可以停下来问用户一句话。
+**对你的直接含义**：`A:\ai_agent` 现在有一个非常接近的机制——`requestHuman`（`src/core/types.ts`，CLI 实现在 `src/index.ts`）。你的 Agent 在工具执行中途可以停下来问用户一句话。
 
 **但这两者有个本质差别**：你的 `requestHuman` 是**同步阻塞**的、**只面向本地终端用户**的、**活在一次工具调用里面**。A2A 的 `INPUT_REQUIRED` 是**异步的、可跨进程跨网络的、把"等"变成了一个持久化的状态**。
 
@@ -1215,7 +1159,7 @@ A2A 定义了一组语义化的错误类型。**⚠️ v1.0 变更**：错误体
 
 ## 9.3 一条实践建议
 
-你现在的错误处理方式是把异常压成 `{"error": "..."}` 字符串（`src/core/registry.ts:87-96`）：
+你现在的错误处理方式是把异常压成 `{"error": "..."}` 字符串（`src/core/registry.ts`）：
 
 ```ts
 } catch (error) {
@@ -1425,107 +1369,75 @@ data: {"task": {"id": "task-9f8e7d", "contextId": "ctx-abc123",
 
 服务端会生成一个新 task（比如 `task-1a2b3c`）**并复用产物名 `report.md`** —— 你的客户端就靠"名字相同"知道这是同一个文档的新版本（第 5.4 节）。
 
-## 全流程回看
+## 全流程回看：协议与本地运行时之间还差什么
 
-| 步骤 | 用了哪个概念 | 对应你代码里的什么 |
+上面的报文是 A2A 交互示例，当前仓库尚未提供这些端点。可以复用本地能力，但不能直接一对一改名：
+
+| A2A 责任 | 当前可复用的基础 | 仍需实现 |
 |---|---|---|
-| ① 发现 | Agent Card | 无（要新增） |
-| ② 认证 | `securitySchemes` + 带外 OAuth | 无（要新增） |
-| ③ 发消息 | JSON-RPC `SendStreamingMessage` | `Agent.run()` 的输入侧 |
-| ④ 建流 | SSE + `text/event-stream` | `AgentEventBus` 的订阅侧 |
-| ⑤ Task | `Task` + `taskId`/`contextId` | `AgentResult`（要先投影，见评估文档 2.1） |
-| ⑥ 状态 | `TaskStatusUpdateEvent` | `step` 事件（`events.ts:26-28`） |
-| ⑦ 产物 | `TaskArtifactUpdateEvent` + `append` | 工具执行结果（要挑出"交付物"） |
-| ⑧ 要信息 | `TASK_STATE_INPUT_REQUIRED` | `requestHuman`（`types.ts:16`）—— 但语义要改造成异步 |
-| ⑨ 续话 | `taskId` + `contextId` | `SessionStore` 的续聊（`session_store.ts`） |
-| ⑩ 完成 | `TASK_STATE_COMPLETED` + `artifacts` | `result.finalAnswer` + `success` |
-| ⑪ 迭代 | **新 Task** + `referenceTaskIds` | 无（要新增） |
+| 能力发现与认证 | 宿主定义的只读能力边界 | Agent Card、可信身份、鉴权 |
+| 接收消息并启动工作 | `TeamCoordinator` / `Agent.run()` | 输入校验、授权与消息到目标的转换 |
+| Task 查询与生命周期 | 本地任务账本、团队运行记录 | 对外 Task 存储、访问控制与恢复语义 |
+| 进度 | `team_task`、`team_review` 等团队事件 | 公开事件投影、订阅与重连 |
+| Artifact | 提交中的交付内容与最终答复 | 按许可挑选、脱敏并发布产物 |
+| 需要输入/授权 | 单 Agent 的交互机制可作参考 | 团队模式尚无暂停后续接通道 |
+| 完成 | `TeamReport.status` 与 `reviewStatus` | 按服务契约决定对外终态，不能只看 `success` |
+| 迭代 | 固定契约下最多两轮定向补查 | 与远端新 Task、上下文和引用的关联 |
 
-**看最后一列**：你会发现左边（A2A 概念）和中间（你已有的东西）几乎是**一对一**的。这就是 `docs/A2A适配性评估.md` 说"缺的是加一层，不是重写"的具体含义。
-
-> 自查：第 ⑪ 步为什么不能往老 task 发消息？
+`answered` 表示本轮满足本地交付流程，**不等于独立验收的 `verified`**。A2A 的 `COMPLETED` 也不证明内容真实。模型复核可以发现问题，不能替代运行测试、核对原始证据或实际验收。
 
 ---
 
-# 第 11 章 三个你自己能跑的小观察
+# 第 11 章 四个可操作的小观察
 
-这三个观察只需要 `curl`（或者你习惯用 PowerShell 的 `Invoke-WebRequest`）和一个公开的 A2A Agent。**目的是让你亲眼看到本文讲的东西，而不是只读文字。**
+## 观察 0：先运行已有的本地团队
 
-> ⚠️ **先说清楚**：A2A 生态还在早期，公开可访问的 Agent 不多且可能变动。如果下面的地址失效了，去看 [a2a-samples](https://github.com/a2aproject/a2a-samples) 里的示例，本地起一个（需要 Python）。**本文不保证任何第三方地址长期可用——跑之前先确认。**
+在仓库根目录按 [子 Agent 运行时](子Agent运行时.md) 配好模型和工具后执行：
 
-## 观察 1：看一份真实的 Agent Card
-
-```bash
-curl -s https://example.com/.well-known/agent-card.json | head -50
+```powershell
+bun run team "检查登录流程，给出风险、证据和待确认项"
 ```
 
-**你要重点看三样**：
+这会调用所配置的模型服务并消耗额度。当前子 Agent 只有只读业务能力，不能把“提出修改方案”当作“已修改文件”。
 
-1. `supportedInterfaces` 里 `protocolBinding` 是什么值（`JSONRPC` / `HTTP+JSON` / `GRPC`）
-2. `capabilities` 里 `streaming` / `pushNotifications` 是 true 还是 false
-3. `skills` 里每个 skill 的 `id` 和 `inputModes` / `outputModes`
+查看 `.agent-sessions/teams/<runId>/result.json` 与 `events.jsonl`，关注：
 
-**然后问自己**：如果我要调它，我该往哪个 URL 发、用什么方法、发什么 MIME 类型？**这三个问题的答案全在名片里**——这就是"发现"的价值。
+1. 计划是否包含 `deliverables`、`checks`、`dependsOn`。
+2. 提交的证据与检查项是否关联，复核是否明确指出缺口。
+3. 补查是否重跑相关任务及其下游，旧尝试是否仍在报告中。
+4. `reviewStatus`、`reworkRounds` 与最终 `status` 是否一致。
 
-## 观察 2：看清一条 SSE 流长什么样
+格式修复、复核重试、模型选择和预算配置见运行时文档；它们不意味着实现了 A2A。重复命令会新建团队运行，不会恢复旧运行。
 
-对着一个支持流式的 Agent（或本地示例）发：
+## 观察 1：读取一个真实服务的 Agent Card
 
-```bash
-curl -N -X POST https://<agent>/a2a/v1 \
-  -H "Content-Type: application/a2a+json" \
-  -H "Authorization: Bearer <token>" \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": "1",
-    "method": "SendStreamingMessage",
-    "params": {
-      "message": {
-        "role": "ROLE_USER",
-        "messageId": "msg-1",
-        "parts": [{"text": "写一份 200 字的产品介绍"}]
-      }
-    }
-  }'
-```
-
-`-N` 是关掉 curl 的缓冲，让你能**实时**看到 `data:` 一行行冒出来。
-
-**你要重点确认四件事**：
-
-1. 响应头是不是 `Content-Type: text/event-stream`
-2. **第一个事件是不是 `task`**（规范硬要求）
-3. 状态更新的 JSON 里**是不是有 `statusUpdate` 字段**（v1.0 靠字段名判别，没有 `kind` 了）
-4. **流是不是在终态时关闭的**
-
-**如果你看到 `data:` 里出现了 `"kind": "status-update"`，或者 `"final": true`** —— 恭喜你，你碰到了一个 **v0.3（或更早）的实现**。这两个字段在 v1.0 都被**删掉了**：判别改用 JSON 成员名（看是 `statusUpdate` 还是 `artifactUpdate`），流结束改用**连接关闭**表示。这正是第 4/6/7/8 节反复提醒的版本陷阱。
-
-## 观察 3：感受"终态不可复活"
-
-做完观察 2 后，拿那个已经 `COMPLETED` 的 `taskId` 再发一条消息：
+以下地址是占位符。先启动与本文版本匹配的 [官方样例](https://github.com/a2aproject/a2a-samples)，或选定你有权访问的服务，再替换域名：
 
 ```bash
-curl -X POST https://<agent>/a2a/v1 \
-  -H "Content-Type: application/a2a+json" \
-  -H "Authorization: Bearer <token>" \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": "2",
-    "method": "SendMessage",
-    "params": {
-      "message": {
-        "taskId": "<刚才那个已完成的 taskId>",
-        "role": "ROLE_USER",
-        "messageId": "msg-2",
-        "parts": [{"text": "再改改"}]
-      }
-    }
-  }'
+curl -s 'https://<服务域名>/.well-known/agent-card.json'
 ```
 
-**预期**：得到一个 JSON-RPC 错误，`code` 是 **`-32004`**（`UnsupportedOperationError`）。
+检查 `supportedInterfaces`、能力、输入输出格式和认证要求。实际请求发到所选接口的 URL，不能自行假设存在 `/a2a/v1`。Card 的声明还需由调用结果验证。
 
-**这个观察的价值**：你亲身验证了「Task 终态不可复活」不是文档里的一句空话，而是**协议强制、有专门错误码的行为**。也顺手让你看到了一次真实的 A2A 错误报文长什么样——比读十遍错误表都管用。
+## 观察 2：查看 SSE 流
+
+以下为 Bash 示例；PowerShell 可使用 `curl.exe` 配合请求文件，避免 shell 引号差异。认证头按目标服务要求添加。
+
+```bash
+curl -N '<从Card选择的JSONRPC接口URL>' \
+  -H 'Content-Type: application/json' \
+  -H 'A2A-Version: 1.0' \
+  -H 'Accept: text/event-stream' \
+  --data '{"jsonrpc":"2.0","id":"demo-1","method":"SendStreamingMessage","params":{"message":{"messageId":"demo-message-1","role":"ROLE_USER","parts":[{"text":"给出一份简短报告"}]}}}'
+```
+
+观察 JSON-RPC 包装里的 `result`：服务可能直接给 Message；采用 Task 的响应会涉及任务快照、状态与产物事件。流断开时不能据此宣布任务完成，应结合任务状态判断。报文规则参考 [A2A 规范](https://a2a-protocol.org/latest/specification/)。
+
+## 观察 3：区分继续任务与再次委派
+
+对一个已经终态的 Task 再提交工作，不能把它复活；新工作需要新 Task，并按需要关联原上下文和引用。
+
+同理，本地 `round=1` 是某项契约的新执行尝试，不是把上一次已经结束的远端 Task 改回 `WORKING`。本地逻辑任务 ID 可保持不变，远端任务 ID 则应分别记录。
 
 ---
 
@@ -1534,7 +1446,7 @@ curl -X POST https://<agent>/a2a/v1 \
 先自己答，再看后面的答案。
 
 1. A2A 解决的核心问题和 MCP 有什么不同？用一句话说。
-2. 把远端 Agent 包成 MCP 工具，最要紧的那个问题是什么（不是"多轮"和"进度"）？
+2. 本项目怎样启动子 Agent？接入 A2A 是否必须先把子 Agent 包装成工具？
 3. A2A 的三个角色分别是什么？"User" 只能是人类吗？
 4. 同一个 Agent 能不能既是 A2A Client 又是 A2A Server？
 5. 官方用哪两个词区分 A2A 和 MCP 的连接方向？各是什么意思？
@@ -1558,7 +1470,7 @@ curl -X POST https://<agent>/a2a/v1 \
 
 **1.** MCP 让一个 Agent 能"用"工具和数据（竖着往下连，给单个 Agent 增加深度）；A2A 让 Agent 之间能"互相找人"协作（横着往旁边连，给系统增加广度）。
 
-**2.** **把对方的输出直接灌进了你的上下文。** 工具返回的内容会进你的消息历史，而你没法控制另一个 Agent 会说什么——它可能被注入、可能有自己的目标。A2A 用 Opaque Execution 原则划清了这条边界。
+**2.** `TeamCoordinator` 和 `AgentScheduler` 通过 `ChildFactory` 直接创建子运行。A2A 可以在这个运行时边界接入，不需要工具包装。无论哪种调用方式，都要控制输入输出、权限和不可信数据。
 
 **3.** User（用户，**可以是人也可以是自动化服务**）、A2A Client / Client Agent（发起请求的一方）、A2A Server / Remote Agent（提供能力的一方，对客户端是不透明的黑盒）。
 
@@ -1576,25 +1488,25 @@ curl -X POST https://<agent>/a2a/v1 \
 
 **10.** **`Task` 或 `Message`。** 判断标准：**这件事结束后还需要记住状态吗？** 需要（长时/多轮/要产出物）→ `Task`；不需要（一问一答）→ `Message`。
 
-**11.** **Hybrid（混合）**：用 `Message` 协商"要干什么"，确定要动手了再开 `Task`。**为什么适合你**：你的 Agent 本来就有"判断这个任务要不要调工具"的能力，这个判断时刻恰好就是从 Message 升级到 Task 的自然分界点。
+**11.** 如果对外暴露当前团队分析流程，Task 模式更利于表达进度和最终交付；简单问答也可直接返回 Message。选择取决于服务契约，不取决于内部是否调用工具。当前项目还没有这个 A2A 服务端。
 
 **12.** **不能。** 规范：Task 到达终态（completed / canceled / rejected / failed）后**不可重启**。想改就开**新 Task**，用**同一个 `contextId`**，并用 **`referenceTaskIds`** 指向老任务。硬要往终态 Task 发消息会得到 `-32004 UnsupportedOperationError`。
 
 **13.** `contextId` 是**归组**用的（把一串相关的 Task/Message 串成一个会话），`taskId` 标识**单个**工作单元。**一个 `contextId` 下可以有多个 `taskId`**（甚至可以并行跑，"订机票 + 订酒店 + 订雪地摩托"就在同一个 context 里）。反向不成立。
 
-**14.** `text`（文本）、`raw`（内联二进制）、`url`（指向外部文件的 URI）、`data`（结构化 JSON）。**v1.0 把 v0.3 的四种 Part 子类型（`TextPart`/`FilePart`/`DataPart` + `FileWithBytes`/`FileWithUri`）合并成一个统一的 `Part`**，直接用这四个字段。这是 v1.0 最大的破坏性变更。
+**14.** `text`、`raw`、`url`、`data`。v0.3 的 TextPart、FilePart、DataPart 及文件内容结构在 v1.0 合并为统一 Part；四种内容形式不等于旧版有四个 Part 子类型。
 
 **15.** 差别在**语义角色**，不在内容形式。`Message.parts` 是"这一轮说的话"，`Artifact.parts` 是"这次任务的交付物"。Artifact 还有 `artifactId` 和 `name`——**`name` 在迭代场景里是关键**：同一产物的新版本要复用同一个 `name`，客户端靠它认出版本关系。
 
-**16.** 轮询（`GetTask`，简单可靠，不实时）、SSE 流式（实时进度和中间产物，需要连接常驻）、推送通知（webhook，适合超长任务和会断线的客户端）。**payload 格式完全一样**——都是 `StreamResponse`，含 `task` / `message` / `statusUpdate` / `artifactUpdate` 四选一。所以"处理一条更新"的代码可以三种模式共用。
+**16.** 轮询适合简单查询，SSE 适合持续观察，webhook 适合异步通知。它们共享任务语义，但响应包装不能一概而论：GetTask 返回 Task，流式操作使用 StreamResponse；外层还取决于 JSON-RPC、REST 或 gRPC 绑定。应在适配层统一成内部事件。
 
 **17.** **必须是 `Task` 对象。** 如果返回的是 `Message`，那么流里**必须恰好有一个** Message 然后立刻关闭。**违反会被判为 `-32006 InvalidAgentResponseError`**（混用模式、发多个 Message、在 Task 前发状态更新事件，都是硬错误）。
 
-**18.** **不是错误。** HTTP 是 200，Task 是活的，只是挂起了。它和同步询问的本质差别：`requestHuman`（你的 `src/core/types.ts:16`）是**同步阻塞**的、只面向**本地终端**的、活在**一次工具调用内部**；`INPUT_REQUIRED` 是**异步持久化的状态**，可跨进程跨网络，把"等"变成了一个有 ID、可查询、可被通知的状态。
+**18.** 它是任务需要补充输入的状态，不是协议错误。与某个本地回调不同，它提供跨网络可表达的生命周期语义；持久化和恢复仍由实现负责。当前团队模式不转接追问，不能仅靠返回这个枚举就获得暂停续接能力。
 
 **19.** 三条 MUST：**必须用一个 Task 来跟踪**这个操作；**必须**把状态转到 `TASK_STATE_AUTH_REQUIRED`；**必须**在 TaskStatus 的 message 里解释需要什么授权（除非已带外协商）。规范明确：**进入这个状态本身不构成对任何操作的授权**（`MUST NOT treat ... as authorization`）——授权的范围/表示/有效期/撤销语义协议一概不管，由实现、签发方或扩展定义。
 
-**20.** 因为它们的**归责方不同**。`-32006` 表达的是"**服务端实现有问题**"——它返回了不符合规范的东西，是它的锅，所以映射 500（服务端错误）。而其他错误都是"客户端请求有问题"，映射 400。这个区分在排查时有直接价值：**收到 500 是对面的锅，收到 400 是你的锅。**
+**20.** InvalidAgentResponseError 表示响应不符合协议，应重点检查服务端或中间适配层。HTTP 状态和协议错误类型一起用于诊断，不能把所有 400 简化为用户责任、所有 500 简化为对端责任。
 
 ---
 
@@ -1616,7 +1528,7 @@ curl -X POST https://<agent>/a2a/v1 \
 | 我要评估风险、看别人踩过的坑 | 第 11 章 |
 | 我要看协议的演进史与未来走向 | 第 12 章 |
 
-**另外强烈建议先读 `docs/A2A适配性评估.md`**——它把"你现在的代码缺什么、缺在哪一层、该按什么顺序补"讲清楚了。进阶篇是"怎么做"，评估文档是"你离能做什么还差几步"。
+先读 [子 Agent 运行时](子Agent运行时.md) 了解已经实现的行为，再读进阶篇第 1、6、7 章了解协议接入。`A2A适配性评估.md` 是较早阶段的评估，其子 Agent 接入路线不再代表当前实现。
 
 ---
 
@@ -1624,8 +1536,8 @@ curl -X POST https://<agent>/a2a/v1 \
 
 - [A2A 协议规范 v1.0](https://a2a-protocol.org/latest/specification/) —— 本文所有字段名、枚举值、错误码的原始出处
 - [A2A 官方文档索引 llms.txt](https://a2a-protocol.org/llms.txt) —— 官方维护的文档/速查/全文索引入口，写代码时比翻站点快
-- [A2A Protocol Definition（规范 proto）](https://github.com/a2aproject/A2A/blob/main/specification/a2a.proto) —— **规范性唯一事实来源**（`docs/specification.md` 会引用它；JSON Schema 只是构建时生成的非规范产物）
-- [A2A CHANGELOG](https://github.com/a2aproject/A2A/blob/main/CHANGELOG.md) —— 各版本的准确发布日期与破坏性变更清单
+- [A2A v1.0.1 proto](https://github.com/a2aproject/A2A/blob/v1.0.1/specification/a2a.proto) —— 固定版本数据对象和请求响应定义；行为要求还需结合规范正文
+- [A2A CHANGELOG](https://github.com/a2aproject/A2A/blob/v1.0.1/CHANGELOG.md) —— 各版本的准确发布日期与破坏性变更清单
 - [What is A2A?](https://a2a-protocol.org/latest/topics/what-is-a2a/) —— 设计原则、请求生命周期
 - [Core Concepts](https://a2a-protocol.org/latest/topics/key-concepts/) —— 角色、Part 结构、Artifact
 - [Life of a Task](https://a2a-protocol.org/latest/topics/life-of-a-task/) —— 任务生命周期、迭代、产物版本
