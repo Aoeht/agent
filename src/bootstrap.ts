@@ -226,13 +226,13 @@ export async function createAgentStack(options: AgentStackOptions = {}): Promise
   const memoryStore = new MemoryStore({ dir: resolveMemoryDir() });
   const memoryCount = await memoryStore.active().then((entries) => entries.length, () => 0);
   console.log(`🧠 ${prefix}跨会话记忆: ${memoryCount} 条（${memoryStore.dir}）`);
-  // 情景检索的 embedding 客户端在此解析一次：未配置 EMBEDDING_MODEL 静默停用，
-  // 配置错误（缺地址/Key）当面告警但不阻塞启动
+  // 情景检索的 embedding 客户端在此解析一次：未配置时保留 BM25 分块召回，
+  // 配置错误（缺地址/Key）当面告警并降级，不阻塞启动
   let recallEmbeddings: EmbeddingClient | undefined;
   try {
     recallEmbeddings = createEmbeddingClientFromEnv();
   } catch (error) {
-    console.warn(`⚠️ ${prefix}跨会话情景检索停用: ${error instanceof Error ? error.message : error}`);
+    console.warn(`⚠️ ${prefix}跨会话情景检索降级为关键词: ${error instanceof Error ? error.message : error}`);
   }
   const memoryRecall = new MemoryRecall({
     sessionDir: resolveSessionDir(),
@@ -248,7 +248,7 @@ export async function createAgentStack(options: AgentStackOptions = {}): Promise
     cacheDir: memoryStore.dir,
   });
   console.log(
-    `🔍 ${prefix}跨会话情景检索: ${recallEmbeddings ? `已启用（${recallEmbeddings.model}）` : "停用（未配置 EMBEDDING_MODEL）"}`
+    `🔍 ${prefix}跨会话情景检索: ${recallEmbeddings ? `分块混合 BM25 + 向量（${recallEmbeddings.model}）` : "分块关键词 BM25（无向量客户端）"}`
   );
   console.log(
     `🤝 ${prefix}子代理委派: ${config.delegateEnabled ? "已启用（delegate_task）" : "已关闭（AGENT_DELEGATE）"}`

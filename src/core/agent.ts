@@ -128,8 +128,8 @@ interface AgentConfig {
    */
   memoryStore?: MemoryStore;
   /**
-   * 跨会话情景记忆检索：按当前用户问题从历史会话的【长期摘要】里向量召回相关经验，
-   * 注入为钉住前缀。embedding 未配置或无命中时自动不注入；缺省不启用。
+   * 跨会话情景记忆检索：按当前用户问题从历史会话的【长期摘要】里分块混合召回，
+   * 注入为钉住前缀。embedding 未配置时使用 BM25，无命中时不注入；缺省不启用。
    */
   memoryRecall?: MemoryRecall;
   /**
@@ -782,7 +782,7 @@ export class Agent {
       }
     }
     // 跨会话情景检索：按本轮问题从历史会话的长期摘要里召回相关经验（排除当前会话自身，
-    // 它的摘要在 longTermBlock 里）。命中集随问题变化，但体量小（top-3 × 600 字符），
+    // 它的摘要在 longTermBlock 里）。按章节分块并混合检索，默认最多 3 个 500 字符片段，
     // 与记忆块同段注入，前缀缓存失效范围仍局部
     let recallBlock: Message[] = [];
     if (this.config.memoryRecall) {
@@ -799,7 +799,7 @@ export class Agent {
           ];
         }
       } catch (error) {
-        // 检索失败（embedding 接口异常等）不拦 run：本轮不带情景记忆继续
+        // 读取/检索失败不拦 run；向量接口异常已由 MemoryRecall 内部降级为关键词检索
         this.events.emit("compact", {
           action: "memory_failed",
           detail: `跨会话情景检索失败：${error instanceof Error ? error.message : error}`,
