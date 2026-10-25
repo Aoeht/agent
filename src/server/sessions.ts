@@ -190,13 +190,13 @@ export class SessionManager {
   }
 
   /**
-   * 应用会话级配置（模型/温度/迭代上限/思考程度）。模型切换与 REPL /model 同语义：
-   * agent.setModel + 落盘 recordModel，续聊自动恢复；其余仅内存态。
+   * 应用会话级配置（模型/摘要模型/温度/迭代上限/思考程度）。模型与摘要模型切换会落盘
+   * （recordModel / recordSummaryModel），续聊自动恢复；温度、迭代上限与思考程度仅内存态。
    * 成功后广播 session_config（含当前生效的全量值与该模型的上下文窗口）。
    */
   async applySessionConfig(
     sessionId: string,
-    patch: { model?: string; temperature?: number; maxIterations?: number; thinkingEffort?: ThinkingEffort }
+    patch: { model?: string; summaryModel?: string; temperature?: number; maxIterations?: number; thinkingEffort?: ThinkingEffort }
   ): Promise<SessionConfigEvent> {
     const entry = this.entry(sessionId);
     if (entry.controller !== undefined || entry.queue.length > 0 || entry.configuring) throw new Error("当前会话还有任务在运行或排队");
@@ -208,6 +208,12 @@ export class SessionManager {
         await entry.store.recordModel(patch.model.trim());
         agent.setModel(patch.model.trim());
       }
+      if (patch.summaryModel !== undefined && patch.summaryModel.trim() !== "" &&
+          patch.summaryModel.trim() !== agent.summaryModel) {
+        const next = patch.summaryModel.trim();
+        await entry.store.recordSummaryModel(next);
+        agent.setSummaryModel(next);
+      }
       if (patch.temperature !== undefined) agent.setTemperature(patch.temperature);
       if (patch.maxIterations !== undefined) agent.setMaxIterations(patch.maxIterations);
       if (patch.thinkingEffort !== undefined) agent.setThinkingEffort(patch.thinkingEffort);
@@ -218,6 +224,7 @@ export class SessionManager {
         configRevision: entry.configRevision,
         model: agent.model,
         contextWindow: contextWindowFor(agent.model),
+        summaryModel: agent.summaryModel,
         temperature: agent.temperature,
         maxIterations: agent.maxIterations,
         thinkingEffort: agent.thinkingEffort,
@@ -430,7 +437,8 @@ export class SessionManager {
       type: "hello",
       model,
       configRevision: entry.configRevision,
-      summaryModel: status.summaryModel,
+      // hello 声明的是本会话生效的摘要模型（会话级覆盖优先，回退服务器默认）
+      summaryModel: agent.summaryModel,
       sandbox: status.sandbox,
       sandboxRoot: this.options.runtime.sandboxRoot,
       contextWindow: contextWindowFor(model),
@@ -511,7 +519,8 @@ export class SessionManager {
       maxHistoryTurns: config.maxHistoryTurns,
       budget: config.budget,
       sessionStore: entry.store,
-      summaryModel: config.summaryModel,
+      // 摘要模型会话级恢复：会话里记录过就用记录，否则服务器默认
+      summaryModel: startup.summaryModel ?? config.summaryModel,
       ...(this.options.runtime.untrustedContext !== undefined
         ? { untrustedContext: this.options.runtime.untrustedContext }
         : {}),

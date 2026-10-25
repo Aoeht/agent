@@ -109,6 +109,12 @@ export class ContextManager {
     if (maxTokens !== undefined) this.config.maxTokens = maxTokens;
   }
 
+  /** 会话级切换摘要模型（压缩/折叠调用）：config.summaryModel 每次请求时现读，改完即生效 */
+  setSummaryModel(modelName: string): void {
+    const trimmed = modelName.trim();
+    if (trimmed !== "") this.config.summaryModel = trimmed;
+  }
+
   /**
    * 设置钉住前缀（跨 run 长期摘要块）：它在每次表示里都排在最前、永不折叠也不进摘要。
    * 每次 run 都要重新设置（reset 会清空），传空数组表示本 run 没有。

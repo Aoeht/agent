@@ -345,7 +345,7 @@ export class Agent {
       modelName: this.config.model,
       maxTokens: this.config.contextWindow ?? contextWindowFor(this.config.model),
       reserveTokens: 4096,
-      summaryModel: this.config.summaryModel ?? this.config.model,
+      summaryModel: this.summaryModel,
       // 同一个 client 透传给压缩器做摘要调用
       client: this.client,
     });
@@ -404,6 +404,25 @@ export class Agent {
   /** 调思考程度档位：只认统一枚举字面量，其余忽略 */
   setThinkingEffort(effort: ThinkingEffort): void {
     this.config.thinkingEffort = effort;
+  }
+
+  /**
+   * 会话级摘要模型覆盖（UI/宿主可经 setSummaryModel 调整）：作用范围与服务器默认
+   * summaryModel 一致——run 内滚动压缩、跨 run 长期摘要 fold、会话命名、记忆提取。
+   * undefined = 回退构造时的 config.summaryModel ?? 主模型；落盘由调用方负责。
+   */
+  private summaryModelOverride: string | undefined = undefined;
+
+  /** 当前生效的摘要模型（覆盖值优先，否则服务器默认，最后主模型兜底） */
+  get summaryModel(): string {
+    return this.summaryModelOverride ?? this.config.summaryModel ?? this.config.model;
+  }
+
+  setSummaryModel(model: string | undefined): void {
+    const next = model?.trim();
+    if (next !== undefined && next === "") return;
+    this.summaryModelOverride = next;
+    this.contextManager.setSummaryModel(this.summaryModel);
   }
 
   /** 已提示过的思考档位 note，防止 ReAct 每轮重复刷屏 */
@@ -481,7 +500,7 @@ export class Agent {
     try {
       const completion = await this.completeOnce(
         {
-          model: this.config.summaryModel ?? this.config.model,
+          model: this.summaryModel,
           temperature: 0,
           messages: [
             { role: "system", content: SESSION_NAME_PROMPT },
@@ -723,6 +742,14 @@ export class Agent {
     const sessionModel = this.modelOverride ?? stored?.model;
     if (sessionModel !== undefined && sessionModel !== this.config.model) {
       this.applyModel(sessionModel);
+      // 主模型变了，摘要模型的"跟随主模型"兜底跟着变（有会话级覆盖时这条是无操作）
+      this.contextManager.setSummaryModel(this.summaryModel);
+    }
+    // 摘要模型同样按会话恢复：UI/宿主显式 setSummaryModel 过的以进程内选择为准；
+    // 存量记录里没有该元记录的会话维持服务器默认，不写入任何东西
+    const sessionSummaryModel = this.summaryModelOverride ?? stored?.summaryModel;
+    if (sessionSummaryModel !== undefined) {
+      this.setSummaryModel(sessionSummaryModel);
     }
     // 每请求固定开销（工具 schema）计入压缩阈值判断；放在模型恢复之后，按当前模型估算
     this.contextManager.setRequestOverheadTokens(this.estimateToolsOverhead());
@@ -1492,6 +1519,7 @@ export class Agent {
         sourceSessionId: this.config.sessionStore
           ? path.basename(this.config.sessionStore.filePath, ".jsonl")
           : undefined,
+        summaryModel: this.summaryModel,
         signal,
       });
       if (report.added > 0 || report.superseded > 0) {
@@ -1539,7 +1567,7 @@ export class Agent {
         },
       ];
       const { content: text, usage } = await requestSummaryWithRetry({
-        models: [this.config.summaryModel ?? this.config.model, this.config.model],
+        models: [this.summaryModel, this.config.model],
         signal,
         call: async (model) => {
           // 2000：8 段摘要按 1200 输出时经常在「当前进展」处被截断，

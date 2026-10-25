@@ -56,6 +56,8 @@ export interface SessionUIState {
   /** 会话当前生效的模型（hello / session_config 更新） */
   model?: string;
   configRevision?: number;
+  /** 会话当前生效的摘要模型（历史压缩/长期摘要/会话命名/记忆提取共用） */
+  summaryModel?: string;
   temperature?: number;
   maxIterations?: number;
   /** 思考程度档位（hello / session_config 更新；default 跟随厂商默认） */
@@ -179,6 +181,7 @@ export function applyEvent(s: SessionUIState, e: ServerEvent): SessionUIState {
           model: e.model,
           configRevision: e.configRevision,
           contextWindow: e.contextWindow ?? s.contextWindow,
+          summaryModel: e.summaryModel ?? s.summaryModel,
           temperature: e.temperature ?? s.temperature,
           maxIterations: e.maxIterations ?? s.maxIterations,
           thinkingEffort: e.thinkingEffort ?? s.thinkingEffort,
@@ -191,6 +194,7 @@ export function applyEvent(s: SessionUIState, e: ServerEvent): SessionUIState {
         model: e.model,
         configRevision: e.configRevision,
         contextWindow: e.contextWindow ?? s.contextWindow,
+        summaryModel: e.summaryModel ?? s.summaryModel,
         temperature: e.temperature ?? s.temperature,
         maxIterations: e.maxIterations ?? s.maxIterations,
         thinkingEffort: e.thinkingEffort ?? s.thinkingEffort,

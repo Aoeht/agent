@@ -2,11 +2,13 @@
 import { useEffect, useRef, useState } from "react";
 import type { ModelProbeStatus, ThinkingEffort } from "@protocol";
 import type { SessionConfigInput } from "../lib/transport";
-import { visibleModelOptions } from "../lib/modelOptions";
+import { firstAvailableModel, visibleModelOptions } from "../lib/modelOptions";
 import { useMediaQuery } from "../lib/useMediaQuery";
 
 export interface ComposerConfig {
   model?: string;
+  /** 会话级摘要模型（历史压缩/长期摘要/会话命名/记忆提取共用），undefined = 跟随服务器默认 */
+  summaryModel?: string;
   temperature?: number;
   maxIterations?: number;
   thinkingEffort?: ThinkingEffort;
@@ -65,8 +67,11 @@ export function Composer({
   const statusMap = new Map((modelStatus ?? []).map((probe) => [probe.model, probe]));
   const [text, setText] = useState("");
   const [panelOpen, setPanelOpen] = useState(false);
-  const [draft, setDraft] = useState<{ model: string; temperature: string; maxIterations: string; thinkingEffort: string }>({
+  const [draft, setDraft] = useState<{
+    model: string; summaryModel: string; temperature: string; maxIterations: string; thinkingEffort: string;
+  }>({
     model: "",
+    summaryModel: "",
     temperature: "",
     maxIterations: "",
     thinkingEffort: "default",
@@ -88,11 +93,14 @@ export function Composer({
     draftDirty.current.clear();
   }, [sessionId]);
 
-  // 打开面板时用当前生效值填充草稿
+  // 打开面板时用当前生效值填充草稿；摘要模型未知时落到第一个可用项（未动过就不会被应用）
   useEffect(() => {
     if (panelOpen) {
       setDraft(current => ({
         model: draftDirty.current.has("model") ? current.model : config.model ?? models[0] ?? "",
+        summaryModel: draftDirty.current.has("summaryModel")
+          ? current.summaryModel
+          : config.summaryModel ?? firstAvailableModel(models, modelStatus) ?? "",
         temperature: draftDirty.current.has("temperature") ? current.temperature : String(config.temperature ?? 0.1),
         maxIterations: draftDirty.current.has("maxIterations")
           ? current.maxIterations
@@ -102,7 +110,7 @@ export function Composer({
           : config.thinkingEffort ?? "default",
       }));
     }
-  }, [panelOpen, config.model, config.temperature, config.maxIterations, config.thinkingEffort, models]);
+  }, [panelOpen, config.model, config.summaryModel, config.temperature, config.maxIterations, config.thinkingEffort, models, modelStatus]);
 
   // 点击面板外部关闭
   useEffect(() => {
@@ -130,11 +138,12 @@ export function Composer({
     }
   };
 
-  // 欢迎态（sessionId=null）没有会话可应用配置：只上报草稿，跳过 temperature/maxIterations 未动过的字段
+  // 欢迎态（sessionId=null）没有会话可应用配置：只上报草稿，跳过未动过的字段
   const reportDraftConfig = (next: typeof draft) => {
     if (sessionId !== null || !onDraftConfig) return;
     const payload: SessionConfigInput = {};
     if (draftDirty.current.has("model") && next.model) payload.model = next.model;
+    if (draftDirty.current.has("summaryModel") && next.summaryModel) payload.summaryModel = next.summaryModel;
     const temperature = Number.parseFloat(next.temperature);
     if (draftDirty.current.has("temperature") && Number.isFinite(temperature)) payload.temperature = temperature;
     const maxIterations = next.maxIterations.trim() === "" ? Number.NaN : Number.parseInt(next.maxIterations, 10);
@@ -158,6 +167,10 @@ export function Composer({
     const requestedSession = sessionId;
     const payload: SessionConfigInput = {};
     if (draftDirty.current.has("model") && draft.model && draft.model !== config.model) payload.model = draft.model;
+    if (draftDirty.current.has("summaryModel") && draft.summaryModel &&
+        draft.summaryModel !== (config.summaryModel ?? "")) {
+      payload.summaryModel = draft.summaryModel;
+    }
     const temperature = Number.parseFloat(draft.temperature);
     if (draftDirty.current.has("temperature") && Number.isFinite(temperature) && temperature !== (config.temperature ?? 0.1)) {
       payload.temperature = temperature;
@@ -186,6 +199,34 @@ export function Composer({
     }
   };
 
+  // 思考程度在输入框右下角即时生效：会话态直接下发（失败回显并回退显示），欢迎态进草稿
+  const changeEffort = (value: string) => {
+    const next = { ...draft, thinkingEffort: value };
+    draftDirty.current.add("thinkingEffort");
+    setDraft(next);
+    if (sessionId === null) {
+      reportDraftConfig(next);
+      return;
+    }
+    void (async () => {
+      setApplying(true);
+      setConfigError(null);
+      try {
+        await onApplyConfig({ thinkingEffort: value as ThinkingEffort });
+        draftDirty.current.delete("thinkingEffort"); // 成功后回读 config 值，草稿不再钉住
+      } catch (error) {
+        draftDirty.current.delete("thinkingEffort");
+        setConfigError(`思考程度切换失败：${error instanceof Error ? error.message : String(error)}`);
+      } finally {
+        setApplying(false);
+      }
+    })();
+  };
+  // 展示值：改过未应用成功时钉在草稿值，否则跟会话生效值走
+  const effortValue = draftDirty.current.has("thinkingEffort")
+    ? draft.thinkingEffort
+    : config.thinkingEffort ?? "default";
+
   return (
     <div className="border-t border-cream-300 bg-cream-200/40 px-6 py-4 max-lg:px-3 max-lg:pb-[max(1rem,env(safe-area-inset-bottom))]">
       <div className="relative mx-auto max-w-3xl">
@@ -211,6 +252,29 @@ export function Composer({
                 className="mt-1 w-full rounded-xl border border-cream-300 bg-white/70 px-3 py-2 font-mono text-xs outline-none focus:border-clay-500"
               >
                 {visibleModelOptions(models, modelStatus, draft.model).map((model) => {
+                  const probe = statusMap.get(model);
+                  return (
+                    <option key={model} value={model} title={probe && !probe.ok ? probe.detail : undefined}>
+                      {modelOptionLabel(model, probe) + modelOptionQuotaSuffix(probe)}
+                    </option>
+                  );
+                })}
+              </select>
+            </label>
+            <label className="mt-3 block">
+              <span className="text-xs text-ink-600">摘要模型（历史压缩 / 长期记忆）</span>
+              <select
+                value={draft.summaryModel}
+                disabled={applying}
+                onChange={(e) => {
+                  draftDirty.current.add("summaryModel");
+                  const next = { ...draft, summaryModel: e.target.value };
+                  setDraft(next);
+                  reportDraftConfig(next);
+                }}
+                className="mt-1 w-full rounded-xl border border-cream-300 bg-white/70 px-3 py-2 font-mono text-xs outline-none focus:border-clay-500"
+              >
+                {visibleModelOptions(models, modelStatus, draft.summaryModel || config.summaryModel).map((model) => {
                   const probe = statusMap.get(model);
                   return (
                     <option key={model} value={model} title={probe && !probe.ok ? probe.detail : undefined}>
@@ -257,28 +321,10 @@ export function Composer({
                 />
               </label>
             </div>
-            <label className="mt-3 block">
-              <span className="text-xs text-ink-600">思考程度</span>
-              <select
-                value={draft.thinkingEffort}
-                disabled={applying}
-                onChange={(e) => {
-                  draftDirty.current.add("thinkingEffort");
-                  const next = { ...draft, thinkingEffort: e.target.value };
-                  setDraft(next);
-                  reportDraftConfig(next);
-                }}
-                className="mt-1 w-full rounded-xl border border-cream-300 bg-white/70 px-3 py-2 text-sm outline-none focus:border-clay-500"
-              >
-                {THINKING_EFFORT_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>{option.label}</option>
-                ))}
-              </select>
-            </label>
             <p className="mt-2 text-[11px] leading-4 text-ink-400">
-              模型切换会随会话保存；温度、迭代上限与思考程度仅当前运行有效。迭代上限留空表示不限，由 token / 工具次数预算兜底。
-              思考程度按当前模型映射厂商参数：qwen=enable_thinking+预算、glm=思考开关、deepseek=思考开关+effort，
-              其它厂商或无法生效的组合（如非流式下的 qwen 思考档）自动跳过并在服务端告警。
+              模型与摘要模型的切换会随会话保存；温度、迭代上限仅当前运行有效。迭代上限留空表示不限，由 token / 工具次数预算兜底。
+              摘要模型用于历史压缩、跨会话长期记忆、会话命名与记忆提取，换小模型可省成本。
+              思考程度在输入框右下角，按当前模型映射厂商参数，无法生效的组合自动跳过。
             </p>
             {configError && <p role="alert" className="mt-2 text-xs text-terra-500">{configError}</p>}
             <div className="mt-3 flex justify-end">
@@ -332,6 +378,18 @@ export function Composer({
             disabled={disabled}
             className="max-h-40 min-h-[42px] flex-1 resize-none bg-transparent px-2.5 py-2 text-[15px] max-lg:text-base leading-6 outline-none placeholder:text-ink-400 disabled:opacity-50"
           />
+          {/* 思考程度：输入框右下角的即时档位（会话态改完即下发，欢迎态进随发草稿） */}
+          <select
+            value={effortValue}
+            disabled={disabled || running || applying}
+            onChange={(e) => changeEffort(e.target.value)}
+            title="思考程度：按当前模型映射厂商参数（qwen=enable_thinking+预算、glm=思考开关、deepseek=思考开关+effort），无法生效的组合自动跳过"
+            className="max-w-24 shrink-0 truncate rounded-full bg-cream-200 px-2 py-2 text-xs font-medium text-ink-600 outline-none transition hover:bg-cream-300 disabled:opacity-40"
+          >
+            {THINKING_EFFORT_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
           {running ? (
             <button
               onClick={onCancel}

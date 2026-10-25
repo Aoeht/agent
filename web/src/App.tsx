@@ -100,6 +100,7 @@ export default function App() {
               accountQuota={state.modelAccountQuota}
               config={{
                 model: current.model ?? current.meta?.model,
+                summaryModel: current.summaryModel ?? current.meta?.summaryModel,
                 temperature: current.temperature,
                 maxIterations: current.maxIterations,
                 thinkingEffort: current.thinkingEffort,

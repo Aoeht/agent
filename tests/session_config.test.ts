@@ -106,6 +106,43 @@ test("配置保存失败时保留原生效模型，并允许重新应用", async
   expect((await manager.applySessionConfig("a", { model: "new-model" })).model).toBe("new-model");
 });
 
+test("摘要模型会话级切换：应用即生效并落盘，重启重建 Agent 后恢复", async () => {
+  const { manager, dir } = await fixture();
+  const store = new SessionStore({ dir, sessionId: "a" });
+  const applied = await manager.applySessionConfig("a", { summaryModel: "cheap-summary" });
+  expect(applied.summaryModel).toBe("cheap-summary");
+  expect((await store.load()).summaryModel).toBe("cheap-summary");
+  // hello 反映会话级生效值
+  expect((await hello(manager, "a")).summaryModel).toBe("cheap-summary");
+
+  // 模拟进程重启：丢掉内存里的 Agent，重建时从会话文件恢复摘要模型
+  (manager as any).entries.get("a").agent = undefined;
+  const reborn = await manager.applySessionConfig("a", { temperature: 0.3 });
+  expect(reborn.summaryModel).toBe("cheap-summary");
+
+  // 同值不重复落盘：连续应用两次后文件里只有一条【摘要模型】记录
+  await manager.applySessionConfig("a", { summaryModel: "cheap-summary" });
+  const records = (await store.readAll()).filter((r) => r.role === "user" && typeof r.content === "string" &&
+    (r.content as string).startsWith("【摘要模型】"));
+  expect(records.length).toBe(1);
+});
+
+test("摘要模型覆盖影响会话命名请求的模型选择", async () => {
+  const { manager } = await fixture();
+  await manager.applySessionConfig("a", { summaryModel: "cheap-summary" });
+  const agent = (manager as any).entries.get("a").agent;
+  expect(agent.summaryModel).toBe("cheap-summary");
+  const requests: any[] = [];
+  agent.client = { chat: { completions: { create: async (request: any) => {
+    requests.push(request);
+    return { choices: [{ finish_reason: "stop", message: { content: "测试标题" } }] };
+  } } } };
+  // 会话命名由宿主在 run 后调用（与 sessions.ts 同语义），直呼验证模型选择
+  await agent.summarizeSessionName("帮我想个会话名测试", "回答正文");
+  const naming = requests.find((r) => r.messages?.some((m: any) => m.content?.includes("会话命名器")));
+  expect(naming?.model).toBe("cheap-summary");
+});
+
 test("任务事件每个只转发一次，右栏不会收到重复更新", async () => {
   const { manager } = await fixture();
   await hello(manager, "a");

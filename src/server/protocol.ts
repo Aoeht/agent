@@ -149,12 +149,13 @@ export const ServerEventSchema = z.discriminatedUnion("type", [
       })
       .optional(),
   }),
-  /** 会话级配置变化（模型/温度/迭代上限/思考程度，POST /sessions/:id/config 后广播） */
+  /** 会话级配置变化（模型/摘要模型/温度/迭代上限/思考程度，POST /sessions/:id/config 后广播） */
   z.object({
     type: z.literal("session_config"),
     model: z.string(),
     configRevision: z.number().optional(),
     contextWindow: z.number().int().optional(),
+    summaryModel: z.string().optional(),
     temperature: z.number().optional(),
     maxIterations: z.number().int().optional(),
     thinkingEffort: ThinkingEffortSchema.optional(),

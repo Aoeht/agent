@@ -91,15 +91,16 @@ export class MemoryWriter {
   /**
    * 从一轮工作记录提取并写入记忆。LLM 失败/输出不可解析时抛出（调用方转成
    * memory_failed 事件）；提取出的零条事实是正常结果（大多数轮次就该如此）。
+   * summaryModel：调用方（Agent）的会话级摘要模型覆盖，缺省用构造时的默认。
    */
   async writeFromRun(
     digest: string,
-    opts: { sourceSessionId?: string | undefined; signal?: AbortSignal | undefined } = {}
+    opts: { sourceSessionId?: string | undefined; summaryModel?: string | undefined; signal?: AbortSignal | undefined } = {}
   ): Promise<MemoryWriteReport> {
     const active = await this.store.active();
     const existingIndex = this.store.renderIndex(active) || "（暂无）";
     const input = `现有记忆列表：\n${existingIndex}\n\n本轮工作记录：\n${digest}`;
-    const usage = await this.requestExtraction(input, opts.signal);
+    const usage = await this.requestExtraction(input, opts.signal, opts.summaryModel);
     const facts = this.parseFacts(usage.content).slice(0, this.maxFacts);
     if (facts.length === 0) {
       return { tokens: usage.tokens, added: 0, superseded: 0, skipped: 0 };
@@ -173,7 +174,11 @@ export class MemoryWriter {
     return undefined; // 语义命中的取代需要 LLM 明确指认，不做相似度自动取代（宁漏勿错）
   }
 
-  private async requestExtraction(input: string, signal?: AbortSignal): Promise<{ content: string; tokens: number }> {
+  private async requestExtraction(
+    input: string,
+    signal?: AbortSignal | undefined,
+    summaryModelOverride?: string | undefined
+  ): Promise<{ content: string; tokens: number }> {
     this.client ??= new OpenAI({ maxRetries: 1, timeout: 60_000 });
     const client = this.client;
     const messages = [
@@ -181,7 +186,7 @@ export class MemoryWriter {
       { role: "user" as const, content: input },
     ];
     const result = await requestSummaryWithRetry({
-      models: [this.summaryModel ?? this.model, this.model],
+      models: [summaryModelOverride ?? this.summaryModel ?? this.model, this.model],
       signal,
       call: async (model) => {
         const resp = await client.chat.completions.create(

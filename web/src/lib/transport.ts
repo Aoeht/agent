@@ -9,9 +9,10 @@ import type {
   ThinkingEffort,
 } from "@protocol";
 
-/** 会话级可调配置（模型/温度/迭代上限/思考程度） */
+/** 会话级可调配置（模型/摘要模型/温度/迭代上限/思考程度） */
 export interface SessionConfigInput {
   model?: string;
+  summaryModel?: string;
   temperature?: number;
   maxIterations?: number;
   thinkingEffort?: ThinkingEffort;
