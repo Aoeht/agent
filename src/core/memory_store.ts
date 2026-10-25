@@ -2,6 +2,7 @@
 import { randomBytes } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { Bm25Index } from "../rag/bm25";
 
 /**
  * 跨会话核心记忆（semantic memory）的本地存储。
@@ -55,6 +56,50 @@ export interface MemoryAddInput {
   sourceSessionId?: string;
 }
 
+export const DEFAULT_MEMORY_PAGE_SIZE = 20;
+export const MAX_MEMORY_PAGE_SIZE = 50;
+
+export interface MemoryPageOptions {
+  type?: MemoryType | undefined;
+  offset?: number | undefined;
+  limit?: number | undefined;
+}
+
+export interface MemoryPage<T extends MemoryEntry = MemoryEntry> {
+  entries: T[];
+  /** 类型筛选后（搜索时还需命中关键词）的总条数 */
+  total: number;
+  offset: number;
+  limit: number;
+  nextOffset: number | null;
+}
+
+export interface MemorySearchEntry extends MemoryEntry {
+  score: number;
+}
+
+function pagination(options: MemoryPageOptions): { offset: number; limit: number } {
+  const offset = options.offset ?? 0;
+  const limit = options.limit ?? DEFAULT_MEMORY_PAGE_SIZE;
+  if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("offset 必须为非负安全整数");
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_MEMORY_PAGE_SIZE) {
+    throw new Error(`limit 必须为 1 到 ${MAX_MEMORY_PAGE_SIZE} 的整数`);
+  }
+  if (options.type !== undefined && !isMemoryType(options.type)) throw new Error("无效的记忆类型");
+  return { offset, limit };
+}
+
+function pageOf<T extends MemoryEntry>(entries: T[], offset: number, limit: number): MemoryPage<T> {
+  const page = entries.slice(offset, offset + limit);
+  return {
+    entries: page,
+    total: entries.length,
+    offset,
+    limit,
+    nextOffset: offset + page.length < entries.length ? offset + page.length : null,
+  };
+}
+
 /** 单条记忆正文上限：记忆是事实短句，不是文档；超长说明提取粒度不对，截断兜底 */
 const MAX_TEXT_CHARS = 500;
 
@@ -88,6 +133,24 @@ export class MemoryStore {
   /** 未被取代的生效记忆 */
   async active(): Promise<MemoryEntry[]> {
     return (await this.readRecords()).filter((record) => record.supersededAt === undefined);
+  }
+
+  /** 按写入顺序分页读取全部有效记忆，不受注入索引的 200 条上限影响。 */
+  async readPage(options: MemoryPageOptions = {}): Promise<MemoryPage> {
+    const { offset, limit } = pagination(options);
+    const entries = (await this.active()).filter((entry) => options.type === undefined || entry.type === options.type);
+    return pageOf(entries, offset, limit);
+  }
+
+  /** 本地关键词搜索：按 BM25 相关度排序，同分按 id；每次读取最新有效记录。 */
+  async search(query: string, options: MemoryPageOptions = {}): Promise<MemoryPage<MemorySearchEntry>> {
+    const { offset, limit } = pagination(options);
+    const trimmed = query.trim();
+    if (!trimmed || trimmed.length > 500) throw new Error("query 需要 1 到 500 个字符的关键词");
+    const entries = (await this.active()).filter((entry) => options.type === undefined || entry.type === options.type);
+    const byId = new Map(entries.map((entry) => [entry.id, entry]));
+    const hits = new Bm25Index(entries).search(trimmed);
+    return pageOf(hits.map((hit) => ({ ...byId.get(hit.id)!, score: hit.score })), offset, limit);
   }
 
   /**
@@ -162,7 +225,9 @@ export class MemoryStore {
     }).filter((section) => section !== undefined);
     const overflow = active.length - shown.length;
     const body = sections.join("\n\n");
-    return overflow > 0 ? `${body}\n\n（仅显示前 ${shown.length} 条，其余 ${overflow} 条已省略）` : body;
+    return overflow > 0
+      ? `${body}\n\n（仅显示前 ${shown.length} 条，其余 ${overflow} 条已省略）\n可用 memory action=read offset=${shown.length} 分页读取其余记忆，或 action=search query=关键词 搜索全部有效记忆。`
+      : body;
   }
 
   /** 便捷入口：生效记忆 → 注入索引文本；没有任何记忆时返回空串（调用方据此不注入） */
