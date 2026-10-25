@@ -24,6 +24,9 @@
  *                                  auto（默认，docker 守护进程与镜像都就绪才启用容器，否则显式回退 host）
  *   AGENT_SANDBOX_IMAGE            docker 沙箱镜像（默认 ai-agent-sandbox:latest，构建见 tools/sandbox/Dockerfile）
  *   AGENT_SANDBOX_NET              docker 沙箱网络：none 断网（默认，防外传）/ bridge 显式放开
+ *   AGENT_TOOL_SEARCH              按需加载（Tool Search）：auto（默认，工具 schema 超过模型
+ *                                  上下文窗口 10% 时自动切换）/ on（强制）/ off（关闭）；
+ *                                  切换后每轮只暴露第一方工具 + tool_search + 已激活的 MCP 工具
  *   AGENT_CHECKPOINTS              是否开启回合级回滚检查点（/rewind），"0"/"false" 关闭（默认开启）
  *   AGENT_MEMORY_DIR               跨会话记忆目录（缺省 .agent-memory；记忆条目 memory.jsonl + MEMORY.md 视图）
  *   AGENT_MODEL_PROBE              对话开始时探测候选模型可用性（微型补全），"0"/"false" 关闭（默认开启）
@@ -61,6 +64,8 @@ export interface AgentRunConfig {
   temperature: number;
   /** 思考程度档位：default 跟随厂商默认，off/low/medium/high 按厂商映射（见 utils/thinking_effort.ts） */
   thinkingEffort: ThinkingEffort;
+  /** 按需加载模式：auto 按上下文 10% 阈值自动切换，on 强制，off 关闭（见 core/agent.ts computeToolExposure） */
+  toolSearch: "auto" | "on" | "off";
   maxHistoryTurns: number;
   stream: boolean;
   /** Agent Skill 目录：目录不存在视为没有技能，运行时行为与未开启技能完全一致 */
@@ -106,6 +111,7 @@ export function loadAgentConfig(): AgentRunConfig {
   const maxToolCallsPerName = limitEnv("AGENT_MAX_TOOL_CALLS_PER_NAME", 12);
   // 枚举型环境变量只认列出的字面量，其余一律落回默认值（不猜测、不告警刷屏）
   const sandboxModeRaw = process.env.AGENT_SANDBOX?.trim().toLowerCase();
+  const toolSearchRaw = process.env.AGENT_TOOL_SEARCH?.trim().toLowerCase();
 
   return {
     model: process.env.AGENT_MODEL ?? "glm-5.2",
@@ -114,6 +120,7 @@ export function loadAgentConfig(): AgentRunConfig {
     maxIterations: Math.max(0, intEnv("AGENT_MAX_ITERATIONS", 0)),
     temperature: floatEnv("AGENT_TEMPERATURE", 0.1),
     thinkingEffort: parseThinkingEffort(process.env.AGENT_THINKING_EFFORT),
+    toolSearch: toolSearchRaw === "on" || toolSearchRaw === "off" ? toolSearchRaw : "auto",
     maxHistoryTurns: intEnv("AGENT_MAX_HISTORY_TURNS", 20),
     stream: boolEnv("AGENT_STREAM", true),
     skillsDir: process.env.AGENT_SKILLS_DIR?.trim() || ".agents/skills",

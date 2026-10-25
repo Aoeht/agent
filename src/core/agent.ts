@@ -1,7 +1,8 @@
 // src/core/agent.ts
 import path from "node:path";
 import OpenAI from "openai";
-import { ToolRegistry } from "./registry";
+import { ToolRegistry, isMcpToolName } from "./registry";
+import { TOOL_SEARCH_TOOL_NAME } from "./tool_search";
 import { Message, AgentResult, ToolCall, StepInfo, ToolRuntime, McpPromptRole, PersistedProcessStep } from "./types";
 import { extractSources, renderCitationBlock, bindRagCitationRefs, type Citation } from "./citations";
 import { AgentEventBus } from "./events";
@@ -94,6 +95,13 @@ interface AgentConfig {
    * 压缩摘要、会话命名等辅助调用保持厂商默认（非流式下 qwen 思考档也无法下发）。
    */
   thinkingEffort?: ThinkingEffort;
+  /**
+   * 按需加载（Tool Search）模式：auto = 工具 schema 总量超过模型上下文窗口 10% 时
+   * 自动切换（对齐 Claude Code 的阈值策略，见 computeToolExposure）；on = 强制开启
+   * （测试/极端工具集用）；off = 关闭。切换后每轮只暴露第一方工具 + tool_search +
+   * 已激活的 MCP 工具，模型经 tool_search 检索解锁其余工具。
+   */
+  toolSearch?: "auto" | "on" | "off";
   /** 单次 run 的硬预算（token / 墙钟 / 工具次数），越线时优雅停止并在结果里记 budgetStopped */
   budget?: RunBudgetLimits;
   /**
@@ -326,6 +334,7 @@ export class Agent {
       maxHistoryTurns: 20,
       temperature: 0.1,
       thinkingEffort: "default",
+      toolSearch: "auto",
       stream: false,
       maxRetries: 2,
       retryBaseDelayMs: 500,
@@ -412,6 +421,38 @@ export class Agent {
       console.warn(`⚠️ 思考程度: ${note}`);
     }
     return extra ? { ...params, ...extra } : params;
+  }
+
+  /**
+   * 上一轮请求是否处于按需加载模式：executeToolCall 用它拦截"调用了未激活 MCP 工具"
+   * 的幻觉调用，把协议教给模型（先 tool_search 再用），而不是放行一个没见过 schema 的调用。
+   */
+  private lastExposureDeferred = false;
+
+  /**
+   * 每轮请求的工具暴露清单。auto 模式下，工具 schema 总量超过模型上下文窗口 10%
+   * （对齐 Claude Code 的自动阈值）才切按需加载——只暴露第一方工具 + 已激活的 MCP
+   * 工具 + tool_search 本身；未触发阈值时剔除 tool_search（此时它无意义）。
+   * 动态增删工具定义会打爆服务端前缀缓存（Manus 的 KV-cache 论据），所以切换以
+   * 「档位」为单位一次完成，不在轮与轮之间渐进裁剪。
+   */
+  private computeToolExposure(): { tools: ReturnType<ToolRegistry["toOpenAITools"]>; deferred: boolean } {
+    const all = this.tools.toOpenAITools();
+    const mode = this.config.toolSearch ?? "auto";
+    if (mode !== "off" && this.tools.has(TOOL_SEARCH_TOOL_NAME)) {
+      const fullTokens = this.tokenCounter.estimateText(JSON.stringify(all), this.config.model);
+      const threshold = Math.floor(
+        (this.config.contextWindow ?? contextWindowFor(this.config.model)) * 0.1
+      );
+      if (mode === "on" || fullTokens > threshold) {
+        const activated = new Set(this.tools.activatedToolList());
+        return {
+          tools: all.filter((tool) => !isMcpToolName(tool.function.name) || activated.has(tool.function.name)),
+          deferred: true,
+        };
+      }
+    }
+    return { tools: all.filter((tool) => tool.function.name !== TOOL_SEARCH_TOOL_NAME), deferred: false };
   }
 
   /** 当前迭代上限（UI/宿主可经 setMaxIterations 调整，只影响后续 run） */
@@ -834,11 +875,13 @@ export class Agent {
 
         // 统一走带重试的调用入口（stream: true 时内部走流式，token 事件实时发布）；
         // API 报上下文超限时强制压缩重试一次
+        const exposure = this.computeToolExposure();
+        this.lastExposureDeferred = exposure.deferred;
         const completion = await this.completeWithOverflowGuard(
           this.withThinkingEffort({
             model: this.config.model,
             messages: [...compressedMessages, ...imageMessages] as any,
-            tools: this.tools.toOpenAITools(),
+            tools: exposure.tools,
             temperature: this.config.temperature,
             // 仅显式关闭时才下发，避免给不支持该参数的 OpenAI 兼容服务端添麻烦
             ...(this.config.parallelToolCalls === false ? { parallel_tool_calls: false } : {}),
@@ -1083,7 +1126,12 @@ export class Agent {
           temperature: this.config.temperature,
         };
         let forcedCompletion = await this.completeWithOverflowGuard(
-          this.withThinkingEffort({ ...forcedParams, tools: this.tools.toOpenAITools(), tool_choice: "none" as const }),
+          this.withThinkingEffort({
+            ...forcedParams,
+            // 收尾与主循环同清单（tool_choice:"none" 下只影响 token 账面）
+            tools: this.computeToolExposure().tools,
+            tool_choice: "none" as const,
+          }),
           runtime,
           messages,
           [...imageMessages]
@@ -1326,7 +1374,8 @@ export class Agent {
 
   /** 每请求消息之外的固定开销：工具 schema 每轮都随请求发送，但 token 估算只看消息，得补上 */
   private estimateToolsOverhead(): number {
-    const tools = this.tools.toOpenAITools();
+    // 用实际暴露清单估算：按需加载模式下只有第一方 + 已激活工具随请求发送
+    const tools = this.computeToolExposure().tools;
     if (tools.length === 0) return 0;
     return this.tokenCounter.estimateText(JSON.stringify(tools), this.config.model) + tools.length * 3;
   }
@@ -1562,6 +1611,16 @@ export class Agent {
     let toolResult: string;
 
     try {
+      // 按需加载守卫：模型只能调当轮 tools 数组里声明过的工具；未激活的 MCP 工具
+      // 即使注册表里有也不放行——把协议教给模型，而不是执行一个它没见过 schema 的调用
+      if (this.lastExposureDeferred && isMcpToolName(toolCall.function.name) &&
+          !this.tools.isToolActivated(toolCall.function.name)) {
+        toolResult = JSON.stringify({
+          error: `工具 ${toolCall.function.name} 当前未加载（按需加载模式）。` +
+            "先调用 tool_search 用相关关键词检索，命中的工具自下一轮起可直接调用。",
+        });
+        return { toolCall, toolResult };
+      }
       const toolDef = this.tools.get(toolCall.function.name);
       if (!toolDef) {
         toolResult = JSON.stringify({

@@ -507,6 +507,7 @@ export class SessionManager {
       maxIterations: config.maxIterations,
       temperature: config.temperature,
       thinkingEffort: config.thinkingEffort,
+      toolSearch: config.toolSearch,
       maxHistoryTurns: config.maxHistoryTurns,
       budget: config.budget,
       sessionStore: entry.store,

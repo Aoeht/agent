@@ -26,6 +26,7 @@ import { createAskUserTool } from "./tools/ask_user";
 import { createLoadSkillTool } from "./tools/load_skill";
 import { createRunScriptTool } from "./tools/run_script";
 import { createReadImageTool } from "./tools/read_image";
+import { createToolSearchTool } from "./core/tool_search";
 import { createDelegateTaskTool } from "./tools/delegate_task";
 import { resolveScriptSandbox, ScriptSandboxResolution } from "./tools/sandbox_docker";
 import { loadSkills, SkillManifest } from "./skills/loader";
@@ -111,6 +112,9 @@ export function registerSessionTools(
   }
 ): void {
   const sandboxRoot = options.sandboxRoot ?? MCP_SANDBOX_DIR;
+  // 按需加载元工具：默认每轮请求都会被 Agent 的暴露计算剔除（未触发阈值时无意义），
+  // 工具 schema 超过上下文水位后才对模型可见——注册表里常驻，暴露与否由 Agent 决定
+  registry.register(createToolSearchTool({ registry }));
   registry.register(createUpdatePlanTool(options.planStore));
   registry.register(createSetAcceptanceCriteriaTool());
   registry.register(createReadTaskStateTool());
