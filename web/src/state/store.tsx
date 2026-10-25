@@ -622,6 +622,20 @@ export function StoreProvider({
     void resolvedTransport.listTools(currentId).then((toolState) => {
       if (alive) dispatch({ type: "tools_loaded", id: currentId, ...toolState });
     });
+    // 每次 run 结束重新检查模型可用性与额度：run 中途配额耗尽的模型，下一轮从列表里消失
+    const refreshModelStatus = () => {
+      void resolvedTransport
+        .listModelStatus()
+        .then((result) => {
+          if (!alive) return;
+          dispatch({
+            type: "model_status_loaded",
+            status: result.models,
+            ...(result.accountQuota !== undefined ? { accountQuota: result.accountQuota } : {}),
+          });
+        })
+        .catch(() => {});
+    };
     const unsubscribe = resolvedTransport.subscribe(currentId, (event) => {
       // MCP 热载入等引起的工具集变化：重拉本会话的工具开关面板数据
       if (event.type === "tools_changed") {
@@ -630,6 +644,7 @@ export function StoreProvider({
         }).catch(() => {});
         return;
       }
+      if (event.type === "run_end") refreshModelStatus();
       dispatch({ type: "event", id: currentId, event });
     });
     return () => {

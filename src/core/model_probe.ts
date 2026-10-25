@@ -31,14 +31,39 @@ export interface ModelProbeOptions {
   client?: OpenAI;
   /** 单模型探测超时；缺省 8s */
   timeoutMs?: number;
+  /** 并发探测上限：全量清单上百个模型时防把自家限流打爆；缺省 12 */
+  concurrency?: number;
 }
 
-/** 并发探测所有候选模型：单模型失败不影响其它模型的结果 */
+/** 并发池探测所有候选模型：单模型失败不影响其它模型的结果 */
 export async function probeModels(options: ModelProbeOptions): Promise<ModelProbeResult[]> {
   const models = [...new Set(options.models.map((model) => model.trim()).filter(Boolean))];
   const client = options.client ?? new OpenAI({ maxRetries: 0 });
   const timeoutMs = options.timeoutMs ?? 8_000;
-  return Promise.all(models.map((model) => probeOne(client, model, timeoutMs)));
+  const concurrency = Math.max(1, options.concurrency ?? 12);
+  const results: ModelProbeResult[] = new Array(models.length);
+  let cursor = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, models.length) }, async () => {
+      while (cursor < models.length) {
+        const index = cursor++;
+        results[index] = await probeOne(client, models[index]!, timeoutMs);
+      }
+    })
+  );
+  return results;
+}
+
+/**
+ * 明确不是对话补全的模型：服务商清单里混着图像生成/语音/OCR/实时音频等端点，
+ * 对它们发 chat 补全只会得到 400/404——探测纯属浪费，还徒增下拉列表噪声。
+ * 宁可漏放（拿不准的走探测自己淘汰）不可错杀，正则只列确凿的非对话特征。
+ */
+const NON_CHAT_MODEL_PATTERN =
+  /embed|rerank|tts|asr|whisper|moderation|image|speech|audio|ocr|realtime|s2s|livetranslate|(^|\/)wan\d|z-image/i;
+
+export function isLikelyChatModel(id: string): boolean {
+  return !NON_CHAT_MODEL_PATTERN.test(id);
 }
 
 async function probeOne(client: OpenAI, model: string, timeoutMs: number): Promise<ModelProbeResult> {
@@ -81,13 +106,19 @@ export function quotaFromHeaders(headers: Headers): string | undefined {
   return parts.length > 0 ? parts.join("，") : undefined;
 }
 
-/** 错误分类：403/配额字样 → quota（要去充值或换模型）；404/模型不存在 → unavailable；其余 → error */
+/** 错误分类：403/配额字样 → quota；404/模型不存在/产品未开通 → unavailable；其余 → error。
+ * 注意 DashScope 用 400 表达"产品未激活"（不是限流）——这是确凿不可用，不能留在列表里 */
 export function classifyProbeError(error: unknown): { kind: ModelProbeKind; detail: string } {
   const status = (error as { status?: unknown } | null)?.status;
   const message = error instanceof Error ? error.message : String(error);
   const detail = message.slice(0, 160);
-  if (status === 403 || /quota|配额/i.test(message)) return { kind: "quota", detail };
-  if (status === 404 || /does not exist|not found|不存在|无权/i.test(message)) return { kind: "unavailable", detail };
+  if (status === 403 || /quota|配额|Access to model denied/i.test(message)) return { kind: "quota", detail };
+  if (
+    status === 404 ||
+    /does not exist|not found|不存在|无权|not activated|未开通|not open|not subscribe/i.test(message)
+  ) {
+    return { kind: "unavailable", detail };
+  }
   return { kind: "error", detail };
 }
 

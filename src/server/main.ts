@@ -18,7 +18,7 @@
 import path from "node:path";
 import OpenAI from "openai";
 import { resolveSessionDir } from "../config";
-import { candidateModels, fetchZhipuAccountQuota, probeModels } from "../core/model_probe";
+import { fetchZhipuAccountQuota, isLikelyChatModel, probeModels } from "../core/model_probe";
 import { UiBridge } from "./bridge";
 import type { ModelProbeStatusResponse, ThinkingEffort } from "./protocol";
 import { THINKING_EFFORTS } from "../utils/thinking_effort";
@@ -221,12 +221,15 @@ async function route(
       return json(await resolveModels(runtime));
     }
 
-    // 模型可用性探测：清单里有 ≠ 能用（免费配额按模型计）。对候选模型真发微型补全，
-    // 没配额/不可用的模型前端直接从下拉列表剔除。缓存 60s。智谱直连时附账户余额。
+    // 模型可用性探测：清单里有 ≠ 能用（免费配额按模型计）。探测 /models 的**全量**对话类
+    // 清单（不只配置候选——下拉列表里不该出现没开通/没配额的模型），没配额/不可用的
+    // 由前端从下拉列表剔除。缓存 60s（run 间的高频刷新靠它兜住，不逐 run 全量打探测）。
+    // 智谱直连时附账户余额。
     if (pathname === "/models/status" && method === "GET") {
       const now = Date.now();
       if (now - probeCache.at < 60_000) return json(probeCache.payload);
-      const models = await probeModels({ models: candidateModels(runtime.config) });
+      const sweep = (await resolveModels(runtime)).filter(isLikelyChatModel);
+      const models = await probeModels({ models: sweep, concurrency: 12, timeoutMs: 6_000 });
       const accountQuota = await fetchZhipuAccountQuota(
         process.env.OPENAI_BASE_URL?.trim() ?? "",
         process.env.OPENAI_API_KEY?.trim() ?? ""
@@ -343,12 +346,12 @@ async function resolveModels(runtime: ServerRuntime): Promise<string[]> {
 
   try {
     // 与 Agent 相同的 OpenAI 兼容端点（OPENAI_BASE_URL/KEY）：live 拉服务商可用清单，
-    // 过滤掉嵌入/重排/语音等非对话模型
+    // 非对话类模型（图像/语音/OCR/实时音频等）在这里就剔除——对它们探测/选用都是徒劳
     const client = new OpenAI({ maxRetries: 0, timeout: 5_000 });
     const page = await client.models.list();
     const ids: string[] = [];
     for await (const model of page) {
-      if (!/embed|rerank|tts|asr|whisper|moderation/i.test(model.id)) ids.push(model.id);
+      if (isLikelyChatModel(model.id)) ids.push(model.id);
     }
     ids.sort((a, b) => a.localeCompare(b));
     modelsCache = { at: now, models: ids };

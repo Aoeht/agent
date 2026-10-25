@@ -2,7 +2,7 @@
 // 运行: bun test ./tests/model_probe.test.ts
 import { test, expect, describe, spyOn } from "bun:test";
 import OpenAI from "openai";
-import { classifyProbeError, fetchZhipuAccountQuota, formatModelProbeLine, probeModels, quotaFromHeaders } from "../src/core/model_probe";
+import { classifyProbeError, fetchZhipuAccountQuota, formatModelProbeLine, isLikelyChatModel, probeModels, quotaFromHeaders } from "../src/core/model_probe";
 
 /** 假响应头容器：够 withResponse 用即可 */
 function fakeHeaders(entries: Record<string, string>): Headers {
@@ -51,6 +51,49 @@ describe("probeModels", () => {
     expect(byModel.get("model-quota")).toMatchObject({ ok: false, kind: "quota" });
     expect(byModel.get("model-404")).toMatchObject({ ok: false, kind: "unavailable" });
     expect(byModel.get("model-500")).toMatchObject({ ok: false, kind: "error" });
+  });
+
+  test("并发池：全量清单逐个探测且并发不超上限，结果与输入对齐", async () => {
+    let active = 0;
+    let maxActive = 0;
+    const models = Array.from({ length: 30 }, (_, i) => `m-${i}`);
+    const countingClient = {
+      chat: {
+        completions: {
+          create: ({ model }: { model: string }) => {
+            active++;
+            maxActive = Math.max(maxActive, active);
+            return {
+              ...Promise.resolve({ choices: [{ message: { content: "OK" } }] }),
+              withResponse: async () => {
+                await new Promise((resolve) => setTimeout(resolve, 1));
+                active--;
+                return { data: {}, response: { headers: fakeHeaders({}) } };
+              },
+            };
+          },
+        },
+      },
+    } as unknown as OpenAI;
+    const results = await probeModels({ client: countingClient, models, concurrency: 5, timeoutMs: 5_000 });
+    expect(results.length).toBe(30);
+    // 字符串排序两侧一致比较（m-10 排在 m-2 前，与插入序无关）
+    expect(results.map((r) => r.model).sort()).toEqual([...models].sort());
+    expect(results.every((r) => r.ok)).toBe(true);
+    expect(maxActive).toBeLessThanOrEqual(5);
+  });
+
+  test("isLikelyChatModel：图像/语音/OCR/实时音频等非对话模型剔除，对话模型保留", () => {
+    for (const dead of [
+      "qwen-image-2.0-pro", "wan2.7-image", "z-image-turbo", "MiniMax/speech-02-hd",
+      "qwen-vl-ocr", "qwen-audio-3.0-realtime-plus", "qwen3-s2s-flash-realtime",
+      "qwen3.5-livetranslate-flash", "text-embedding-v4", "qwen-tts",
+    ]) {
+      expect(isLikelyChatModel(dead)).toBe(false);
+    }
+    for (const alive of ["glm-5.2", "qwen3.8-flash", "deepseek-v4-pro", "kimi/kimi-k3", "ZHIPU/GLM-5.3-Flash", "qwen-max"]) {
+      expect(isLikelyChatModel(alive)).toBe(true);
+    }
   });
 
   test("可用模型解析响应头里的剩余配额；无头字段时缺省", async () => {
@@ -135,5 +178,11 @@ describe("classifyProbeError", () => {
     expect(classifyProbeError(Object.assign(new Error("无权访问"), { status: 403 })).kind).toBe("quota");
     expect(classifyProbeError(new Error("model does not exist")).kind).toBe("unavailable");
     expect(classifyProbeError(new Error("socket hang up")).kind).toBe("error");
+  });
+
+  test("DashScope 的 400 未激活是确凿不可用（不是限流），归 unavailable 剔除", () => {
+    expect(
+      classifyProbeError(Object.assign(new Error("400 The product is not activated, please confirm"), { status: 400 })).kind
+    ).toBe("unavailable");
   });
 });
