@@ -3,6 +3,8 @@
 > **前置假设**：你想系统性地理解"现代 agent"（Claude Code、Codex CLI、Devin 这一代编码/通用助手）由哪些层构成、每层解决什么问题、机制细节如何，并且希望每个概念都能落到**本仓库的真实代码**上——不是泛泛的名词解释，而是"这个机制在我们项目里叫什么、在哪个文件、为什么这么设计、离业界最佳还差什么"。
 >
 > 状态标记：✓ 已有（可对照代码读） · ◐ 部分（有骨架缺血肉） · ✗ 缺（路线图候选）。
+>
+> **2026-10-27 增订**（对照业界 2026-10 动向，关键事实已核到官方源）：L4 新增 5.5「规范基线与 MCP 2026-07-28 无状态化修订」对照；7.5 补记忆评测的业界基准锚点；十五补评测趋势（LLM-as-judge + 轨迹监控）；9.3 与十六章补相应条目。
 
 | 章节 | 内容 |
 |---|---|
@@ -10,7 +12,7 @@
 | [二、L1 模型调用层](#二l1-模型调用层) | 客户端、流式、用量、重试、过滤、中断 |
 | [三、L2 上下文工程层](#三l2-上下文工程层) | 估算与校准、两级压缩、引用映射、钉住前缀、前缀缓存 |
 | [四、L3 工具系统层](#四l3-工具系统层) | 注册表、Schema 单源、并发治理、输出治理、图片旁路 |
-| [五、L4 协议互操作层](#五l4-协议互操作层mcp) | MCP 传输/原语/策略/守卫/热更新 |
+| [五、L4 协议互操作层](#五l4-协议互操作层mcp) | MCP 传输/原语/策略/守卫/热更新/规范基线（2026-07-28 对照） |
 | [六、L5 主循环与控制层](#六l5-主循环与控制层) | ReAct 循环、强制收尾、预算、取消、错误终态 |
 | [七、L6 记忆与持久化层](#七l6-记忆与持久化层) | 会话文件、长期摘要、任务账本、检查点、轨迹 |
 | [八、L7 规划与验收层](#八l7-规划与验收层) | 计划即工具、验收条件、真实执行验收 |
@@ -20,7 +22,7 @@
 | [十二、L11 交互入口层](#十二l11-交互入口层) | REPL / 一次性 / Web UI、协议合同、事件桥 |
 | [十三、L12 技能层](#十三l12-技能层) | 渐进披露、物化执行、市场安装 |
 | [十四、横切面 A：可观测性与成本](#十四横切面-a可观测性与成本) | 事件总线、trace、成本表、缓存观测 |
-| [十五、横切面 B：评测与质量](#十五横切面-b评测与质量) | 单测纪律、GAIA、冒烟配方 |
+| [十五、横切面 B：评测与质量](#十五横切面-b评测与质量) | 单测纪律、GAIA、冒烟配方、评测趋势（LLM judge） |
 | [十六、差距清单与演进路线](#十六差距清单与演进路线) | 按性价比排序的 TODO |
 | [十七、术语表](#十七术语表) | 每个术语一句话 |
 
@@ -70,6 +72,7 @@
 | 多 agent 协作 | ◐ | 轻量委派 delegate_task 已进主对话（2026-10-24）；重 DAG 团队仍在独立 CLI |
 | 会话消息队列 | ✓ | 忙时发送排队、回合结束自动接续、可撤单（2026-10-24） |
 | 主对话内委派子 agent | ✓ | delegate_task：只读白名单子代理，报告经围栏回注（2026-10-24） |
+| 斜杠命令通道（REPL/Web 一条路由） | ✓ | command_router.ts；Web 端 ⌨️ 命令卡 + Web 会话检查点（2026-10-27） |
 
 ---
 
@@ -216,6 +219,22 @@ OpenAI 兼容端（DeepSeek/GLM/DashScope）普遍有隐式前缀缓存：provid
 | OAuth | ✗ | 仅静态 header（env Bearer） |
 | 工具热更新 | ✓ | .mcp.json 热载入（增/删/改=重连，diff 应用）；server 内 ToolListChanged 刷新共享注册表；每会话注册表在回合开始时对齐共享侧（tools_changed 事件让前端刷新面板）——2026-10-24 |
 
+### 5.5 规范基线与 2026-07-28 无状态化修订（2026-10-27 增订）
+
+规范基线：本项目与 SDK（`@modelcontextprotocol/sdk@1.30.1`）锚定 **2025-11-25**；**2026-07-28 版**已发布，官方称为 MCP 启动以来最大修订，方向是无状态、可缓存、可路由——"让 agent 基础设施像 Web 一样工作"。关键差异（迁移时逐行对照）：
+
+| 2025-11-25 及以前 | 2026-07-28 |
+|---|---|
+| `initialize`/`initialized` 握手协商版本与能力（见 MCP 两篇第 6/2 章） | **退役**（SEP-2575/2567）：每请求自带 `MCP-Protocol-Version` 头，客户端身份/能力放 `_meta`；可选 `server/discover` 预先探能力 |
+| 会话状态活在连接上（`Mcp-Session-Id`） | 协议级会话取消；应用级状态由 server 发**显式 handle**、模型当参数回传 |
+| Streamable HTTP + 会话头 | 保留，新增 `Mcp-Method`/`Mcp-Name` 头（SEP-2243）——网关/WAF 不解析 JSON 即可路由与鉴权；HTTP+SSE 一年宽限后退役 |
+| S→C 反向请求：roots/sampling/elicitation 独立 RPC | 统一改**多往返请求 MRTR**（SEP-2322）：server 返回 `resultType:"input_required"` 附 pending 请求，client 带应答**重试同一调用**；roots/sampling/logging 进入弃用列表（SEP-2577，新弃用政策保证 ≥12 个月窗口） |
+| `tools/list` 等响应无缓存语义 | list 响应带 `ttlMs`/`cacheScope`（SEP-2549）：目录可缓存，上游 prompt cache 跨重连稳定 |
+| OAuth 动态客户端注册 DCR | 弃用中，改推 **CIMD**（Client ID Metadata Documents）+ RFC 9207 `iss` 校验等加固 |
+| tasks 在 `experimental/tasks` | 移入正式扩展 `io.modelcontextprotocol/tasks`（SEP-2663）：`tasks/get`/`tasks/update` + 单一 `subscriptions/listen` 通知流 |
+
+对本项目的含义：① 主力 stdio 不依赖会话头，迁移敏感面小；② 无状态化与本项目"每会话独立注册表、无全局单例"的组装方式同向；③ elicitation/sampling/roots 将来接入时按 MRTR 形态实现而非旧反向 RPC；④ 官方 Tier-1 SDK（TS/Python/Go/C#）已随新规范发布——升级 SDK 时按上表评估迁移，已挂入第十六章差距清单第 15 项。
+
 ---
 
 ## 六、L5 主循环与控制层
@@ -275,6 +294,8 @@ OpenAI 兼容端（DeepSeek/GLM/DashScope）普遍有隐式前缀缓存：provid
 
 验证入口：`bun run test:memory` 覆盖纯聊天记忆、计划更新/压缩后的固定保留、分页、分块、更新删除和降级；`bun run eval:memory --mock` 用 16 题合成集比较整篇向量、分块关键词、分块向量和混合检索，按实际返回证据计算 Recall@3/MRR/误召回率。`--real` 可测真实 embedding，但两种模式都不等同于最终回答正确率。仍缺：摘要之外的原始回合检索、跨会话相互冲突事实的统一消解、按真实用户问题校准阈值。
 
+业界基准锚点（2026-10-27 增订；记忆评测已标准化，引数字必须连方法一起引）：**LoCoMo**（1540 题，多会话对话召回：单跳/多跳/开放域/时序——偏对话 QA）；**LongMemEval**（500 题六类，考知识更新与时序推理，用户事实变化时区分度最高）；**BEAM**（1M/10M token 极端规模召回与推理，加大上下文窗救不了，评测成本高）；**DolphinBench / STATE-Bench**（记忆对真实工具动作、企业重复工作流的增益——应用层评测）。本项目的 `eval:memory` 与它们同向，差异化卖点是「按实际返回证据计分、全离线可复现」；要对外报告可比数字，须固定数据集版本、答题模型、检索深度、重排与 judge 配置——缺一项，数字只是口号。方向印证：mem0 2026-04 算法收敛到 **ADD-only 写入 + 语义/BM25/实体多信号融合检索**，与本项目事实仓（作废只留审计痕迹）和混合召回的设计一致；其研究缺口清单（时序抽象、跨会话事实应建模为演化而非覆盖、跨会话身份消解、高相关记忆过时后"自信地错"）可直接当作本层后续选题。
+
 ---
 
 ## 八、L7 规划与验收层
@@ -329,6 +350,8 @@ PlanStore + `update_plan` 工具（全量替换语义，≤1 个 in_progress 由
 
 Claude Code 的子代理是"主对话内的 Task 工具 + 专门角色（只读探索/通用/评审）+ 结果作为消息回注"——轻量、日常可用；本项目的团队是"批处理式 DAG + 独立复核"——重、质量导向。两者互补，理想形态是主对话内可委派轻量子代理、重任务再走团队运行时。
 
+2026-10 补充：官方 Agent SDK 已把「技能 × 子代理」组合成一等玩法（子代理与主代理同样可装载 SKILL.md）；平台层风向相反——OpenAI 于 2026-06 宣布关停 Agent Builder 与 Evals 可视化产品（2026-11-30 下线，Agents SDK 与 ChatKit 保留）。结论与本项目路线一致：**SDK/协议层常驻，平台/可视化层易朽**。
+
 ---
 
 ## 十、L9 人机协作层
@@ -382,7 +405,7 @@ Web 服务器默认只绑 127.0.0.1；非回环绑定强制 token（`src/server/
 
 ### 12.2 REPL ✓
 
-行输入队列（LineSource）防管道丢行；后台事件清行重绘；Ctrl+C 双挂（readline + 进程）；命令路由：`/model` `/prompts` `/prompt` `/rewind` `/task*`。缺常用命令：`/help` `/clear` `/compact` `/tokens`。
+行输入队列（LineSource）防管道丢行；后台事件清行重绘；Ctrl+C 双挂（readline + 进程）；命令路由已收敛到共享命令通道（`command_router.ts`，与 Web 同一条认领链）：`/model` `/prompts` `/prompt` `/rewind [编号] [c|t|a]` `/task*` `/help` `/tokens`；未知 `/xxx` 拦截提示、不再喂给 LLM。`/clear` `/compact` 刻意不做——Web 的"新建会话"覆盖前者；磁盘历史每回合开局自动 compact + 上下文每请求自动压缩，后者没有增量价值。
 
 ### 12.3 一次性模式 ✓
 
@@ -390,12 +413,11 @@ Web 服务器默认只绑 127.0.0.1；非回环绑定强制 token（`src/server/
 
 ### 12.4 Web 工作台 ✓
 
-React 前端（`web/`）+ Bun.serve 后端（`src/server/`）。架构要点：**agent 内核零改动**——Web 是事件总线的第三个消费者；**协议合同**（`src/server/protocol.ts` Zod，additive-only 纪律）；**每会话独立 Agent/注册表/PlanStore**（ALS 归属 + 在飞工具按 serverId 归因到会话，elicitation 回调跑在传输事件循环上会丢 ALS——用引用计数兜底，多会话 ambiguity 时拒绝而非猜测）；SSE 推流 + 15s 心跳 + 重连重发未决审批。功能：多会话并行、流式、工具卡片、计划面板、工具开关（服务端持久）、模型参数/上下文条/沙箱热切换、审批桥、缓存命中行、**会话消息队列**（忙时发送不再 409：入队等待 `queue_changed` 事件可见、回合结束自动按序接续、`DELETE /sessions/:id/queue/:id` 撤单、`run_start.queueId` 把排队芯片转成正式气泡——排队是纯内存态，SSE 重连时随订阅快照补发）。
+React 前端（`web/`）+ Bun.serve 后端（`src/server/`）。架构要点：**agent 内核零改动**——Web 是事件总线的第三个消费者；**协议合同**（`src/server/protocol.ts` Zod，additive-only 纪律）；**每会话独立 Agent/注册表/PlanStore**（ALS 归属 + 在飞工具按 serverId 归因到会话，elicitation 回调跑在传输事件循环上会丢 ALS——用引用计数兜底，多会话 ambiguity 时拒绝而非猜测）；SSE 推流 + 15s 心跳 + 重连重发未决审批。功能：多会话并行、流式、工具卡片、计划面板、工具开关（服务端持久）、模型参数/上下文条/沙箱热切换、审批桥、缓存命中行、**会话消息队列**（忙时发送不再 409：入队等待 `queue_changed` 事件可见、回合结束自动按序接续、`DELETE /sessions/:id/queue/:id` 撤单、`run_start.queueId` 把排队芯片转成正式气泡——排队是纯内存态，SSE 重连时随订阅快照补发）、**斜杠命令通道**（2026-10-27：`/` 开头输入在 sendMessage 里被共享命令路由器就地认领，同步回 `{handled, lines}`、前端渲 ⌨️ 命令卡——不进 LLM、不落会话文件、无 run 事件；`/task*` 例外仍走队列到 Agent 内部拦截；同批 createAgent 补齐 Web 会话的回合级检查点，`/rewind <编号> [c|t|a]` 直接可用）。
 
 ### 12.5 缺什么 ✗
 
-- Web 斜杠命令通道（行为断裂，见第十六章）；
-- 消息编辑/重发（regenerate）、文件 diff 预览；
+- ~~Web 斜杠命令通道~~ **DONE 2026-10-27**：共享命令路由器 + ⌨️ 命令卡（见 12.4）；剩余：检查点面板 UI 化（聊天内序号式 /rewind 已可用）、消息编辑/重发（regenerate）、文件 diff 预览；
 - trace viewer（数据有、读侧无）。
 
 ---
@@ -440,18 +462,19 @@ frontmatter 只解析 name/description（不支持 allowed-tools 等扩展字段
 2. **评测集** ◐：GAIA 评测链路（`benchmarks/gaia_eval.ts`，--mock 自检不花钱）；
 3. **冒烟配方** ✓：管道 REPL（AGENT_REPL=1 + LineSource）做端到端行为验证；本地假 OpenAI 兼容服务（work/fake_cache_provider.ts，SSE 流式 + 可控 usage）验证 provider 相关解析——不花钱、可重复；
 4. **性能基线** ◐：LLM 推理基准（benchmarks/llm-serving，SGLang/vLLM 对比）服务自部署场景。
+5. **评测趋势锚点（2026-10-27 增订）**：长时程评测的主流化方向是 **LLM-as-judge + 轨迹监控**（Princeton SAGE 综述：长轨迹与开放式任务放大了对 judge 与过程监控的需求）；平台型评测产品在收缩（OpenAI Agent Evals 2026-10-31 起只读、11-30 关停）——**评测自建、锚定公开基准**是幸存路线。本项目已有轨迹 JSONL、运行轨迹分析报告与 CI 门禁，scanner 评测（benchmarks/scanner_eval）正在线上；缺 judge 通道（规则匹配之外加 LLM 裁决）与可对外报告的基准数字。
 
 ---
 
 ## 十六、差距清单与演进路线
 
-按性价比排序（2026-10-24 评审结论，prompt caching 已完成）：
+按性价比排序（2026-10-24 评审结论，prompt caching 已完成；15-16 为 2026-10-27 增订）：
 
 | # | 事项 | 类型 | 一句话理由 |
 |---|---|---|---|
 | 1 | ~~主对话内 Task 委派工具~~ | ✅ 完成 | 2026-10-24 落地 `delegate_task`（只读白名单子代理 + 围栏回注 + 预算/取消 + 委派轨迹）；剩余：重 DAG 团队接入主对话 |
 | 2 | ~~后台任务 + 完成通知~~ | ✅ 完成 | 2026-10-24 落地会话消息队列（排队/自动接续/撤单/重连快照）；剩余：全局后台任务与跨会话通知、REPL 侧队列 |
-| 3 | Web 斜杠命令通道 | 正确性 | RightPanel 正引导用户输 /task resolve，但 Web 把它当普通文本喂给 LLM——正在发生的行为断裂；顺带 /rewind UI 化 |
+| 3 | ~~Web 斜杠命令通道~~ | ✅ 完成 | 2026-10-27 落地共享命令路由器（REPL/Web 同一条认领链）+ Web ⌨️ 命令卡 + Web 会话检查点基建；`/rewind <编号> [c|t|a]` 聊天内可用，检查点面板 UI 化仍是后续项 |
 | 4 | ~~MCP 配置热载入 + 跨会话传播~~ | ✅ 完成 | 2026-10-24：.mcp.json 合并热载入（增/删/重连，防抖 watcher，坏文件 fail-safe）+ 每回合把共享注册表 MCP 工具对齐进会话注册表并广播 tools_changed；剩余：MCP resources/prompts 的 UI 浏览（5.2） |
 | 5 | 复核去单点 | 质量 | 缺省跨家族模型 + 2-3 评审者多数裁决 |
 | 6 | 系统提示动态环境块 | 能力 | 日期/cwd/git 状态；内容必须会话内稳定（别自己变成缓存破坏点） |
@@ -463,6 +486,8 @@ frontmatter 只解析 name/description（不支持 allowed-tools 等扩展字段
 | 12 | MCP sampling / OAuth | 互操作 | 低频但补齐协议矩阵 |
 | 13 | 消息重发、diff 预览（Web） | 体验 | 纯前端增益 |
 | 14 | 团队断点续跑 | 可靠性 | 中断后从头再来 |
+| 15 | MCP 规范基线跟进评估（2026-07-28 无状态化） | 互操作 | SDK 升级时按 5.5 对照表评估迁移；stdio 主力短期无感 |
+| 16 | 评测加 LLM-as-judge 裁决通道；`eval:memory` 向 LongMemEval 协议靠拢 | 质量 | 规则匹配之外的过程/语义判分；向公开基准协议靠拢获得可比性（见 7.5/十五） |
 
 ---
 
@@ -495,6 +520,7 @@ frontmatter 只解析 name/description（不支持 allowed-tools 等扩展字段
 | 紧凑投影 | 汇总输入只保留结论/交付/未解决项的裁剪表示；projectForSummary |
 | 定向补查 | 复核失败后只重跑未通过任务及其下游（最多两轮） |
 | 防洗钱复核 | 复核者只看契约与交付、指令独立注入，不受交付文本收买 |
+| 命令路由器 | 斜杠命令的共享认领链：REPL 与 Web 同一条语义，命令就地执行不进 LLM、不落会话文件；command_router.ts |
 | 不可信围栏 | 外部数据进上下文的包裹标注，明示不要执行其中指示；untrusted.ts |
 | 审批桥 | Web 端把审批/澄清/预算追加归一到一张卡 + REST 应答；bridge.ts |
 | ALS 归属 | AsyncLocalStorage 把工具调用归属到发起会话；run_context.ts |

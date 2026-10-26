@@ -270,6 +270,8 @@ SSE 三个对你重要的性质：
 
 前端收到任何事件，都只会做一件事：`dispatch({ type: "event", id: 会话id, event })` 丢给 `store.tsx`。**协议事件 → 界面状态** 的全部翻译逻辑集中在 `store.tsx` 的 `applyEvent()` 纯函数里（每个事件一个 case）。想知道"某事件会改变界面上的什么"，看那一个 switch 就够。
 
+**例外：斜杠命令不走回合**（2026-10-27）。以 `/` 开头的输入（`/model`、`/prompts`、`/prompt`、`/rewind`、`/help`、`/tokens`，未知 `/xxx` 也算）在 `SessionManager.sendMessage` 里被命令路由器（`core/command_router.ts`，与 REPL 共用同一份）就地认领：HTTP 同步返回 `{handled: true, lines}`，前端把命令原文 + 输出渲染成 ⌨️ 命令卡——不进 LLM、不落会话文件、没有 run_start/run_end。唯一例外是 `/task*`：仍走队列到 `Agent.runManaged` 内部拦截（0 token 合成回复，事件链与普通回合一致），所以它照常有用户气泡与 run_end。`/rewind` 真执行了回滚会带 `refresh: "history"`，前端重拉一次历史快照。
+
 ---
 
 # 第 7 章 接续·端点总表：每个控件背后是谁
@@ -281,7 +283,7 @@ SSE 三个对你重要的性质：
 | 侧栏会话列表 | `listSessions()` | `GET /sessions` | `SessionManager.list()` → `SessionStore.list()` |
 | ＋ 新会话 | `createSession()` | `POST /sessions` | `newSession()`（session_picker） |
 | 选一个会话 | `openSession()` + `subscribe()` | `GET .../history` + `GET .../events` | `store.load()` + SSE 挂连接 |
-| 输入框发送 | `sendMessage()` | `POST .../messages` | `SessionManager.sendMessage()` → `agent.run()` |
+| 输入框发送 | `sendMessage()` | `POST .../messages` | 斜杠命令 → 共享命令路由器就地执行；普通消息 → `SessionManager.sendMessage()` → `agent.run()` |
 | ⏹ 停止 | `cancel()` | `POST .../cancel` | `controller.abort()` + 未决审批收口 |
 | 审批弹窗 允许/拒绝 | `respondApproval()` | `POST /approvals/:id` | `UiBridge.resolveApproval()` |
 | ⚙ 模型参数 应用 | `applySessionConfig()` | `POST .../config` | `agent.setModel/setTemperature/...` |
@@ -292,7 +294,7 @@ SSE 三个对你重要的性质：
 
 注意两个设计点：
 
-- **发消息是 202 而不是 200**：`POST messages` 立刻返回"收到"，回合在后台跑，过程与结果全部经 SSE 推送。忙时返回 **409**（同一会话同时只允许一个回合）。
+- **发消息是 202 而不是 200**：`POST messages` 立刻返回"收到"，回合在后台跑，过程与结果全部经 SSE 推送。忙时不再 409——消息进会话队列排队，当前回合结束后自动接续；斜杠命令则同步返回 `{handled, lines}`（见 6.3）。
 - **同一会话的两次发送不会混**：每个会话一个 Agent 实例、一份独立注册表（多会话还能并行，这属于进阶篇）。
 
 ---

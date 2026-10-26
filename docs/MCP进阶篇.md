@@ -6,6 +6,8 @@
 > 本文的每条结论都有出处：**你的代码**（`文件:行号`）、**SDK 源码**（`node_modules/@modelcontextprotocol/sdk/...`）、或**实测**（标注 `实测:`）。
 > 环境基线：`@modelcontextprotocol/sdk@1.30.1`，运行时 Bun，Windows 10。
 > SDK 声明：`LATEST_PROTOCOL_VERSION = '2025-11-25'`，向下兼容 `2025-06-18 / 2025-03-26 / 2024-11-05 / 2024-10-07`（`types.js:2-4`）。
+>
+> **规范基线（2026-10-27 复核固定）**：本文与 SDK 1.30.1 锚定 **2025-11-25**，不追在线 latest。**2026-07-28 版**规范已发布（迄今最大修订：去握手/去会话头、反向请求改 MRTR、list 响应可缓存），本文按基线版讲解不变；行内"2026-07-28 注"标记受影响结论，汇总对照见第 10 章版本表与章末迁移评估。
 
 ---
 
@@ -161,7 +163,7 @@ SDK 把 ①②③ 全藏在 `client.connect(transport)` 里（`client_manager.ts
 
 会话状态活在**连接**上，不在请求上。这意味着：
 - stdio 子进程退出 = 会话彻底消失，所有工具立即不可用（你的 `onclose` 处理正确地下线工具）。
-- Streamable HTTP 里 server 可用 `Mcp-Session-Id` 维持会话；一旦丢失要重新 `initialize`。
+- Streamable HTTP 里 server 可用 `Mcp-Session-Id` 维持会话；一旦丢失要重新 `initialize`。（2026-07-28 注：协议级会话与该头已退役，状态改由应用层显式 handle 承载——见第 10 章）
 
 ## 2.6 自查问题
 
@@ -212,9 +214,9 @@ GET /mcp    Accept: text/event-stream     ← client 打开"只做下行"的流
 ```
 
 要点：
-- **`Mcp-Session-Id`**：initialize 响应头携带；此后每个请求都要回带。Session 不存在时 server 回 `404`，client 必须重新 initialize。
+- **`Mcp-Session-Id`**：initialize 响应头携带；此后每个请求都要回带。Session 不存在时 server 回 `404`，client 必须重新 initialize。（2026-07-28 注：该头退役；新增每请求 `MCP-Protocol-Version` 头与 `Mcp-Method`/`Mcp-Name` 路由头——见第 10 章）
 - **可恢复性**：SSE 帧带 `id:`，断线重连用 `Last-Event-ID` 续传，避免丢消息。
-- **鉴权**：走 OAuth 2.1，MCP Server 作为 *resource server*，通过 `WWW-Authenticate` + 保护资源元数据（PRM）→ 动态客户端注册（DCR）→ 授权服务器（ASM）。SDK 已实现这一整套（`client/auth.js`、`client/middleware.d.ts`）。
+- **鉴权**：走 OAuth 2.1，MCP Server 作为 *resource server*，通过 `WWW-Authenticate` + 保护资源元数据（PRM）→ 动态客户端注册（DCR）→ 授权服务器（ASM）。SDK 已实现这一整套（`client/auth.js`、`client/middleware.d.ts`）。（2026-07-28 注：DCR 弃用中、改推 CIMD 客户端身份元文档，并新增 RFC 9207 `iss` 校验等加固——见第 10 章）
 - 你现在这条路径只支持静态 `Authorization` 头（`client_manager.ts:145`），对 GitHub 官方那种要求完整 OAuth 流的远端是不够的 —— 这是**已知缺口**（第 11 章）。
 
 ## 3.3 为什么旧的 HTTP+SSE 被废弃
@@ -431,6 +433,8 @@ create_directory {"readOnlyHint":false,"destructiveHint":false,"idempotentHint":
 2. **Server 真实发起**：`client_manager.ts` 在 `connect()` 之前注册 `ElicitRequestSchema` 处理器，把收到的 `message`/`requestedSchema` 转发给同一个 `confirmer`，再把人类的回答包装成 `ElicitResult` 回给 Server——这才是协议标准的 elicitation 往返。
 
 默认实现是 `cli_confirmer.ts` 里的终端确认器（`readline`，form 模式按 schema 逐字段问，本地 `ask` 退化成单个 y/N）；换成图形界面只需实现同样的 `Confirmer` 签名。`index.ts` 把 destructive+open-world 的默认策略由硬 `"deny"` 改成了 `"ask"`。验证见 `tests/mcp_annotations.test.ts` 第 10/11 组（本地 ask 的 accept/decline/无 confirmer 三种情形 + 真实 elicitation 往返的 accept/decline）。
+
+> **2026-07-28 注**：S→C 反向请求（elicitation/sampling/roots）在新规范里统一改为**多往返请求 MRTR**（SEP-2322）——server 不再发独立反向 RPC，而是在 `tools/call` 结果里返回 `resultType:"input_required"` 附 pending 请求，client 把应答放进 `inputResponses` **重试同一调用**；roots/sampling/logging 同时进入弃用列表（SEP-2577，≥12 个月窗口）。本项目的 `Confirmer` 抽象不受影响——它面向宿主与人的问答形态，协议搬运层换形态即可。
 
 ## 5.4 自查问题
 
@@ -737,9 +741,12 @@ await adapter.syncTools(client, "fake");   // 完全跳过 stdio
 | 2024-11-05 | 首个公开版：JSON-RPC、stdio + HTTP/SSE 双传输、tools/resources/prompts | `case "sse"` 属于这代遗产 |
 | 2025-03-26 | **Streamable HTTP 取代 HTTP+SSE**；新增 **tool annotations**；去掉 JSON-RPC batching；明确 SSE 单向上行 | `types.ts` 的 `ToolAnnotationsLite`、`client_manager.ts:142` 的 streamableHttp |
 | 2025-06-18 | **elicitation**（form/url）、**structuredContent + outputSchema**、`title` 显示名、OAuth resource server 鉴权模型 | `adapter.ts:258` 读 structuredContent |
-| 2025-11-25 | SDK 当前最新（`types.js:2`）；扩展机制与 **tasks** 进入实验命名空间（`experimental/tasks`） | 你未使用，知道 `tasks/*` 是扩展即可 |
+| 2025-11-25 | **本文基线**：SDK 1.30.1 声明的最新版（`types.js:2`）；扩展机制与 **tasks** 进入实验命名空间（`experimental/tasks`） | 你未使用，知道 `tasks/*` 是扩展即可 |
+| 2026-07-28 | 迄今最大修订，方向=无状态/可缓存/可路由：**initialize 握手与 `Mcp-Session-Id` 退役**（SEP-2575/2567），每请求自带 `MCP-Protocol-Version` 头与 `_meta` 身份/能力，可选 `server/discover`；S→C 反向请求改 **MRTR**（SEP-2322），roots/sampling/logging 弃用（SEP-2577，≥12 个月窗口）；list 响应带 `ttlMs`/`cacheScope`（SEP-2549）；新增 `Mcp-Method`/`Mcp-Name` 路由头（SEP-2243）；DCR→CIMD；tasks 移入正式扩展 `io.modelcontextprotocol/tasks`（SEP-2663） | SDK 1.30.1 未跟进，你暂不受影响；升级 SDK 时按此行迁移（stdio 主力敏感面小） |
 
 **读史的实际用途**：当你看到某个 Server 行为奇怪（只有 text 结果、没 annotations、要求 `/sse` 端点），第一反应应该是"它停在哪一版规范"，而不是"它写错了"。你的兼容策略正是这么分层的：`structuredContent` 优先、文本猜 JSON 兜底（`adapter.ts:332-352`）；streamableHttp 优先、sse 保留（`client_manager.ts:136-150`）。
+
+**迁移评估（2026-10-27）**：无状态化对本项目是顺风而非威胁——每请求自携带版本/身份/能力，与"每会话独立注册表、无全局单例"的组装方式同向。真正要动的是三处：① `client_manager.ts` 的握手/会话逻辑换成请求头模式（SDK 升级时大概率自动完成）；② elicitation/sampling/roots 将来接入时按 MRTR 形态实现（5.3 注）；③ 远程 Server 的 OAuth 链路改 CIMD。已挂入《现代Agent知识框架.md》第十六章差距清单第 15 项。
 
 ---
 

@@ -238,8 +238,9 @@ ALS 有一个盲区：**elicitation 的回调跑在 MCP 传输层的事件循环
 - **工具开关仅内存态**：服务器重启回到全开。持久化需要在 `SessionStore` 加一种元记录（照 `【模型】` 的模式），成本已知、刻意未做；
 - **MCP 热更新不传播到已建会话**（第 3 章）；
 - **SSE 重连窗口内的事件不补发**（只重发 hello + 未决审批）：重连后的流式文字可能从中间开始。彻底解法是事件序号 + 游标补发，当前规模不值得；
+- **斜杠命令通道（2026-10-27）**：以 `/` 开头的输入在 `sendMessage` 里被共享命令路由器（`core/command_router.ts`，REPL 同一条）就地认领——同步返回 `{handled, lines}`，不入队、不发 run 事件、不落会话文件；变更类命令（`/model` 切换、`/prompt`、`/rewind`）忙时拒绝，只读（`/help` `/tokens` `/prompts`、`/model` 查看）随时可用；`/task*` 例外仍走队列到 Agent 内部拦截。同批补齐 Web 会话检查点：`createAgent` 按 `AGENT_CHECKPOINTS` 建 `CheckpointStore` 并挂与 CLI 共用的快照钩子工厂（`createCheckpointSnapshotHook`），`/rewind <编号> [c|t|a]` 聊天内直接可用；
 - **单进程单飞行上限**：Bun 单进程 + 每会话一个 Agent，几十个并发会话才需要考虑 worker 化；
-- **路线**：trace 查看器（`.traces` JSONL 数据现成，读端点 + 时间轴组件即可）、`/rewind` 的 UI 化（`CheckpointStore` 可直接复用，缺一个 `ask` 通道的 UI 版）、局域网 token（`AGENT_UI_TOKEN` 中间件，半小时工作量）。
+- **路线**：trace 查看器（`.traces` JSONL 数据现成，读端点 + 时间轴组件即可）、`/rewind` 的检查点面板 UI 化（聊天内序号式已可用，缺一个列表 + 恢复按钮的卡片）、~~局域网 token~~（已落地：`AGENT_UI_TOKEN` 中间件）。
 
 ---
 
