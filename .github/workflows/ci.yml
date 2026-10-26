@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支的新推送取消还在跑的旧任务：个人仓库没必要为过时提交排队
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # 测试全程不联网，这些值只为满足"构造客户端需要凭证"的装配路径。
+  # 缺失时 session_config / session_queue / session_mcp_sync 会在 new OpenAI() 处抛
+  # Missing credentials —— 凭证来自环境而不是被注入，是这几个用例的既有耦合。
+  OPENAI_API_KEY: ci-unused-key
+  OPENAI_BASE_URL: http://127.0.0.1:9/v1
+
+jobs:
+  verify:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # 一个平台挂了也要看完另一个：本项目有显式的 Windows 路径/EPERM 处理，
+      # 平台差异本身就是需要暴露的信息，不该被 fail-fast 掩盖。
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          # 与本地开发版本一致（bun 1.4.2）；升级时两处一起改，避免"本地绿 CI 红"
+          bun-version: 1.4.2
+
+      - name: Cache bun install
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ matrix.os }}-${{ hashFiles('bun.lock', 'web/bun.lock') }}
+          restore-keys: bun-${{ matrix.os }}-
+
+      # 根项目与 web/ 是两个独立 lockfile，只装根依赖会让 web 的 React 用例
+      # 报 Cannot find module 'react/jsx-dev-runtime'（约 10 个用例直接不注册）
+      - name: Install root dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install web dependencies
+        working-directory: web
+        run: bun install --frozen-lockfile
+
+      # 根 tsconfig 的 include 只覆盖 src/ benchmarks/ tests/，web/ 有自己的 tsconfig，
+      # 两边都得查，否则前端类型错误不会出现在 CI 里
+      - name: Typecheck (root)
+        run: bun run typecheck
+
+      - name: Typecheck (web)
+        working-directory: web
+        run: bun run typecheck
+
+      - name: Test
+        run: bun test
+
+      # benchmarks/gaia_eval.ts --mock 与 trace_report.ts 刻意不进 CI：
+      # 前者当前自检为红（6 通过 / 7 失败），后者依赖 .traces/（含真实对话，已 gitignore）。

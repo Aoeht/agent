@@ -1,5 +1,7 @@
 # ai_agent
 
+[![CI](https://github.com/Aoeht/agent/actions/workflows/ci.yml/badge.svg)](https://github.com/Aoeht/agent/actions/workflows/ci.yml)
+
 一个跑在终端里的通用 AI 助手：能联网搜索、读写你指定的本地目录、核查可疑链接，并可通过 MCP 协议挂载外部工具服务器。
 
 ## 先用起来
@@ -44,6 +46,7 @@ bun run typecheck                 # 类型检查（改完必跑）
 bun test                          # 全量测试
 bun src/rag/ingest.ts --sync <路径>  # 导入知识库资料（需先按说明书 4.6 打开 rag_search）
 bun run benchmarks/gaia_eval.ts --mock  # 评测链路自检（假模型、不花钱）
+bun run trace:report              # 聚合 .traces/ 运行轨迹，输出缓存命中/成本/工具错误率报告
 ```
 
 ## 项目结构

@@ -332,12 +332,27 @@ const ENV_KEYS = [
   "OPENAI_API_KEY",
 ] as const;
 
+/**
+ * 长窗口内只删这些。OPENAI_* 不能在这里删：deleteEnv 到 restoreEnv 之间跨了多次 await
+ * （起本地 stub 服务 + 真实检索），而 bun test 在同进程并发跑各测试文件、process.env 是
+ * 进程级共享的——这段时间里别的文件构造 OpenAI 客户端就会因拿不到凭证而失败。
+ * OPENAI_* 只在末尾那个"缺配置即抛错"的同步窗口里删，那里没有 await，窗口是微秒级。
+ */
+const LONG_WINDOW_ENV_KEYS = [
+  "EMBEDDING_MODEL",
+  "EMBEDDING_BASE_URL",
+  "EMBEDDING_API_KEY",
+  "EMBEDDING_DIMENSIONS",
+  "RAG_PG_URL",
+  "RAG_PG_SCHEMA",
+] as const;
+
 function pickEnv(): Record<string, string | undefined> {
   return Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
 }
 
 function deleteEnv(): void {
-  for (const key of ENV_KEYS) delete process.env[key];
+  for (const key of LONG_WINDOW_ENV_KEYS) delete process.env[key];
 }
 
 function restoreEnv(saved: Record<string, string | undefined>): void {
