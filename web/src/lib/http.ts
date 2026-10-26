@@ -1,6 +1,7 @@
 // web/src/lib/http.ts
 import type {
   ApprovalDecisionBody,
+  MessageSendResponse,
   ModelProbeStatusResponse,
   ServerEvent,
   SessionConfigEvent,
@@ -107,14 +108,20 @@ export class HttpTransport implements Transport {
     return () => source.close();
   }
 
-  async sendMessage(sessionId: string, text: string): Promise<{ queued: boolean; queueId: string }> {
+  async sendMessage(sessionId: string, text: string): Promise<Omit<MessageSendResponse, "ok">> {
     const resp = await this.request(`/sessions/${encodeURIComponent(sessionId)}/messages`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ text }),
     });
-    const parsed = (await resp.json()) as { queued?: boolean; queueId?: string };
-    return { queued: parsed.queued === true, queueId: parsed.queueId ?? "" };
+    const parsed = (await resp.json()) as Partial<MessageSendResponse>;
+    return {
+      queued: parsed.queued === true,
+      queueId: parsed.queueId ?? "",
+      ...(parsed.handled !== undefined ? { handled: parsed.handled } : {}),
+      ...(parsed.lines !== undefined ? { lines: parsed.lines } : {}),
+      ...(parsed.refresh !== undefined ? { refresh: parsed.refresh } : {}),
+    };
   }
 
   async removeQueuedMessage(sessionId: string, queueId: string): Promise<void> {

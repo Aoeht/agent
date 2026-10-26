@@ -51,7 +51,8 @@ async function fixture() {
   const bridge = new UiBridge(hub.publish, 5_000);
   const shared = new ToolRegistry();
   const runtime = {
-    config: { ...loadAgentConfig(), model: "default-model", stream: false },
+    // checkpointsEnabled=false：本文件不测检查点，快照钩子的 git 子进程会拖慢回合时序
+    config: { ...loadAgentConfig(), model: "default-model", stream: false, checkpointsEnabled: false },
     registry: shared, skills: [], sandbox: { backend: "host", reason: "test" },
     sandboxRoot: dir, mcp: { getStatus: () => [], closeAll: async () => {} },
     dispose: async () => {},

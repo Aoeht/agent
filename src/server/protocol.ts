@@ -245,6 +245,23 @@ export const ServerEventSchema = z.discriminatedUnion("type", [
 export type ServerEvent = z.infer<typeof ServerEventSchema>;
 export type SessionConfigEvent = Extract<ServerEvent, { type: "session_config" }>;
 
+/**
+ * POST /sessions/:id/messages 响应：普通消息入队走 run 生命周期（queued=true）；
+ * 斜杠命令命中命令通道时 handled=true，lines 为命令输出（就地执行，不入队、
+ * 不发 run_start/run_end、不落会话文件——与 REPL 终端打印同权的一次性 UI 态）。
+ */
+export interface MessageSendResponse {
+  ok: true;
+  queued: boolean;
+  /** handled 时无意义（命令不经队列），恒为 "" */
+  queueId: string;
+  handled?: boolean;
+  /** 命令输出行（handled 时有） */
+  lines?: string[];
+  /** "history" = 会话文件被改写（/rewind），前端应重拉历史与 session 详情 */
+  refresh?: "history";
+}
+
 // ---------- REST DTO ----------
 
 export interface SessionSummaryDTO {

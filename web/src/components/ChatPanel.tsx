@@ -135,6 +135,17 @@ function ChatItemView({ item }: { item: ChatItem }) {
       );
     case "tool":
       return <ToolCard item={item} />;
+    case "command":
+      return (
+        <div className="max-w-[85%] self-start rounded-2xl rounded-bl-md border border-cream-300 bg-cream-100/60 px-4 py-2.5 shadow-sm">
+          <p className="font-mono text-[13px] font-semibold leading-6 text-ink-700">⌨️ {item.text}</p>
+          {item.lines.map((line, index) => (
+            <p key={index} className="whitespace-pre-wrap break-words font-mono text-[13px] leading-6 text-ink-600">
+              {line}
+            </p>
+          ))}
+        </div>
+      );
     case "notice":
       return (
         <div

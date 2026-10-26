@@ -13,10 +13,12 @@ import type { AgentResult, ToolDefinition, ToolRuntime } from "../core/types";
 import type { UiBridge } from "./bridge";
 import { runSessionStore } from "./run_context";
 import type { ServerRuntime } from "./runtime";
-import type { ServerEvent, SessionConfigEvent, SessionDetailDTO, SessionSummaryDTO, StatusDTO, Citation, ThinkingEffort } from "./protocol";
+import type { ServerEvent, SessionConfigEvent, SessionDetailDTO, SessionSummaryDTO, StatusDTO, Citation, ThinkingEffort, MessageSendResponse } from "./protocol";
 import { RunOutcomeSchema } from "./protocol";
 import { TaskStore } from "../core/task_store";
 import { formatBudgetExtensionPrompt } from "../core/budget_prompt";
+import { handleSlashCommand, isCommandText, type RunStatsSummary } from "../core/command_router";
+import { CheckpointStore, createCheckpointSnapshotHook } from "../core/checkpoint_store";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 
@@ -97,6 +99,10 @@ interface SessionEntry {
   controller?: AbortController | undefined;
   /** 忙时到达的消息排队处（FIFO）；当前回合 finally 里自动接续下一条 */
   queue: QueuedMessage[];
+  /** 回合级检查点（/rewind 用）；随 agent 一起创建，AGENT_CHECKPOINTS=0 时为 undefined */
+  checkpoints?: CheckpointStore | undefined;
+  /** 上一回合用量摘要（/tokens 用）；runTurn 发布 run_end 后更新 */
+  lastRunStats?: RunStatsSummary | undefined;
 }
 
 export interface SessionManagerOptions {
@@ -327,13 +333,41 @@ export class SessionManager {
   }
 
   /**
-   * 发消息：统一入队再派发。会话空闲时立即开跑（与旧行为一致）；正忙时排队，
-   * 当前回合结束后自动按序接续——不再用 409 把消息打回。返回 queued=true 表示
-   * 这条消息在队列里等待（前端展示为排队芯片，run_start.queueId 到达时转正）。
+   * 发消息：斜杠命令与普通消息分两路。
+   * - 命令（/model /prompts /prompt /rewind /help /tokens 等，以 / 开头）：与 REPL
+   *   同一条路由就地执行——不入队、不发 run_start/run_end、不落会话文件（与 REPL
+   *   终端打印同权的一次性 UI 态）；/task* 例外，仍走下面的队列到 Agent 内部拦截。
+   * - 普通消息：统一入队再派发。会话空闲时立即开跑（与旧行为一致）；正忙时排队，
+   *   当前回合结束后自动按序接续——不再用 409 把消息打回。返回 queued=true 表示
+   *   这条消息在队列里等待（前端展示为排队芯片，run_start.queueId 到达时转正）。
    */
-  async sendMessage(sessionId: string, text: string): Promise<{ queued: boolean; queueId: string }> {
+  async sendMessage(
+    sessionId: string,
+    text: string
+  ): Promise<Omit<MessageSendResponse, "ok">> {
     const entry = this.entry(sessionId);
     if (entry.configuring) throw new Error("当前会话正在更新配置，请稍后再发");
+    if (isCommandText(text)) {
+      const agent = await this.ensureAgent(entry, sessionId);
+      const outcome = await handleSlashCommand(text, {
+        agent,
+        store: entry.store,
+        mcp: this.options.runtime.mcp,
+        checkpoints: entry.checkpoints,
+        isBusy: () => entry.controller !== undefined || entry.queue.length > 0,
+        lastRunStats: () => entry.lastRunStats,
+      });
+      if (outcome.kind === "handled") {
+        return {
+          queued: false,
+          queueId: "",
+          handled: true,
+          lines: outcome.lines,
+          ...(outcome.refresh ? { refresh: outcome.refresh } : {}),
+        };
+      }
+      // /task* 落回普通消息路径（Agent.runManaged 内部拦截）
+    }
     if (entry.queue.length >= MAX_QUEUE_LENGTH) throw new Error(`发送队列已满（${MAX_QUEUE_LENGTH} 条），请等当前回合结束`);
     const item: QueuedMessage = {
       id: `q-${randomUUID().slice(0, 8)}`,
@@ -508,6 +542,17 @@ export class SessionManager {
     // 提示词里的文件操作分工按本会话实际启用的工具生成
     const filesystemTools = registry.list().map((def) => def.name).filter((name) => name.startsWith("filesystem__"));
 
+    // 回合级检查点（/rewind）：影子仓库随会话目录存放（.agent-sessions 已 gitignore），
+    // 快照钩子与 CLI 共用同一工厂——历史 compact 与后台长期摘要落盘之后、本轮 user 消息落盘之前拍快照
+    const checkpoints = config.checkpointsEnabled
+      ? new CheckpointStore({
+          shadowRoot: path.join(entry.store.dir, "checkpoints", sessionId),
+          sandboxRoot,
+          sessionRecordCount: () => entry.store.recordCount(),
+        })
+      : undefined;
+    entry.checkpoints = checkpoints;
+
     const agent = new Agent({
       model: startup.model ?? config.model,
       // 沙箱根会话级可见（提示词里告诉模型工作区在哪）；切换沙箱后 Agent 整体重建
@@ -532,6 +577,7 @@ export class SessionManager {
       verificationRoot: sandboxRoot,
       requireHostAcceptanceCriteria: config.requireHostAcceptanceCriteria,
       stream: config.stream,
+      ...(checkpoints ? { onTurnStart: createCheckpointSnapshotHook(checkpoints) } : {}),
     });
     this.attachEventRelay(agent, sessionId);
     // 与 CLI 同等可观测性：每个会话独立一份运行轨迹
@@ -678,9 +724,20 @@ export class SessionManager {
       ...(result.citations.length > 0 ? { citations: result.citations } : {}),
     });
 
-    // 会话命名：与 REPL 的 createSessionNamer 同语义——只对第一个成功的回合尝试一次
+    // 上一回合用量摘要（/tokens 用）
+    entry.lastRunStats = {
+      totalTokens: result.totalTokens,
+      ...(result.cachedPromptTokens ? { cachedPromptTokens: result.cachedPromptTokens } : {}),
+      toolCallsCount: result.toolCallsCount,
+      iterations: result.steps.length,
+      model: agent.model,
+      stopReason: result.stopReason,
+    };
+
+    // 会话命名：与 REPL 的 createSessionNamer 同语义——只对第一个成功的回合尝试一次；
+    // 斜杠命令不触发起名（命令不产生对话内容，起名只会得到命令名本身）
     if (entry.needsName && result.success && result.finalAnswer !== null && !signal.aborted &&
-        text !== "/task" && !text.startsWith("/task status") && !text.startsWith("/task resolve")) {
+        !isCommandText(text)) {
       entry.needsName = false;
       const name = await agent.summarizeSessionName(text, result.finalAnswer, { signal });
       if (name !== undefined) {

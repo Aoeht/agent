@@ -281,3 +281,21 @@ export class CheckpointStore {
     }
   }
 }
+
+/**
+ * onTurnStart 快照钩子工厂：CLI 与 Web 服务器共用同一份接线（历史 compact 与
+ * 后台长期摘要落盘之后、本轮 user 消息落盘之前拍快照）。快照失败只告警不阻塞
+ * 回合——检查点是安全网，不能变成新的故障面。
+ */
+export function createCheckpointSnapshotHook(
+  checkpoints: CheckpointStore,
+  warn: (message: string) => void = (message) => console.warn(message)
+): (userMessage: string) => Promise<void> {
+  return async (userMessage: string) => {
+    try {
+      await checkpoints.snapshot(userMessage);
+    } catch (error) {
+      warn(`⚠️ [检查点] 快照失败（不影响本回合）: ${error instanceof Error ? error.message : error}`);
+    }
+  };
+}

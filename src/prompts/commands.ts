@@ -9,6 +9,7 @@
 //   inject（取到模板：text 供预览，messages 保留 role 交调用方分层注入，label 是出处）。
 import type { McpGetPromptResult, McpPromptInfo, McpPromptMessage } from "../mcp/types";
 import type { McpClientManager } from "../mcp/client_manager";
+import type { PromptTemplateInjection } from "../core/agent";
 
 /** handlePromptCommand 依赖的最小能力面；McpClientManager 已实现 */
 export interface PromptSource {
@@ -164,6 +165,28 @@ export function formatPromptMessages(messages: McpPromptMessage[]): string {
 /** 非文本块（图片/资源）留占位，避免 base64 灌进上下文 */
 function nonTextPlaceholder(type: string): string {
   return `[非文本内容: ${type}]`;
+}
+
+/**
+ * inject 结果 → Agent 的模板注入结构：只取文本内容，role 原样带上；含非文本块时返回 undefined。
+ * 共享给命令路由器（REPL 与 Web 同一条语义），不再留在入口文件里。
+ */
+export function toTemplateInjection(cmd: {
+  label: string;
+  messages: McpPromptMessage[];
+}): PromptTemplateInjection | undefined {
+  const messages: PromptTemplateInjection["messages"] = [];
+  for (const message of cmd.messages) {
+    if (message.content.type !== "text") return undefined; // 图片/资源块进不了模板通道
+    messages.push({ role: message.role, text: message.content.text });
+  }
+  return messages.length > 0 ? { label: cmd.label, messages } : undefined;
+}
+
+/** 单行预览：模板可能很长，终端/聊天里只给一眼能看清的开头 */
+export function previewTemplate(text: string, maxChars = 160): string {
+  const collapsed = text.replace(/\s+/g, " ").trim();
+  return collapsed.length > maxChars ? `${collapsed.slice(0, maxChars)}…` : collapsed;
 }
 
 function errMsg(error: unknown): string {

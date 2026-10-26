@@ -146,7 +146,7 @@ async function route(
       // 当前回合结束后自动接续（queued=true 时前端展示为排队芯片，run_start.queueId 转正）
       try {
         const result = await sessions.sendMessage(sessionId, text);
-        return json({ ok: true, queued: result.queued, queueId: result.queueId }, 202);
+        return json({ ok: true, ...result }, 202);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         return json({ error: message }, message.includes("队列已满") || message.includes("更新配置") ? 409 : 500);

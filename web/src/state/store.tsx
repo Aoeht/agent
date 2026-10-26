@@ -43,7 +43,9 @@ export type ChatItem =
       status: "running" | "done" | "error";
       result?: string;
     }
-  | { kind: "notice"; id: string; tone: "info" | "warn" | "error"; text: string };
+  | { kind: "notice"; id: string; tone: "info" | "warn" | "error"; text: string }
+  /** 斜杠命令的本地回显：⌨️ 命令原文 + 输出行（一次性 UI 态，不落盘，刷新后即消失） */
+  | { kind: "command"; id: string; text: string; lines: string[] };
 
 export type RunStatus = "idle" | "running" | "awaiting_approval" | "awaiting_input";
 
@@ -126,7 +128,11 @@ type Action =
   | { type: "approval_resolved"; id: string }
   | { type: "input_resolved"; id: string }
   | { type: "run_failed_local"; id: string; message: string }
-  | { type: "cancel_requested"; id: string };
+  | { type: "cancel_requested"; id: string }
+  /** 斜杠命令就地执行的回显（POST 应答 handled=true）；乐观气泡在 reducer 里收回换命令卡 */
+  | { type: "command_result"; id: string; text: string; lines: string[] }
+  /** 会话文件被改写（/rewind）后强制重拉的历史快照（session_opened 不覆盖已有 items） */
+  | { type: "history_reloaded"; id: string; detail: SessionDetailDTO };
 
 const uid = () => Math.random().toString(36).slice(2, 10);
 
@@ -518,6 +524,31 @@ function reducer(state: AppState, action: Action): AppState {
       if (!s) return state;
       return { ...state, byId: { ...state.byId, [action.id]: { ...s, cancelledByUser: true } } };
     }
+    case "command_result": {
+      const s = state.byId[action.id] ?? emptySession();
+      // 乐观气泡收回（空闲时 user_sent 加的那条），由命令卡承载命令原文与输出；
+      // 命令不经 run 生命周期，status 拉回 idle（user_sent 曾置 running）
+      const items = [...s.items];
+      const last = items[items.length - 1];
+      if (last?.kind === "user" && last.text === action.text) items.pop();
+      items.push({ kind: "command", id: uid(), text: action.text, lines: action.lines });
+      return { ...state, byId: { ...state.byId, [action.id]: { ...s, status: "idle", items } } };
+    }
+    case "history_reloaded": {
+      const s = state.byId[action.id] ?? emptySession();
+      return {
+        ...state,
+        byId: {
+          ...state.byId,
+          [action.id]: {
+            ...s,
+            summary: action.detail.summary,
+            items: historyToItems(action.detail),
+            ...(action.detail.task ? { task: action.detail.task, plan: action.detail.task.plan } : {}),
+          },
+        },
+      };
+    }
   }
 }
 
@@ -665,6 +696,20 @@ export function StoreProvider({
       if (!busy) dispatch({ type: "user_sent", id, text });
       try {
         const result = await resolvedTransport.sendMessage(id, text);
+        if (result.handled) {
+          // 斜杠命令通道：会话文件被改写（/rewind）时先重拉历史，再补命令卡
+          // （user_sent 的乐观气泡由 command_result 收回换成命令卡；/task 不走这里）
+          if (result.refresh === "history") {
+            try {
+              const detail = await resolvedTransport.openSession(id);
+              dispatch({ type: "history_reloaded", id, detail });
+            } catch {
+              // 重拉失败保留现状，命令输出照常显示
+            }
+          }
+          dispatch({ type: "command_result", id, text, lines: result.lines ?? [] });
+          return;
+        }
         if (result.queued) dispatch({ type: "queue_item_synced", id, item: { id: result.queueId, text } });
       } catch (error) {
         dispatch({

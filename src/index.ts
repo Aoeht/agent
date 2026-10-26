@@ -4,7 +4,6 @@ import { formatPlanCli } from "./core/plan_store";
 import type { McpClientManager } from "./mcp/client_manager";
 import { MCP_SANDBOX_DIR } from "./mcp/config";
 import { createCliConfirmer } from "./mcp/cli_confirmer";
-import { McpPromptMessage } from "./mcp/types";
 import path from "node:path";
 import readline from "node:readline/promises";
 import { SessionStore } from "./core/session_store";
@@ -12,12 +11,10 @@ import { newSession, pickSession, PickedSession } from "./core/session_picker";
 import { loadAgentConfig, resolveSessionDir } from "./config";
 import { createAgentStack } from "./bootstrap";
 import { buildSystemPrompt } from "./prompts/system";
-import { handlePromptCommand } from "./prompts/commands";
-import { handleModelCommand } from "./core/model_command";
+import { handleSlashCommand, isCommandText, type RunStatsSummary } from "./core/command_router";
 import { candidateModels, fetchZhipuAccountQuota, formatModelProbeLine, probeModels } from "./core/model_probe";
 import { TraceRecorder } from "./core/trace";
-import { CheckpointStore } from "./core/checkpoint_store";
-import { handleRewindCommand } from "./core/rewind_command";
+import { CheckpointStore, createCheckpointSnapshotHook } from "./core/checkpoint_store";
 import { AgentResult, StepInfo, ToolRuntime } from "./core/types";
 import { STOP_REASON_LABELS } from "./core/run_outcome";
 import { acceptedBudgetExtension, formatBudgetExtensionPrompt } from "./core/budget_prompt";
@@ -147,7 +144,7 @@ type SessionNamer = (
 function createSessionNamer(store: SessionStore, isFirstTurn: boolean): SessionNamer {
   let pending = isFirstTurn;
   return async (agent, userInput, result, signal) => {
-    if (!pending || userInput === "/task" || userInput.startsWith("/task status") || userInput.startsWith("/task resolve")) return;
+    if (!pending || isCommandText(userInput)) return;
     const answer = result.finalAnswer?.trim();
     if (!answer) return; // 本回合没拿到最终回答（取消/预算越线）：留给下一个成功的回合
     pending = false; // 只尝试一次，避免每轮都追问模型要标题
@@ -269,6 +266,8 @@ async function runRepl(
   // 空闲时为 null；运行中持有当前回合的 controller，供 SIGINT 取消
   let activeController: AbortController | null = null;
   let exitRequested = false;
+  // 上一回合用量摘要（/tokens 用）：回合结束后更新
+  let lastStats: RunStatsSummary | undefined;
   // 主循环是否正停在提示符上等输入：后台事件（长期摘要 fold 完成等）此时打印，
   // 先清掉提示行再输出、最后重绘提示符，避免糊成 "你> 🗜️ ..."
   let atPrompt = false;
@@ -281,8 +280,9 @@ async function runRepl(
     console.log(msg);
     rl.prompt();
   };
-  // /prompt 选中的模板：保留到手动清除，之后每轮都以独立消息注入（正文不靠历史重放）
-  let pendingPrompt: PromptTemplateInjection | undefined;
+  // /prompt 选中的模板：保留到手动清除，之后每轮都以独立消息注入（正文不靠历史重放）；
+  // 命令路由器经 templateRef 同步载入/清除，每轮 run 前由这里重设到 agent
+  const templateRef: { current: PromptTemplateInjection | undefined } = { current: undefined };
   // 续聊时把历史打到终端：内容一直在文件里也进了模型上下文，不回放会让人以为对话丢了；
   // 空回答（取消/上游过滤）也要占位并写明原因
   const loaded = await store.load();
@@ -294,11 +294,11 @@ async function runRepl(
   // 续聊时把上次选定的模板接回来；落盘记录本来就是 {role, text} 形态，直接还原，不做 content 伪装
   const restored = loaded.promptTemplate;
   if (restored) {
-    pendingPrompt = {
+    templateRef.current = {
       label: restored.label,
       messages: restored.messages as PromptTemplateInjection["messages"],
     };
-    agent.setPromptTemplate(pendingPrompt);
+    agent.setPromptTemplate(templateRef.current);
     console.log(`📌 接着用上次选定的模板 ${restored.label}（输入 /prompt 清除）`);
   }
 
@@ -316,7 +316,7 @@ async function runRepl(
   rl.on("SIGINT", onSigint);
   process.on("SIGINT", onSigint);
 
-  console.log("💬 交互模式：每行输入一个任务；/model 切换模型、/prompts 看模板、/prompt <id:name> [JSON] 选用（/prompt 清除）、/rewind 回滚到检查点；exit / quit / Ctrl+C 退出。");
+  console.log("💬 交互模式：每行输入一个任务；/help 查看全部命令（/model /prompts /prompt /rewind /task* /tokens）；exit / quit / Ctrl+C 退出。");
   try {
     while (!exitRequested) {
       atPrompt = true;
@@ -328,63 +328,28 @@ async function runRepl(
       if (!input) continue;
       if (["exit", "quit", "/exit", "/quit", "q"].includes(input.toLowerCase())) break;
 
-      // 模型命令：/model 查看当前模型、/model <名称> 切换。切换同时落盘，续聊时自动恢复
-      const modelCmd = await handleModelCommand(input, {
-        currentModel: () => agent.model,
-        switchModel: async (model) => {
-          agent.setModel(model);
-          await store.recordModel(agent.model);
-        },
+      // 斜杠命令：REPL 与 Web 走同一条路由（命令不进 LLM、不落会话文件、
+      // /task* 仍交回主循环走 Agent 内部拦截）
+      const cmdOutcome = await handleSlashCommand(input, {
+        agent,
+        store,
+        mcp,
+        checkpoints,
+        ask: (question) => lines.next(question),
+        lastRunStats: () => lastStats,
+        templateRef,
       });
-      if (modelCmd.kind === "handled") continue;
-
-      // prompt 命令：/prompts 列表、/prompt 取模板（保留待注入）、/prompt 空清除
-      const cmd = await handlePromptCommand(input, mcp);
-      if (cmd.kind === "inject") {
-        const converted = toTemplateInjection(cmd);
-        if (!converted) {
-          // 含图片/资源块的模板在本框架里落不了位（注入链只处理文本，落盘也只能存 JSON 文本）；
-          // 宁可明说不可用，也不"悄悄少一条 system 约束"或存一份恢复不了的模板
-          console.log("⚠️ 该模板含非文本消息块，当前注入链只支持文本，未选用。");
-          continue;
-        }
-        pendingPrompt = converted;
-        // 记进会话文件：历史里能查到"哪一轮换了哪个模板"，重启续聊时能读回来
-        await store.recordPromptTemplate(pendingPrompt);
-        console.log(`📌 模板 ${cmd.label} 已载入，后续每轮都以独立消息注入（正文不靠历史重放）；输入 /prompt 清除。`);
-        console.log(`   预览：${previewTemplate(cmd.text)}`);
-        continue;
-      }
-      if (cmd.kind === "handled") {
-        // 空 /prompt 是"清除"：立即同步到 agent 与会话文件，避免紧接着那一轮还带着已撤销的模板
-        if (input === "/prompt") {
-          pendingPrompt = undefined;
-          agent.setPromptTemplate(undefined);
-          await store.recordPromptTemplate(undefined);
-        }
-        continue;
-      }
-
-      // 回滚命令：/rewind 列出检查点，选一个恢复工作区代码和/或会话对话
-      if (
-        await handleRewindCommand(input, {
-          checkpoints,
-          sessionStore: store,
-          ask: (question) => lines.next(question),
-          settlePending: async () => {
-            await agent.flushSummary();
-          },
-        })
-      ) {
+      if (cmdOutcome.kind === "handled") {
+        for (const line of cmdOutcome.lines) console.log(line);
         continue;
       }
 
       // 普通输入：模板走独立注入通道，本轮跑完即止；不再拼进用户输入
-      agent.setPromptTemplate(pendingPrompt);
+      agent.setPromptTemplate(templateRef.current);
       const controller = new AbortController();
       activeController = controller;
       try {
-        await runTurn(agent, input, controller.signal, ui, {
+        const result = await runTurn(agent, input, controller.signal, ui, {
           requestHuman: (prompt, signal) => lines.next(prompt, signal),
           askUser: (prompt, signal) => lines.next(prompt, signal),
           nameSession,
@@ -400,6 +365,15 @@ async function runRepl(
             return approved;
           },
         });
+        // 上一回合用量摘要（/tokens 用）：模型取当前值（回合中途没切过就是本回合模型）
+        lastStats = {
+          totalTokens: result.totalTokens,
+          ...(result.cachedPromptTokens ? { cachedPromptTokens: result.cachedPromptTokens } : {}),
+          toolCallsCount: result.toolCallsCount,
+          iterations: result.steps.length,
+          model: agent.model,
+          stopReason: result.stopReason,
+        };
       } catch (error) {
         console.error(`\n❌ 本回合失败: ${error instanceof Error ? error.message : String(error)}`);
       } finally {
@@ -416,25 +390,6 @@ async function runRepl(
       console.log("⏹️ 长期摘要更新未完成即退出，已跳过（对话轮已落盘，续聊不受影响）。");
     }
   }
-}
-
-/** inject 结果 → Agent 的模板注入结构：只取文本内容，role 原样带上；含非文本块时返回 undefined */
-function toTemplateInjection(cmd: {
-  label: string;
-  messages: McpPromptMessage[];
-}): PromptTemplateInjection | undefined {
-  const messages: PromptTemplateInjection["messages"] = [];
-  for (const message of cmd.messages) {
-    if (message.content.type !== "text") return undefined; // 图片/资源块进不了模板通道
-    messages.push({ role: message.role, text: message.content.text });
-  }
-  return messages.length > 0 ? { label: cmd.label, messages } : undefined;
-}
-
-/** 单行预览：模板可能很长，终端里只给一眼能看清的开头 */
-function previewTemplate(text: string, maxChars = 160): string {
-  const collapsed = text.replace(/\s+/g, " ").trim();
-  return collapsed.length > maxChars ? `${collapsed.slice(0, maxChars)}…` : collapsed;
 }
 
 function readStdin(): Promise<string> {
@@ -528,17 +483,8 @@ async function main() {
       memoryRecall,
       memoryWriter,
       stream: config.stream,
-      ...(checkpoints
-        ? {
-            onTurnStart: async (userMessage: string) => {
-              try {
-                await checkpoints.snapshot(userMessage);
-              } catch (error) {
-                console.warn(`⚠️ [检查点] 快照失败（不影响本回合）: ${error instanceof Error ? error.message : error}`);
-              }
-            },
-          }
-        : {}),
+      // 回合级检查点快照钩子与 Web 服务器共用同一份工厂（checkpoint_store.ts）
+      ...(checkpoints ? { onTurnStart: createCheckpointSnapshotHook(checkpoints) } : {}),
     });
 
     // 6. 事件订阅：CLI 渲染与 trace 落盘是同一事件流的两个独立消费者
