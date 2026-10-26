@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "_说明": "人工标注格式见 benchmarks/scanner/README.md。gold 四个维度取值：high|medium|low|clean|unknown（中文别名也可，加载时归一）；标注员判不了的维度填 unknown，评测不计入 P/R 分母。cases 为空时 live/replay 没有可跑的用例。",
+  "cases": []
+}
