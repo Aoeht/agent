@@ -64,9 +64,6 @@ benchmarks/gaia-runs
 # `bunx skills add` 装来的第三方 Agent Skill（机器本地，来源与 hash 记在 skills-lock.json）
 .agents/
 
-# Obsidian 编辑器本地配置（workspace.json 每次开笔记都会变）
-docs/.obsidian/
-
-# 模型观测本地数据库（257MB 二进制数据，不入库）
-docs/observations.sqlite3
+# 个人文档与知识笔记（本地留存，不入库）
+docs/
 .mcp.json
