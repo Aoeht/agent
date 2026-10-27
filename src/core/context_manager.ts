@@ -2,6 +2,7 @@
 import OpenAI from "openai";
 import { Message } from "./types";
 import { CommercialTokenCounter } from "../utils/token_counter";
+import { estimateImageTokensFromDataUrl } from "../utils/image_tokens";
 import { wrapSummaryBlock } from "./untrusted";
 import {
   stripCitationPreamble,
@@ -66,8 +67,10 @@ export class ContextManager {
   private pinnedSet = new Set<Message>();
   // 每请求消息之外的固定开销（工具 schema 等），计入越线判断
   private overheadTokens = 0;
-  // 估算校准：actual/estimate 的 EMA。估算盲区（图片、tokenizer 误差）靠它吸收，
-  // 钳在 [1, 3]：只允许"更保守"，估算偏大时不会推迟压缩。
+  // 本次请求里不属于 messages 的临时 token（图片附件）：只参与越线判断，不进历史
+  private ephemeralTokens = 0;
+  // 估算校准：actual/estimate 的 EMA，吸收 tokenizer 词表差异与协议开销，
+  // 钳在 [1, 3]：只允许"更保守"，估算偏大时不会推迟压缩。图片不参与它（口径差异太大）。
   private calibrationRatio = 1;
   // 每条消息原始内容的 token 缓存：run 内消息 append-only，按对象身份缓存一次测量
   private tokenCache = new WeakMap<Message, { original: number; stubText?: string; stubTokens?: number }>();
@@ -97,6 +100,7 @@ export class ContextManager {
     this.pinnedSet = new Set();
     this.reachedStage = 0;
     this.summaryFailures = 0;
+    this.ephemeralTokens = 0;
     this.tokenCache = new WeakMap();
   }
 
@@ -130,14 +134,40 @@ export class ContextManager {
   }
 
   /**
-   * 用真实 usage 校准估算：估算盲区（图片、tokenizer 词表差异、协议开销）表现为
-   * actual/estimate 的比值，EMA 平滑后乘到后续估算上。
+   * 图片附件随请求发送但不进 messages（不进历史、不参与折叠）：
+   * Agent 在每次请求前把它们的估算值挂到这里，压缩水位才算得上这一步的真实开销。
+   */
+  setEphemeralRequestTokens(tokens: number): void {
+    this.ephemeralTokens = Math.max(0, Math.floor(tokens));
+  }
+
+  /** 图片消息的像素开销估算：文本 tokenizer 看不到，必须单独累加 */
+  estimateImageAttachmentTokens(messages: Iterable<Message>): number {
+    let total = 0;
+    for (const message of messages) {
+      if (!Array.isArray(message.content)) continue;
+      for (const part of message.content) {
+        if (part.type === "image_url") {
+          total += estimateImageTokensFromDataUrl(part.image_url.url, { model: this.config.modelName });
+        }
+      }
+    }
+    return total;
+  }
+
+  /**
+   * 用真实 usage 校准估算：tokenizer 词表差异与协议开销表现为 actual/estimate 的比值，
+   * EMA 平滑后乘到后续估算上。图片按独立口径估算并从比值里剔除，不参与校准。
    */
   recordPromptUsage(messages: Message[], actualPromptTokens: number): void {
     if (actualPromptTokens <= 0) return;
-    const estimate = this.estimateTokens(messages) + this.overheadTokens;
-    if (estimate <= 0) return;
-    const ratio = actualPromptTokens / estimate;
+    // 图片按各家口径估算误差很大，不进入文本校准：分子分母同时扣掉，
+    // 否则一次大图就会被钳到 3，把后续所有轮次的压缩阈值永久压小。
+    const imageTokens = this.estimateImageAttachmentTokens(messages);
+    const textEstimate = this.estimateTokens(messages) + this.overheadTokens - imageTokens;
+    const textActual = actualPromptTokens - imageTokens;
+    if (textEstimate <= 0 || textActual <= 0) return;
+    const ratio = textActual / textEstimate;
     this.calibrationRatio = Math.min(3, Math.max(1, this.calibrationRatio * 0.7 + ratio * 0.3));
   }
 
@@ -150,9 +180,9 @@ export class ContextManager {
     return total;
   }
 
-  /** 越线判断用的估算：原始估算 + 固定开销，再乘校准比（只放大不缩小） */
+  /** 越线判断用的估算：原始估算 + 固定开销 + 本次请求的图片附件，再乘校准比（只放大不缩小） */
   private effectiveTokens(rawEstimate: number): number {
-    return Math.ceil((rawEstimate + this.overheadTokens) * this.calibrationRatio);
+    return Math.ceil((rawEstimate + this.overheadTokens + this.ephemeralTokens) * this.calibrationRatio);
   }
 
   private entryFor(msg: Message): { original: number; stubText?: string; stubTokens?: number } {
@@ -172,6 +202,8 @@ export class ContextManager {
       for (const part of msg.content) {
         if (part.type === "text") {
           total += this.tokenCounter.estimateText(part.text, this.config.modelName);
+        } else if (part.type === "image_url") {
+          total += estimateImageTokensFromDataUrl(part.image_url.url, { model: this.config.modelName });
         }
       }
     }

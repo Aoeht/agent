@@ -911,6 +911,10 @@ export class Agent {
 
         iterations++;
 
+        // 图片附件不在 messages 里，但确实占窗口：压缩水位要把这批临时 token 算进去
+        this.contextManager.setEphemeralRequestTokens(
+          this.contextManager.estimateImageAttachmentTokens(imageMessages)
+        );
         const compressedMessages = await this.contextManager.compress(messages, { signal: runtime?.signal });
 
         // 统一走带重试的调用入口（stream: true 时内部走流式，token 事件实时发布）；
@@ -931,13 +935,14 @@ export class Agent {
           [...imageMessages]
         );
         lastCompletion = completion;
-        // 真实 usage 校准估算：图片不进 token 估算、tokenizer 也有误差，靠 actual/estimate 比值吸收
+        // 真实 usage 校准估算：图片单独估算并从比值里剔除，只让 tokenizer 误差进校准
         this.contextManager.recordPromptUsage(
           [...compressedMessages, ...imageMessages] as Message[],
           completion.tokens.promptTokens
         );
         // 图片只供下一次模型观察，避免跨轮重复发送大图。
         imageMessages.clear();
+        this.contextManager.setEphemeralRequestTokens(0);
 
         // 提取当前这一轮 LLM 调用的 Token 与模型输出
         const promptTokens = completion.tokens.promptTokens;
@@ -1187,6 +1192,9 @@ export class Agent {
         const forcedNote = budgetStopped
           ? `已触发运行预算上限（${budgetStopped}）。请不要再调用工具，立即基于以上已有信息给出最终答案。`
           : "已达到工具调用轮次上限。请不要再调用工具，立即基于以上已有信息给出最终答案。";
+        this.contextManager.setEphemeralRequestTokens(
+          this.contextManager.estimateImageAttachmentTokens(imageMessages)
+        );
         const compressedForFinal = await this.contextManager.compress(messages, { signal: runtime?.signal });
         const forcedParams = {
           model: this.config.model,

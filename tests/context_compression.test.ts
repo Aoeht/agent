@@ -22,6 +22,7 @@ import { ToolRegistry } from "../src/core/registry";
 import { defineTool } from "../src/core/types";
 import { processToolOutput } from "../src/core/tool_outputs";
 import { renderCitationBlock } from "../src/core/citations";
+import { estimateImageTokensFromDataUrl } from "../src/utils/image_tokens";
 import type { Message } from "../src/core/types";
 import type { CompactEvent } from "../src/core/events";
 
@@ -84,6 +85,17 @@ function longText(prefix: string, lines: number): string {
   return Array.from({ length: lines }, (_, i) => `${prefix}第${i}行：不同的内容片段 ${i * 7} 与补充说明${i}。`).join(
     ""
   );
+}
+
+/** 只带尺寸头的 PNG data URL：图片 token 估算走真实解析路径，不靠魔数 */
+function pngDataUrl(width: number, height: number): string {
+  const bytes = Buffer.alloc(33);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(bytes, 0);
+  bytes.writeUInt32BE(13, 8);
+  bytes.write("IHDR", 12, "ascii");
+  bytes.writeUInt32BE(width, 16);
+  bytes.writeUInt32BE(height, 20);
+  return `data:image/png;base64,${bytes.toString("base64")}`;
 }
 
 /** 典型越界场景：一组长对话 + 两个工具组（旧的输出巨大，最新的很小） */
@@ -495,6 +507,46 @@ describe("ContextManager", () => {
     // 校准后 2500 > 1000 → 触发折叠（messages 里有对话可折叠）
     const result = await cm.compress(overloadedMessages());
     expect(textOf(result[1])).toContain("历史上下文摘要");
+  });
+
+  test("图片附件按估算值计入本次请求的越线判断", async () => {
+    const { client } = makeSummaryClient();
+    const cm = makeManager(client, 20);
+    const messages: Message[] = [
+      { role: "system", content: "" },
+      { role: "user", content: "" },
+      { role: "user", content: "" },
+    ];
+    expect(await cm.compress(messages)).toBe(messages); // 12 tokens，预算内
+
+    cm.setEphemeralRequestTokens(20);
+    const result = await cm.compress(messages);
+    expect(result).not.toBe(messages); // 12 + 20 → 越线，必须降级
+    expect(result.length).toBeLessThan(messages.length);
+  });
+
+  test("带图片的 usage 只校准文本，不会把后续阈值永久压小", async () => {
+    const { client } = makeSummaryClient();
+    const cm = makeManager(client, 20);
+    const imageUrl = pngDataUrl(1280, 900);
+    const imageMessage: Message = {
+      role: "user",
+      content: [
+        { type: "text", text: "" },
+        { type: "image_url", image_url: { url: imageUrl } },
+      ],
+    };
+    const imageTokens = estimateImageTokensFromDataUrl(imageUrl, { model: "glm-4.6" });
+
+    // 文本部分估算 8 tokens；actual 只多出 16 → 文本比值 2，而不是把图片算进分母
+    cm.recordPromptUsage([{ role: "system", content: "" }, imageMessage], imageTokens + 16);
+
+    const messages: Message[] = [
+      { role: "system", content: "" },
+      { role: "user", content: "" },
+      { role: "user", content: "" },
+    ];
+    expect(await cm.compress(messages)).toBe(messages); // 12 × 1.3 ≈ 16，仍在 20 以内
   });
 
   test("摘要瞬时失败（429）会退避重试，恢复后不降级", async () => {
