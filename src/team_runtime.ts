@@ -10,6 +10,7 @@ import { wrapUntrustedData } from "./core/untrusted";
 import { projectChild, TeamOptionsSchema, type TeamOptions } from "./core/team_coordinator";
 import type { ChildFactory } from "./core/team_scheduler";
 import { SUBMISSION_INSTRUCTIONS, REVIEW_INSTRUCTIONS } from "./core/team_contracts";
+import { renderEnvBlock, snapshotEnv } from "./prompts/env_block";
 import { createUpdatePlanTool } from "./tools/update_plan";
 import { createReadTaskStateTool } from "./tools/set_acceptance_criteria";
 import { createToolTelemetry } from "./tools/telemetry";
@@ -72,6 +73,8 @@ export function createTeamChildFactory(stack: AgentStack, options: {
     const attemptId = `${execution.mode}-r${execution.round}-${execution.task.id}${repairing ? "-repair" : ""}`;
     const taskStore = new TaskStore(options.runDirectory
       ? path.join(options.runDirectory, "tasks", `${attemptId}.sqlite`) : undefined);
+    // 子代理只带日期（免 git spawn）：快照随子任务创建取一次，子任务生命周期内稳定
+    const childEnvBlock = renderEnvBlock(snapshotEnv(stack.sandboxRoot, { withGit: false }));
     const agent = new Agent({
       model: execution.mode === "review" ? (options.reviewModel ?? stack.config.model) : stack.config.model,
       client: options.client, summaryModel: stack.config.summaryModel,
@@ -93,7 +96,8 @@ export function createTeamChildFactory(stack: AgentStack, options: {
         (execution.round > 0 && execution.mode === "work" && !repairing
           ? "\n这是定向补查：保留原始交付和检查标准，针对反馈补充证据并返回完整的新结果；如果依赖结果改变，需要重新核对自己的结论。" +
             "反馈按 taskId 标注来源：自己的检查项之外，还可能附带被返工的直接依赖的检查项——它们说明上游结论为何不可靠，请据此重新核对自己的相关结论。"
-          : ""),
+          : "") +
+        `\n\n${childEnvBlock}`,
       untrustedContext: [stack.untrustedContext, JSON.stringify({
         dependencies: execution.dependencies.map(projectChild),
         previous: execution.previous ? projectChild(execution.previous) : undefined,

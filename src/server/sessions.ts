@@ -4,6 +4,7 @@ import { SessionStore } from "../core/session_store";
 import { newSession } from "../core/session_picker";
 import { TraceRecorder } from "../core/trace";
 import { buildSystemPrompt } from "../prompts/system";
+import { snapshotEnv } from "../prompts/env_block";
 import { ToolRegistry, ToolCallMiddleware, isErrorObservation } from "../core/registry";
 import { PlanStore } from "../core/plan_store";
 import { createToolTelemetry } from "../tools/telemetry";
@@ -557,8 +558,12 @@ export class SessionManager {
 
     const agent = new Agent({
       model: startup.model ?? config.model,
-      // 沙箱根会话级可见（提示词里告诉模型工作区在哪）；切换沙箱后 Agent 整体重建
-      systemPrompt: buildSystemPrompt(sandboxRoot, skills, { filesystemTools }),
+      // 沙箱根会话级可见（提示词里告诉模型工作区在哪）；切换沙箱后 Agent 整体重建。
+      // 环境快照随本次重建取一次，会话生命周期内不重算（缓存安全，见 env_block.ts）
+      systemPrompt: buildSystemPrompt(sandboxRoot, skills, {
+        filesystemTools,
+        env: snapshotEnv(sandboxRoot),
+      }),
       maxIterations: config.maxIterations,
       temperature: config.temperature,
       thinkingEffort: config.thinkingEffort,

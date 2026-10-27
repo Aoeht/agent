@@ -11,6 +11,7 @@ import { newSession, pickSession, PickedSession } from "./core/session_picker";
 import { loadAgentConfig, resolveSessionDir } from "./config";
 import { createAgentStack } from "./bootstrap";
 import { buildSystemPrompt } from "./prompts/system";
+import { snapshotEnv } from "./prompts/env_block";
 import { handleSlashCommand, isCommandText, type RunStatsSummary } from "./core/command_router";
 import { candidateModels, fetchZhipuAccountQuota, formatModelProbeLine, probeModels } from "./core/model_probe";
 import { TraceRecorder } from "./core/trace";
@@ -478,7 +479,11 @@ async function main() {
     // 5. 工具就绪后再初始化 Agent（模型/预算/迭代数来自配置层，工具集为入口组装的实例）
     const agent = new Agent({
       model: startup.model ?? config.model,
-      systemPrompt: buildSystemPrompt(MCP_SANDBOX_DIR, skills, { filesystemTools }),
+      systemPrompt: buildSystemPrompt(MCP_SANDBOX_DIR, skills, {
+        filesystemTools,
+        // 会话创建时快照一次，之后随 systemPrompt 固定——会话内稳定，不破坏前缀缓存
+        env: snapshotEnv(MCP_SANDBOX_DIR),
+      }),
       maxIterations: config.maxIterations,
       temperature: config.temperature,
       thinkingEffort: config.thinkingEffort,

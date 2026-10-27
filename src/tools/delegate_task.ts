@@ -24,6 +24,7 @@ import { PlanStore } from "../core/plan_store";
 import { TraceRecorder } from "../core/trace";
 import { wrapUntrustedData } from "../core/untrusted";
 import { createTeamRegistry, createScannerRegistry, TEAM_CAPABILITIES, SCANNER_CAPABILITIES } from "../team_runtime";
+import { renderEnvBlock, snapshotEnv } from "../prompts/env_block";
 import { defineTool } from "../core/types";
 import type { ToolRegistry } from "../core/registry";
 
@@ -99,6 +100,8 @@ const SCANNER_REPORT_SCHEMA =
   `"unresolved":["..."]}`;
 
 const childSystemPrompt = (role: string, sandboxRoot: string): string => {
+  // 子代理只带日期（免 git spawn）；快照随每次委派取一次，子代理生命周期内稳定
+  const envBlock = renderEnvBlock(snapshotEnv(sandboxRoot, { withGit: false }));
   if (role === "scanner") {
     return (
       `你是主对话派出的 scanner 子 Agent，专门对单个 B 站视频做诈骗风险扫描，` +
@@ -118,7 +121,8 @@ const childSystemPrompt = (role: string, sandboxRoot: string): string => {
       "- 引流（加微信/QQ、站外链接）是强风险信号但不是定性本身，要结合话术语境定性。\n" +
       "- 证据不足就降低风险等级并把疑点写进 unresolved，不要编造证据。\n" +
       "报告格式（最后一条消息）：先用 3~5 句中文给出结论，再输出一个 JSON 代码块，结构固定为：\n" +
-      SCANNER_REPORT_SCHEMA
+      SCANNER_REPORT_SCHEMA +
+      `\n\n${envBlock}`
     );
   }
   return (
@@ -127,7 +131,8 @@ const childSystemPrompt = (role: string, sandboxRoot: string): string => {
     "你看不到主对话的其它内容：任务描述里缺少的背景，要么自己查证，要么在结论里写明假设。\n" +
     ROLE_INSTRUCTIONS[role]! + "\n" +
     "只使用实际提供的工具；不能完成的操作如实说明。多步任务先用 update_plan 列计划，完成后更新步骤。\n" +
-    "报告要求：开头直接给结论；区分观察与推测；给出实际查阅过的 URL 或文件路径；列出未解决的问题；保持紧凑，除非任务明确要求详尽。"
+    "报告要求：开头直接给结论；区分观察与推测；给出实际查阅过的 URL 或文件路径；列出未解决的问题；保持紧凑，除非任务明确要求详尽。" +
+    `\n\n${envBlock}`
   );
 };
 
