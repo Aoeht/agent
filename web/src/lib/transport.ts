@@ -1,6 +1,8 @@
 // web/src/lib/transport.ts
 import type {
   ApprovalDecisionBody,
+  JobLogChunkDTO,
+  JobSummaryDTO,
   MessageSendResponse,
   ModelProbeStatusResponse,
   ServerEvent,
@@ -48,6 +50,12 @@ export interface Transport {
   listTools(sessionId: string): Promise<ToolStateDTO>;
   /** 设置本会话关闭的工具集合（立即生效：下一轮迭代的工具列表） */
   setToolState(sessionId: string, disabled: string[]): Promise<void>;
+  /** 后台脚本任务列表（最近 50 条，按开始时间倒序；服务端读取时校正状态） */
+  listJobs(): Promise<JobSummaryDTO[]>;
+  /** 日志增量：不带 after 取尾部快照（reset=true），带 after 按字节偏移续拉 */
+  readJobLog(jobId: string, stream: "stdout" | "stderr", after?: number): Promise<JobLogChunkDTO>;
+  /** 终止仍在跑的后台任务（已结束的任务原样返回） */
+  killJob(jobId: string): Promise<void>;
   /** 订阅事件流。返回退订函数；连接状态变化经 onStatus 上报 */
   subscribe(
     sessionId: string,

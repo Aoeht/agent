@@ -18,6 +18,9 @@
  *   GET    /sessions/:id/tasks        → TaskRecord[]（独立任务历史）
  *   POST   /sessions/:id/messages     body { text } → 202；忙时 409 { error }
  *   POST   /sessions/:id/cancel       → 204
+ *   GET    /jobs                      → { jobs: JobSummaryDTO[] }（最近 50 条，按开始时间倒序）
+ *   GET    /jobs/:id/log?stream=&after= → JobLogChunkDTO（不带 after 取尾部快照）
+ *   POST   /jobs/:id/kill             → { ok, status }；已在跑则终止
  *   POST   /approvals/:id             body ApprovalDecisionBody → 204；未知/已过期 404/410
  *   POST   /inputs/:id                body { text } → 204（human_input_request 的应答）
  *   GET    /status                    → StatusDTO
@@ -328,6 +331,43 @@ export interface StatusDTO {
   promptHash?: string;
   skills: string[];
   mcpServers: Array<{ id: string; ok: boolean; tools?: number }>;
+}
+
+// ---------- 后台脚本任务（GET /jobs） ----------
+
+/**
+ * 一条后台任务记录：结构对齐 core/job_store.ts 的 JobRecord（DTO 在协议层独立声明）。
+ * 状态在服务器**读取时**校正：到点回收标 timed_out；进程已消失又没收到 close 标 exited
+ * 并置 reconciled（真实退出码不可知，前端不要编一个）。
+ */
+export interface JobSummaryDTO {
+  id: string;
+  /** 工作区相对路径 */
+  script: string;
+  args: string[];
+  backend: "host" | "docker";
+  status: "running" | "exited" | "timed_out" | "killed";
+  exitCode?: number;
+  /** epoch 毫秒 */
+  startedAt: number;
+  deadlineAt: number;
+  endedAt?: number;
+  reconciled?: boolean;
+  container?: string;
+}
+
+/**
+ * GET /jobs/:id/log 的一帧：按字节偏移续拉即 tail -f。
+ * reset=true 表示这是尾部快照（首屏或文件变短），前端应清空后整体替换。
+ */
+export interface JobLogChunkDTO {
+  stream: "stdout" | "stderr";
+  text: string;
+  /** 下次请求的 after 偏移 */
+  offset: number;
+  /** 日志文件当前字节数（可展示进度） */
+  size: number;
+  reset: boolean;
 }
 
 /** POST /approvals/:id 的请求体：accept 可带表单内容，decline 不带 */

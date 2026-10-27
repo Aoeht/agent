@@ -50,7 +50,17 @@ async function setup(prefix: string) {
 }
 
 afterAll(async () => {
-  for (const root of roots) await fs.rm(root, { recursive: true, force: true });
+  // Windows 上被杀/刚退出的子进程可能短暂占着日志文件句柄，删除重试几次
+  for (const root of roots) {
+    for (let attempt = 0; attempt < 10; attempt++) {
+      try {
+        await fs.rm(root, { recursive: true, force: true });
+        break;
+      } catch {
+        await Bun.sleep(100);
+      }
+    }
+  }
 });
 
 test("background 立即返回 job_id，轮询到结束后能拿到退出码与输出", async () => {
@@ -169,4 +179,86 @@ test("killAll 收口所有仍在跑的后台任务", async () => {
 
   const view = (await inspect.execute({ job_id: started.job_id }, {})) as unknown as JobView;
   expect(view.status).toBe("killed");
+});
+
+test("日志窗口：首帧取尾部快照，随后按 offset 续拉增量且停在字符边界", async () => {
+  const { workDir, jobs, run } = await setup("job-log-");
+  await fs.writeFile(
+    path.join(workDir, "grow.js"),
+    `(async () => {
+      for (let i = 1; i <= 3; i++) { console.log("line-" + i); await Bun.sleep(150); }
+      console.error("err-line");
+    })();`,
+    "utf-8"
+  );
+  const started = (await run.execute(
+    { script: "grow.js", background: true },
+    { requestHuman: allow }
+  )) as unknown as { job_id: string };
+
+  const first = await jobs.readLog(started.job_id, "stdout");
+  expect(first.reset).toBe(true);
+  expect(first.size).toBeGreaterThanOrEqual(0);
+
+  // 从首帧拿到的 offset 续拉，条件轮询到三行都到齐
+  let offset = first.offset;
+  const chunks = [first.text];
+  await waitFor("按偏移续拉到 line-3", async () => {
+    const chunk = await jobs.readLog(started.job_id, "stdout", { after: offset });
+    expect(chunk.reset).toBe(false);
+    offset = chunk.offset;
+    chunks.push(chunk.text);
+    return chunks.join("").includes("line-3") ? true : undefined;
+  });
+  expect(chunks.join("")).toContain("line-1");
+
+  // 等进程真正退出再断言"无新增"，顺带让子进程释放日志句柄（Windows 清理依赖它）
+  await waitFor("任务退出", async () => {
+    const record = await jobs.get(started.job_id);
+    return record?.status === "exited" ? record : undefined;
+  });
+
+  // 已无新增：同一 offset 再拉是空帧
+  const idle = await jobs.readLog(started.job_id, "stdout", { after: offset });
+  expect(idle.text).toBe("");
+  expect(idle.offset).toBe(offset);
+
+  // 多字节字符被切在窗口边界时留给下一帧，不吐出半截
+  const splitId = "job-19700101-000000-utf8";
+  const huge = "a".repeat(32_767) + "中";
+  await fs.writeFile(jobs.paths(splitId).stdout, huge, "utf-8");
+  const head = await jobs.readLog(splitId, "stdout", { after: 0 });
+  expect(head.text).toBe("a".repeat(32_767));
+  expect(head.offset).toBe(32_767);
+  const rest = await jobs.readLog(splitId, "stdout", { after: head.offset });
+  expect(rest.text).toBe("中");
+  expect(rest.offset).toBe(Buffer.byteLength(huge));
+
+  // 未知任务的文件不存在：空内容而不是抛错
+  const missing = await jobs.readLog("job-19700101-000000-none", "stderr");
+  expect(missing.text).toBe("");
+  expect(missing.size).toBe(0);
+});
+
+test("kill 终止指定任务并标 killed；重复调用幂等", async () => {
+  const { workDir, jobs, run, inspect } = await setup("job-kill-one-");
+  await fs.writeFile(path.join(workDir, "stay3.js"), `setTimeout(() => {}, 60_000);`, "utf-8");
+  const started = (await run.execute(
+    { script: "stay3.js", background: true, timeout_ms: 60_000 },
+    { requestHuman: allow }
+  )) as unknown as { job_id: string };
+
+  await waitFor("任务已在运行", async () => {
+    const view = (await inspect.execute({ job_id: started.job_id }, {})) as unknown as JobView;
+    return view.status === "running" ? view : undefined;
+  });
+
+  const killed = await jobs.kill(started.job_id);
+  expect(killed?.status).toBe("killed");
+  expect(killed?.endedAt).toBeGreaterThan(0);
+
+  const again = await jobs.kill(started.job_id);
+  expect(again?.status).toBe("killed");
+  expect(again?.endedAt).toBe(killed?.endedAt);
+  expect(await jobs.kill("job-19700101-000000-none")).toBeUndefined();
 });

@@ -7,6 +7,7 @@ import { RightPanel } from "./components/RightPanel";
 import { Composer } from "./components/Composer";
 import { Welcome } from "./components/Welcome";
 import { ApprovalModal, InputModal } from "./components/Modals";
+import { JobsPanel } from "./components/JobsPanel";
 import { useMediaQuery } from "./lib/useMediaQuery";
 
 function StatusChip({ status }: { status: RunStatus }) {
@@ -36,6 +37,9 @@ export default function App() {
   const hasSidebar = useMediaQuery("(min-width: 1024px)");
   const hasPanel = useMediaQuery("(min-width: 1280px)");
   const [drawer, setDrawer] = useState<"sessions" | "panel" | null>(null);
+  // 后台任务面板是独立覆盖层：全局（不属于某个会话），入口在页头
+  const [jobsOpen, setJobsOpen] = useState(false);
+  const runningJobs = state.jobs.filter((job) => job.status === "running").length;
 
   // 跨断点后抽屉入口随断点消失，残存的开启状态一并收起
   useEffect(() => {
@@ -80,11 +84,25 @@ export default function App() {
           )}
           <h2 className="truncate text-sm font-semibold">{current ? headerTitle : "新会话"}</h2>
           {current && <StatusChip status={current.status} />}
-          {current && !hasPanel && (
-            <button onClick={() => setDrawer("panel")} title="任务与运行环境" className={`${iconBtn} ml-auto`}>
-              📋
+          <div className="ml-auto flex items-center gap-1">
+            <button
+              onClick={() => setJobsOpen(true)}
+              title={runningJobs > 0 ? `后台任务（${runningJobs} 个运行中）` : "后台任务"}
+              className={`relative ${iconBtn}`}
+            >
+              🖥️
+              {runningJobs > 0 && (
+                <span className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-clay-600 px-1 text-[9px] font-semibold leading-none text-cream-50">
+                  {runningJobs}
+                </span>
+              )}
             </button>
-          )}
+            {current && !hasPanel && (
+              <button onClick={() => setDrawer("panel")} title="任务与运行环境" className={iconBtn}>
+                📋
+              </button>
+            )}
+          </div>
         </header>
 
         {current ? (
@@ -124,6 +142,7 @@ export default function App() {
 
       <ApprovalModal />
       <InputModal />
+      <JobsPanel open={jobsOpen} onClose={() => setJobsOpen(false)} />
     </div>
   );
 }

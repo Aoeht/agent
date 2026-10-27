@@ -47,6 +47,8 @@ bun run src/server/main.ts          # 默认 http://127.0.0.1:8787
 
 服务器默认只绑回环地址；绑非回环地址又没设 `AGENT_UI_TOKEN`（≥32 字符）会拒绝启动。开发时改跑 `cd web && bun run dev`（Vite 5173，已代理到 8787）。
 
+后台跑的任务在页头 **🖥️ 后台任务** 里看：任务列表、运行时长、退出码，stdout/stderr 按 900ms 增量尾随（等同 `tail -f`），运行中的任务可直接终止——不用回对话里轮询 `job_output`。
+
 **团队**——多个子 Agent 并发干活，再独立复核：
 
 ```bash

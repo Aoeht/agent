@@ -1,6 +1,8 @@
 // web/src/lib/mock.ts
 import type {
   ApprovalDecisionBody,
+  JobLogChunkDTO,
+  JobSummaryDTO,
   ModelProbeStatusResponse,
   ServerEvent,
   SessionDetailDTO,
@@ -476,6 +478,33 @@ export class MockTransport implements Transport {
 
   async setToolState(sessionId: string, disabled: string[]): Promise<void> {
     this.disabledTools.set(sessionId, new Set(disabled));
+  }
+
+  // 演示数据：一条已结束的后台任务；真实后端经 JobStore 读取同目录 JSON
+  async listJobs(): Promise<JobSummaryDTO[]> {
+    const startedAt = Date.now() - 42_000;
+    return [{
+      id: "job-19700101-000000-demo",
+      script: "scripts/collect.py",
+      args: ["--pages", "5"],
+      backend: "host",
+      status: "exited",
+      exitCode: 0,
+      startedAt,
+      deadlineAt: startedAt + 600_000,
+      endedAt: startedAt + 38_400,
+    }];
+  }
+
+  async readJobLog(_jobId: string, stream: "stdout" | "stderr", after?: number): Promise<JobLogChunkDTO> {
+    const text = stream === "stdout" ? "[demo] 抓取第 1 页 … 完成\n[demo] 抓取第 2 页 … 完成\n" : "";
+    return after === undefined
+      ? { stream, text, offset: text.length, size: text.length, reset: true }
+      : { stream, text: "", offset: after, size: text.length, reset: false };
+  }
+
+  async killJob(_jobId: string): Promise<void> {
+    // 演示环境没有真实进程
   }
 
   subscribe(

@@ -7,6 +7,7 @@ import type { ScriptSandboxResolution } from "../tools/sandbox_docker";
 import type { MemoryStore } from "../core/memory_store";
 import type { MemoryRecall } from "../core/memory_recall";
 import type { MemoryWriter } from "../core/memory_writer";
+import type { JobStore } from "../core/job_store";
 import { createAgentStack } from "../bootstrap";
 import type { UiBridge } from "./bridge";
 
@@ -30,6 +31,8 @@ export interface ServerRuntime {
   memoryWriter: MemoryWriter;
   /** 当前沙箱根（绝对路径）。UI 切换后整栈重建并更新此字段 */
   sandboxRoot: string;
+  /** 后台任务仓：会话的 run_script/job_output 与 /jobs 路由共用同一实例（面板读日志、终止任务） */
+  jobs: JobStore;
   /**
    * 远程收紧：全栈不注册 run_script（共享栈与每会话注册表同一份清单）。
    * 由 main.ts 依 AGENT_UI_REMOTE_HARDENING 设定；切换沙箱根重建时原样带上，
@@ -62,6 +65,7 @@ export async function createServerRuntime(options: {
     memoryRecall: stack.memoryRecall,
     memoryWriter: stack.memoryWriter,
     sandboxRoot: stack.sandboxRoot,
+    jobs: stack.jobs,
     disableRunScript: options.disableRunScript === true,
     ...(stack.untrustedContext !== "" ? { untrustedContext: stack.untrustedContext } : {}),
     dispose: stack.dispose,
@@ -93,6 +97,7 @@ export async function rebuildRuntimeWithSandboxRoot(
   runtime.memoryRecall = next.memoryRecall;
   runtime.memoryWriter = next.memoryWriter;
   runtime.sandboxRoot = next.sandboxRoot;
+  runtime.jobs = next.jobs;
   runtime.untrustedContext = next.untrustedContext !== "" ? next.untrustedContext : undefined;
   runtime.dispose = next.dispose;
   await previousDispose();

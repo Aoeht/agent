@@ -515,7 +515,7 @@ export class SessionManager {
   }
 
   private async createAgent(entry: SessionEntry, sessionId: string): Promise<Agent> {
-    const { config, registry: sharedRegistry, skills, sandbox, sandboxRoot, disableRunScript, memoryStore, memoryRecall, memoryWriter } = this.options.runtime;
+    const { config, registry: sharedRegistry, skills, sandbox, sandboxRoot, disableRunScript, memoryStore, memoryRecall, memoryWriter, jobs } = this.options.runtime;
     const startup = await entry.store.load();
     entry.needsName = startup.messages.length === 0;
 
@@ -530,6 +530,8 @@ export class SessionManager {
       skills, planStore, sandbox, sandboxRoot, disableRunScript,
       config,
       memoryStore,
+      // 全服共用一个任务仓实例：/jobs 面板与各会话看到的 tracked 状态一致
+      jobs,
       // 委派子代理的轨迹落在本会话目录下，随会话一起可查
       delegateTraceDir: path.join(entry.store.dir, "delegates"),
     });

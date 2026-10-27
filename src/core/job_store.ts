@@ -44,6 +44,23 @@ export interface JobLogs {
   stderrBytes: number;
 }
 
+export type JobStream = "stdout" | "stderr";
+
+/** 增量日志块：after 偏移语义，前端按 offset 续拉就是 tail -f */
+export interface JobLogChunk {
+  stream: JobStream;
+  /** 本次新增的文本；reset=true 时是尾部窗口的完整快照（前端应清空重放） */
+  text: string;
+  /** 下次请求的 after 偏移（字节） */
+  offset: number;
+  /** 文件当前字节数 */
+  size: number;
+  reset: boolean;
+}
+
+/** 单次增量读取的字节上限：UI 掉线一段时间后不该一次拉回整份日志 */
+const MAX_CHUNK_BYTES = 32_768;
+
 const ID_PATTERN = /^job-[0-9]{8}-[0-9]{6}-[a-z0-9]{4}$/;
 
 /** shell 惯例：124 = 超时终止；与 tools/sandbox_docker.ts 的 EXIT_TIMED_OUT 同口径 */
@@ -92,6 +109,23 @@ async function readTail(file: string, chars: number): Promise<{ text: string; by
   } finally {
     await handle?.close().catch(() => {});
   }
+}
+
+/**
+ * 增量读取按字节切窗，多字节字符可能被切一半：把末尾不完整的序列留到下一次。
+ * 返回可以安全解码的字节数（不含被截断的尾部）。
+ */
+function cutIncompleteUtf8(buf: Buffer): number {
+  let index = buf.length - 1;
+  let continuation = 0;
+  while (index >= 0 && (buf[index]! & 0xc0) === 0x80 && continuation < 3) {
+    index--;
+    continuation++;
+  }
+  if (index < 0) return buf.length;
+  const lead = buf[index]!;
+  const need = lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc0 ? 2 : 1;
+  return continuation + 1 < need ? index : buf.length;
 }
 
 export class JobStore {
@@ -192,6 +226,63 @@ export class JobStore {
     const paths = this.paths(id);
     const [stdout, stderr] = await Promise.all([readTail(paths.stdout, chars), readTail(paths.stderr, chars)]);
     return { stdout: stdout.text, stderr: stderr.text, stdoutBytes: stdout.bytes, stderrBytes: stderr.bytes };
+  }
+
+  /**
+   * 日志窗口读取：
+   * - 不传 after → 返回尾部快照（reset=true），用于打开面板时的首屏；
+   * - 传 after → 返回 [after, after+chunk) 的增量（reset=false）；
+   * - after 超出文件大小（日志被清空/换了一份）→ 同样回尾部快照重来。
+   */
+  async readLog(
+    id: string,
+    stream: JobStream,
+    options: { after?: number; maxChars?: number } = {}
+  ): Promise<JobLogChunk> {
+    const maxChars = Math.min(40_000, Math.max(200, options.maxChars ?? 8_000));
+    const { after } = options;
+    const file = this.paths(id)[stream];
+    let handle: FileHandle | undefined;
+    try {
+      handle = await fs.open(file, "r");
+      const { size } = await handle.stat();
+      const tail = async (): Promise<JobLogChunk> => {
+        const start = Math.max(0, size - maxChars * 4);
+        const buffer = Buffer.alloc(size - start);
+        if (buffer.length > 0) await handle!.read(buffer, 0, buffer.length, start);
+        let text = buffer.toString("utf-8");
+        if (text.length > maxChars) text = text.slice(text.length - maxChars);
+        return { stream, text, offset: size, size, reset: true };
+      };
+      if (after === undefined || after > size) return await tail();
+      const end = Math.min(size, after + MAX_CHUNK_BYTES);
+      if (end <= after) return { stream, text: "", offset: after, size, reset: false };
+      const buffer = Buffer.alloc(end - after);
+      await handle.read(buffer, 0, buffer.length, after);
+      const consumed = cutIncompleteUtf8(buffer);
+      return {
+        stream,
+        text: buffer.subarray(0, consumed).toString("utf-8"),
+        offset: after + consumed,
+        size,
+        reset: false,
+      };
+    } catch {
+      return { stream, text: "", offset: after ?? 0, size: 0, reset: after === undefined };
+    } finally {
+      await handle?.close().catch(() => {});
+    }
+  }
+
+  /** 面板上的「终止」：与到点回收同一套 kill 粒度；已结束的任务原样返回 */
+  async kill(id: string): Promise<JobRecord | undefined> {
+    const record = await this.read(id);
+    if (record === undefined) return undefined;
+    if (record.status !== "running") return record;
+    await this.terminate(record);
+    const killed: JobRecord = { ...record, status: "killed", endedAt: Date.now() };
+    await this.save(killed);
+    return killed;
   }
 
   /**

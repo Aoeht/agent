@@ -25,7 +25,8 @@ import { THINKING_EFFORTS } from "../utils/thinking_effort";
 import { AuthGate, assertUsableToken, bindRefusal, sandboxRefusal } from "./auth";
 import { createServerRuntime, rebuildRuntimeWithSandboxRoot, type ServerRuntime } from "./runtime";
 import { EventHub, SessionManager } from "./sessions";
-import type { ServerEvent } from "./protocol";
+import type { ServerEvent, JobSummaryDTO } from "./protocol";
+import type { JobRecord } from "../core/job_store";
 
 const PORT = intEnv("AGENT_UI_PORT", 8787);
 const HOST = process.env.AGENT_UI_HOST?.trim() || "127.0.0.1";
@@ -182,6 +183,34 @@ async function route(
       return new Response(null, { status: 204 });
     }
 
+    // ---- 后台脚本任务：面板列表 / 增量日志 / 终止 ----
+    // 任务全局共享（不属于某个会话）：run_script background 起一个，面板凭 after 偏移续拉日志
+    if (pathname === "/jobs" && method === "GET") {
+      const rawLimit = Number.parseInt(url.searchParams.get("limit") ?? "", 10);
+      const limit = Number.isFinite(rawLimit) ? Math.min(200, Math.max(1, rawLimit)) : 50;
+      const records = await runtime.jobs.list(limit);
+      return json({ jobs: records.map(toJobSummary) });
+    }
+
+    const jobLogMatch = /^\/jobs\/([^/]+)\/log$/.exec(pathname);
+    if (jobLogMatch && method === "GET") {
+      const id = decodeURIComponent(jobLogMatch[1]!);
+      if ((await runtime.jobs.get(id)) === undefined) return json({ error: "未找到后台任务" }, 404);
+      const stream = url.searchParams.get("stream") === "stderr" ? "stderr" : "stdout";
+      const rawAfter = Number.parseInt(url.searchParams.get("after") ?? "", 10);
+      const chunk = await runtime.jobs.readLog(id, stream, {
+        ...(Number.isFinite(rawAfter) && rawAfter >= 0 ? { after: rawAfter } : {}),
+      });
+      return json(chunk);
+    }
+
+    const jobKillMatch = /^\/jobs\/([^/]+)\/kill$/.exec(pathname);
+    if (jobKillMatch && method === "POST") {
+      const record = await runtime.jobs.kill(decodeURIComponent(jobKillMatch[1]!));
+      if (record === undefined) return json({ error: "未找到后台任务" }, 404);
+      return json({ ok: true, status: record.status });
+    }
+
     // ---- 审批与人工输入 ----
     const approvalMatch = /^\/approvals\/([^/]+)$/.exec(pathname);
     if (approvalMatch && method === "POST") {
@@ -323,6 +352,23 @@ function json(data: unknown, status = 200): Response {
     status,
     headers: { "content-type": "application/json; charset=utf-8" },
   });
+}
+
+/** 任务记录 → 线协议 DTO：只透出面板需要的字段（pid 等进程内细节不出网） */
+function toJobSummary(record: JobRecord): JobSummaryDTO {
+  return {
+    id: record.id,
+    script: record.script,
+    args: record.args,
+    backend: record.backend,
+    status: record.status,
+    ...(record.exitCode !== undefined ? { exitCode: record.exitCode } : {}),
+    startedAt: record.startedAt,
+    deadlineAt: record.deadlineAt,
+    ...(record.endedAt !== undefined ? { endedAt: record.endedAt } : {}),
+    ...(record.reconciled === true ? { reconciled: true } : {}),
+    ...(record.container !== undefined ? { container: record.container } : {}),
+  };
 }
 
 // ---------- 模型清单 ----------

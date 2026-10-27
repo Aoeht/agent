@@ -1,6 +1,8 @@
 // web/src/lib/http.ts
 import type {
   ApprovalDecisionBody,
+  JobLogChunkDTO,
+  JobSummaryDTO,
   MessageSendResponse,
   ModelProbeStatusResponse,
   ServerEvent,
@@ -87,6 +89,20 @@ export class HttpTransport implements Transport {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ disabled }),
     });
+  }
+
+  async listJobs(): Promise<JobSummaryDTO[]> {
+    const body = (await (await this.request("/jobs")).json()) as { jobs?: JobSummaryDTO[] };
+    return body.jobs ?? [];
+  }
+
+  async readJobLog(jobId: string, stream: "stdout" | "stderr", after?: number): Promise<JobLogChunkDTO> {
+    const query = `stream=${stream}${after === undefined ? "" : `&after=${after}`}`;
+    return (await this.request(`/jobs/${encodeURIComponent(jobId)}/log?${query}`)).json();
+  }
+
+  async killJob(jobId: string): Promise<void> {
+    await this.request(`/jobs/${encodeURIComponent(jobId)}/kill`, { method: "POST" });
   }
 
   subscribe(

@@ -11,6 +11,7 @@ import {
 } from "react";
 import type {
   ApprovalDecisionBody,
+  JobSummaryDTO,
   ModelProbeStatus,
   PlanStep,
   ServerEvent,
@@ -108,6 +109,8 @@ interface AppState {
   modelAccountQuota?: string;
   /** 服务器级设置（目前只有沙箱根目录） */
   appSettings: { sandboxRoot?: string };
+  /** 后台脚本任务（服务器全局，不属于某个会话；轮询刷新） */
+  jobs: JobSummaryDTO[];
 }
 
 // ---------- Action 与 reducer ----------
@@ -118,6 +121,7 @@ type Action =
   | { type: "model_status_loaded"; status: ModelProbeStatus[]; accountQuota?: string }
   | { type: "settings_loaded"; sandboxRoot?: string }
   | { type: "sandbox_root_changed"; sandboxRoot: string }
+  | { type: "jobs_loaded"; jobs: JobSummaryDTO[] }
   | { type: "tools_loaded"; id: string; tools: Array<{ name: string; description: string }>; disabled: string[] }
   | { type: "session_created"; summary: SessionSummaryDTO }
   | { type: "session_opened"; detail: SessionDetailDTO }
@@ -429,6 +433,8 @@ function reducer(state: AppState, action: Action): AppState {
       };
     case "sandbox_root_changed":
       return { ...state, appSettings: { ...state.appSettings, sandboxRoot: action.sandboxRoot } };
+    case "jobs_loaded":
+      return { ...state, jobs: action.jobs };
     case "tools_loaded": {
       const s = state.byId[action.id];
       if (!s) return state;
@@ -582,6 +588,12 @@ export interface Store {
     applySessionConfig(config: SessionConfigInput): Promise<void>;
     setSandboxRoot(dir: string): Promise<void>;
     toggleTool(name: string, enabled: boolean): Promise<void>;
+    /** 重拉后台任务列表（面板打开时高频调用） */
+    refreshJobs(): Promise<void>;
+    /** 终止一个仍在跑的后台任务 */
+    killJob(id: string): Promise<void>;
+    /** 后台任务日志增量（面板自己持有文本状态，不进全局 store） */
+    readJobLog(jobId: string, stream: "stdout" | "stderr", after?: number): Promise<import("@protocol").JobLogChunkDTO>;
   };
 }
 
@@ -606,6 +618,7 @@ export function StoreProvider({
     models: [],
     modelStatus: [],
     appSettings: {},
+    jobs: [],
   });
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -641,6 +654,27 @@ export function StoreProvider({
     });
     return () => {
       alive = false;
+    };
+  }, [resolvedTransport]);
+
+  // 后台任务全局轮询：页头徽标与面板共用这份状态。面板打开时另有 1s 刷新
+  useEffect(() => {
+    let alive = true;
+    const load = (): void => {
+      void resolvedTransport
+        .listJobs()
+        .then((jobs) => {
+          if (alive) dispatch({ type: "jobs_loaded", jobs });
+        })
+        .catch(() => {
+          // 老版本后端没有 /jobs：静默保持空列表
+        });
+    };
+    load();
+    const timer = setInterval(load, 5_000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
     };
   }, [resolvedTransport]);
 
@@ -819,6 +853,18 @@ export function StoreProvider({
           const toolState = await resolvedTransport.listTools(id);
           dispatch({ type: "tools_loaded", id, ...toolState });
         }
+      },
+      async refreshJobs() {
+        const jobs = await resolvedTransport.listJobs();
+        dispatch({ type: "jobs_loaded", jobs });
+      },
+      async killJob(id: string) {
+        await resolvedTransport.killJob(id);
+        const jobs = await resolvedTransport.listJobs();
+        dispatch({ type: "jobs_loaded", jobs });
+      },
+      async readJobLog(jobId, stream, after) {
+        return resolvedTransport.readJobLog(jobId, stream, after);
       },
     };
   }, [resolvedTransport]);
