@@ -9,6 +9,7 @@ const TOOL_NAMES: Record<string, string> = {
   git_tree: "仓库结构",
   rag_search: "知识库检索",
   run_script: "脚本执行",
+  job_output: "后台任务",
   tavily_search: "网页搜索",
   update_plan: "更新计划",
   load_skill: "读取技能",
@@ -20,6 +21,14 @@ function StatusDot({ status }: { status: "running" | "done" | "error" }) {
   const color =
     status === "running" ? "bg-clay-500 animate-pulse" : status === "done" ? "bg-sage-500" : "bg-terra-500";
   return <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${color}`} />;
+}
+
+/** 心跳间隔 5s，只到秒级就够了；超过一分钟换成 m分s秒 */
+function formatElapsed(ms: number): string {
+  if (ms < 60_000) return `${Math.round(ms / 1_000)}s`;
+  const minutes = Math.floor(ms / 60_000);
+  const seconds = Math.round((ms % 60_000) / 1_000);
+  return `${minutes}m${String(seconds).padStart(2, "0")}s`;
 }
 
 function ToolCard({ item }: { item: Extract<ChatItem, { kind: "tool" }> }) {
@@ -57,7 +66,11 @@ function ToolCard({ item }: { item: Extract<ChatItem, { kind: "tool" }> }) {
               {argsPretty}
             </pre>
           </div>
-          {item.status === "running" && <p className="text-xs text-ink-400">执行中…</p>}
+          {item.status === "running" && (
+            <p className="text-xs text-ink-400">
+              执行中…{item.elapsedMs !== undefined ? ` 已运行 ${formatElapsed(item.elapsedMs)}` : ""}
+            </p>
+          )}
           {item.result !== undefined && item.status !== "running" && (
             <div>
               <p className="mb-1 text-[11px] font-medium tracking-wide text-ink-400">

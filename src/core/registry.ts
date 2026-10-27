@@ -3,9 +3,27 @@ import { ToolDefinition, ToolRuntime } from "./types";
 
 /** 一次工具调用的上下文，供注册表级中间件读取 */
 export interface ToolCallContext {
+  /**
+   * 模型的 tool_call id（与 Agent 的 tool_start/tool_progress/tool_end 事件同值）。
+   * 中间件靠它把「开始/进度/结束」对齐到同一次调用；直连 execute 时缺省。
+   */
+  id?: string;
   name: string;
   args: unknown;
   runtime?: ToolRuntime;
+}
+
+/**
+ * 工具观测是否是错误：registry 把 execute 的异常统一序列化成 {"error": "..."}，
+ * 事件消费者（trace/CLI/Web）据此区分成功与否，不必各自 JSON.parse。
+ */
+export function isErrorObservation(observation: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(observation);
+    return typeof parsed === "object" && parsed !== null && "error" in parsed;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -103,7 +121,7 @@ export class ToolRegistry {
     }));
   }
 
-  async execute(name: string, args: unknown, runtime?: ToolRuntime): Promise<string> {
+  async execute(name: string, args: unknown, runtime?: ToolRuntime, callId?: string): Promise<string> {
     const tool = this.tools.get(name);
     if (!tool) throw new Error(`Unknown tool: ${name}`);
 
@@ -111,6 +129,7 @@ export class ToolRegistry {
       name,
       args,
       ...(runtime !== undefined ? { runtime } : {}),
+      ...(callId !== undefined ? { id: callId } : {}),
     };
     const chain = [...this.middlewares].reduceRight<() => Promise<string>>(
       (next, middleware) => () => middleware(context, next),

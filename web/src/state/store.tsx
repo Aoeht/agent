@@ -42,6 +42,8 @@ export type ChatItem =
       args: string;
       status: "running" | "done" | "error";
       result?: string;
+      /** 最近一次心跳报告的已运行毫秒数（长阻塞工具才有） */
+      elapsedMs?: number;
     }
   | { kind: "notice"; id: string; tone: "info" | "warn" | "error"; text: string }
   /** 斜杠命令的本地回显：⌨️ 命令原文 + 输出行（一次性 UI 态，不落盘，刷新后即消失） */
@@ -257,6 +259,13 @@ export function applyEvent(s: SessionUIState, e: ServerEvent): SessionUIState {
                 result: e.result ?? item.result,
               }
             : item
+        ),
+      };
+    case "tool_progress":
+      return {
+        ...s,
+        items: s.items.map((item) =>
+          item.kind === "tool" && item.callId === e.callId ? { ...item, elapsedMs: e.elapsedMs } : item
         ),
       };
     case "step": {

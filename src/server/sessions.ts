@@ -4,7 +4,7 @@ import { SessionStore } from "../core/session_store";
 import { newSession } from "../core/session_picker";
 import { TraceRecorder } from "../core/trace";
 import { buildSystemPrompt } from "../prompts/system";
-import { ToolRegistry, ToolCallMiddleware } from "../core/registry";
+import { ToolRegistry, ToolCallMiddleware, isErrorObservation } from "../core/registry";
 import { PlanStore } from "../core/plan_store";
 import { createToolTelemetry } from "../tools/telemetry";
 import { copyMcpTools, registerSessionTools } from "../bootstrap";
@@ -617,6 +617,10 @@ export class SessionManager {
     agent.events.on("plan_update", ({ steps }) => {
       hub.publish(sessionId, { type: "plan_update", steps });
     });
+    // 工具心跳：开始/结束仍由注册表中间件发（带结果原文），这里只补"已运行多久"
+    agent.events.on("tool_progress", ({ callId, name, elapsedMs }) => {
+      hub.publish(sessionId, { type: "tool_progress", callId, name, elapsedMs });
+    });
     agent.events.on("compact", (info) => {
       hub.publish(sessionId, {
         type: "compact",
@@ -752,7 +756,8 @@ export class SessionManager {
 let toolEventSeq = 0;
 function createToolEventBridge(hub: EventHub, sessionId: string): ToolCallMiddleware {
   return async (context, next) => {
-    const callId = `tool-${Date.now().toString(36)}-${++toolEventSeq}`;
+    // 优先用模型 tool_call id：与核心的 tool_progress 心跳同值，前端才能把两者贴到同一张卡片
+    const callId = context.id ?? `tool-${Date.now().toString(36)}-${++toolEventSeq}`;
     hub.publish(sessionId, {
       type: "tool_call_start",
       callId,
@@ -761,7 +766,13 @@ function createToolEventBridge(hub: EventHub, sessionId: string): ToolCallMiddle
     });
     try {
       const result = await next();
-      hub.publish(sessionId, { type: "tool_call_end", callId, result: clipForUi(result) });
+      hub.publish(sessionId, {
+        type: "tool_call_end",
+        callId,
+        // 工具错误由注册表序列化成 {"error": ...}，不是异常；不认出来 UI 会把失败显示成绿色
+        ...(isErrorObservation(result) ? { isError: true } : {}),
+        result: clipForUi(result),
+      });
       return result;
     } catch (error) {
       hub.publish(sessionId, {

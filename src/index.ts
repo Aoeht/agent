@@ -107,6 +107,20 @@ class LineSource {
  */
 let printAsyncEvent: (msg: string) => void = (msg) => console.log(msg);
 
+/** 工具事件走滚动日志：参数压成一行、超长截断，别把整段 JSON 铺满终端 */
+function clipConsole(text: string, maxChars: number): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > maxChars ? `${flat.slice(0, maxChars)}…` : flat;
+}
+
+function formatElapsed(ms: number): string {
+  if (ms < 1_000) return `${ms}ms`;
+  if (ms < 60_000) return `${(ms / 1_000).toFixed(1)}s`;
+  const minutes = Math.floor(ms / 60_000);
+  const seconds = Math.round((ms % 60_000) / 1_000);
+  return `${minutes}m${String(seconds).padStart(2, "0")}s`;
+}
+
 function printStep(step: StepInfo, includeContent: boolean): void {
   console.log(`\n============== [迭代 ${step.iteration}] ==============`);
   const cached = step.tokens.cachedPromptTokens;
@@ -510,6 +524,16 @@ async function main() {
     });
     agent.events.on("retry", (info) => {
       console.warn(`⚠️ [LLM] 第 ${info.attempt} 次重试（${info.delayMs}ms 后）: ${info.reason}`);
+    });
+    // 工具级实时状态：step 事件要等整轮工具结束才来，长脚本执行期间只有这里能看出进度
+    agent.events.on("tool_start", ({ name, arguments: args }) => {
+      printAsyncEvent(`🛠️ ▶ ${name} 开始执行: ${clipConsole(args, 160)}`);
+    });
+    agent.events.on("tool_progress", ({ name, elapsedMs }) => {
+      printAsyncEvent(`⏳ ${name} 执行中… ${formatElapsed(elapsedMs)}`);
+    });
+    agent.events.on("tool_end", ({ name, durationMs, ok }) => {
+      printAsyncEvent(`${ok ? "✅" : "❌"} ${name} ${ok ? "完成" : "失败"}，耗时 ${formatElapsed(durationMs)}`);
     });
     if (config.stream) {
       agent.events.on("token", ({ delta }) => {

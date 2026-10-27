@@ -4,7 +4,19 @@ import fs from "node:fs";
 import path from "node:path";
 import { AgentEventBus, AgentEventMap, AgentEventName } from "./events";
 
-const TRACED_EVENTS = ["run_start", "step", "plan_update", "compact", "retry", "run_end"] as const;
+const TRACED_EVENTS = [
+  "run_start",
+  "step",
+  "plan_update",
+  "compact",
+  "retry",
+  // 工具级事件：start/progress/end 在 step 之前落盘，长阻塞工具（十分钟脚本）
+  // 也能从 trace 里看出"什么时候开始、跑了多久、是不是错误结束"
+  "tool_start",
+  "tool_progress",
+  "tool_end",
+  "run_end",
+] as const;
 
 /** 提示词指纹：把"这一版规则"变成一个可记进 trace 的稳定标识（sha256 前 12 位） */
 export function systemPromptFingerprint(prompt: string): string {

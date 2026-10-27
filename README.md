@@ -60,7 +60,8 @@ bun run team "分析工作区代码并复核结论"
 | `search_web` | 联网搜索 | `TAVILY_API_KEY` |
 | `inspect_link` | 核查可疑链接，必要时起真实浏览器取证 | — |
 | `rag_search` | 本地知识库混合检索（BM25 + 向量） | 先导入语料 |
-| `run_script` | 在沙箱内执行脚本 | docker 可选 |
+| `run_script` | 在沙箱内执行脚本（`background:true` 可后台跑长任务） | docker 可选 |
+| `job_output` | 查看后台任务状态与日志尾部 | 配合后台 `run_script` |
 | `git_tree` | 只读查看仓库结构 | — |
 | `read_image` | 读图交给多模态模型 | — |
 | `memory` | 跨会话记忆读写 | — |
@@ -100,6 +101,7 @@ REPL 与 Web 共用同一套斜杠命令：`/help` `/model` `/prompts` `/prompt`
 | `AGENT_SANDBOX` | `auto` | 脚本执行后端：`host`/`docker`/`auto` |
 | `AGENT_MEMORY_DIR` | `.agent-memory` | 跨会话记忆目录 |
 | `AGENT_TRACE_DIR` | `.traces` | 运行轨迹目录 |
+| `AGENT_JOB_DIR` | `.agent-data/jobs` | 后台脚本任务目录（任务 JSON + stdout/stderr 日志） |
 | `AGENT_UI_PORT` / `AGENT_UI_TOKEN` | `8787` / — | Web 服务器端口与访问口令 |
 | `EMBEDDING_BASE_URL` / `EMBEDDING_API_KEY` / `EMBEDDING_MODEL` | — | 向量检索；不配则只用关键词召回 |
 

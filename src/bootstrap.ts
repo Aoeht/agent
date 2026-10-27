@@ -25,6 +25,8 @@ import { createSetAcceptanceCriteriaTool, createReadTaskStateTool } from "./tool
 import { createAskUserTool } from "./tools/ask_user";
 import { createLoadSkillTool } from "./tools/load_skill";
 import { createRunScriptTool } from "./tools/run_script";
+import { createJobOutputTool } from "./tools/job_output";
+import { JobStore } from "./core/job_store";
 import { createReadImageTool } from "./tools/read_image";
 import { createToolSearchTool } from "./core/tool_search";
 import { createDelegateTaskTool } from "./tools/delegate_task";
@@ -36,7 +38,7 @@ import { MCP_SANDBOX_DIR, McpServers } from "./mcp/config";
 import { McpConfigWatcher, resolveMcpServers } from "./mcp/hot_reload";
 import { createPolicyMatrix } from "./mcp/policy_matrix";
 import type { Confirmer, McpResourceInfo } from "./mcp/types";
-import { loadAgentConfig, AgentRunConfig, resolveMemoryDir, resolveSessionDir } from "./config";
+import { loadAgentConfig, AgentRunConfig, resolveJobDir, resolveMemoryDir, resolveSessionDir } from "./config";
 import { createEmbeddingClientFromEnv, EmbeddingClient } from "./rag/embeddings";
 
 export interface AgentStackOptions {
@@ -74,6 +76,8 @@ export interface AgentStack {
   memoryRecall: MemoryRecall;
   /** 跨会话记忆写入管线：run 尾提取事实入仓（与记忆仓/检索共用 embedding 客户端） */
   memoryWriter: MemoryWriter;
+  /** 后台脚本任务仓（run_script 的 background 分支 + job_output 共用目录）；dispose 时统一杀干净 */
+  jobs: JobStore;
   mcp: McpClientManager;
   /** MCP 配置热载入 watcher（关停要随 mcp 一起收口，用 dispose()） */
   mcpWatcher: McpConfigWatcher;
@@ -111,6 +115,11 @@ export function registerSessionTools(
     delegateTraceDir?: string;
     /** 跨会话记忆仓；传入才注册 memory 工具（与 Agent 注入共用同一实例） */
     memoryStore?: MemoryStore;
+    /**
+     * 后台任务仓；缺省按 AGENT_JOB_DIR 新建一个。UI 每会话注册表各建一个实例也安全——
+     * 任务状态全部经同目录 JSON 协调，进程内只跟踪自己 spawn 的子进程。
+     */
+    jobs?: JobStore;
   }
 ): void {
   const sandboxRoot = options.sandboxRoot ?? MCP_SANDBOX_DIR;
@@ -153,6 +162,7 @@ export function registerSessionTools(
   // 两种后端每次执行都经 requestHuman 人工确认，不依赖技能是否安装。
   // 远程收紧时这条整块不注册：摘掉能力，比指望审批拦住拿到口令的人可靠
   if (!options.disableRunScript) {
+    const jobs = options.jobs ?? new JobStore(resolveJobDir());
     registry.register(
       createRunScriptTool({
         sandboxRoot,
@@ -160,8 +170,10 @@ export function registerSessionTools(
           options.sandbox.backend === "docker"
             ? { kind: "docker", image: options.sandbox.image, network: options.sandbox.network }
             : { kind: "host" },
+        jobs,
       })
     );
+    registry.register(createJobOutputTool(jobs));
   }
 }
 
@@ -253,12 +265,17 @@ export async function createAgentStack(options: AgentStackOptions = {}): Promise
   console.log(
     `🤝 ${prefix}子代理委派: ${config.delegateEnabled ? "已启用（delegate_task）" : "已关闭（AGENT_DELEGATE）"}`
   );
+  // 后台任务仓：目录先建好；run_script 的 background 分支与 job_output 共用同一个根，
+  // 关停时统一 killAll（后台进程是 agent 的子进程，不能留成没人管的孤儿）
+  const jobs = new JobStore(resolveJobDir());
+  await jobs.init();
   registerSessionTools(registry, {
     skills,
     planStore,
     sandbox,
     sandboxRoot,
     memoryStore,
+    jobs,
     disableRunScript: options.disableRunScript === true,
     config,
   });
@@ -330,10 +347,13 @@ export async function createAgentStack(options: AgentStackOptions = {}): Promise
     memoryStore,
     memoryRecall,
     memoryWriter,
+    jobs,
     mcp,
     mcpWatcher,
     untrustedContext,
     dispose: async () => {
+      // 先收后台任务再断 MCP：仍在跑的脚本可能正依赖这些连接/工作区
+      await jobs.killAll();
       mcpWatcher.close();
       await mcp.closeAll();
     },

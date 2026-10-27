@@ -24,6 +24,7 @@
  *                                  auto（默认，docker 守护进程与镜像都就绪才启用容器，否则显式回退 host）
  *   AGENT_SANDBOX_IMAGE            docker 沙箱镜像（默认 ai-agent-sandbox:latest，构建见 tools/sandbox/Dockerfile）
  *   AGENT_SANDBOX_NET              docker 沙箱网络：none 断网（默认，防外传）/ bridge 显式放开
+ *   AGENT_JOB_DIR                  后台脚本任务目录（任务 JSON + stdout/stderr 日志，缺省 .agent-data/jobs）
  *   AGENT_TOOL_SEARCH              按需加载（Tool Search）：auto（默认，工具 schema 超过模型
  *                                  上下文窗口 10% 时自动切换）/ on（强制）/ off（关闭）；
  *                                  切换后每轮只暴露第一方工具 + tool_search + 已激活的 MCP 工具
@@ -46,6 +47,11 @@ export function resolveMemoryDir(): string {
 /** 会话目录：AGENT_SESSION_DIR 可改，缺省 .agent-sessions（与 main.ts/index.ts 原内联逻辑一致） */
 export function resolveSessionDir(): string {
   return process.env.AGENT_SESSION_DIR?.trim() || path.join(process.cwd(), ".agent-sessions");
+}
+
+/** 后台脚本任务目录：AGENT_JOB_DIR 可改，缺省 .agent-data/jobs（任务记录 JSON + stdout/stderr 日志） */
+export function resolveJobDir(): string {
+  return process.env.AGENT_JOB_DIR?.trim() || path.join(process.cwd(), ".agent-data", "jobs");
 }
 
 /** run_script 执行沙箱模式，语义见 tools/sandbox_docker.ts 的 resolveScriptSandbox */

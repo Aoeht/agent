@@ -43,6 +43,33 @@ export interface RetryEvent {
   reason: string;
 }
 
+/**
+ * 单个工具调用的开始/心跳/结束。与 step 事件的分工：step 在整轮工具调用结束后
+ * 一次性给出结果快照，这三个事件在**执行期间**就有输出——阻塞十分钟的脚本
+ * 也能让 trace / CLI / Web 看到「正在跑哪个工具、已经跑了多久」。
+ * callId 与 OpenAI tool_call id 一致，前端按它把心跳贴回同一张工具卡片。
+ */
+export interface ToolStartEvent {
+  callId: string;
+  name: string;
+  arguments: string;
+}
+
+/** 执行中心跳（固定间隔发射，只用于观测，不携带输出） */
+export interface ToolProgressEvent {
+  callId: string;
+  name: string;
+  elapsedMs: number;
+}
+
+export interface ToolEndEvent {
+  callId: string;
+  name: string;
+  durationMs: number;
+  /** 工具观测里是否是错误（registry 把异常统一序列化成 {"error": ...}） */
+  ok: boolean;
+}
+
 /** 模型通过 update_plan 工具更新了任务计划：steps 是更新后的全量快照 */
 export interface PlanUpdateEvent {
   steps: PlanStep[];
@@ -79,6 +106,9 @@ export interface AgentEventMap {
   retry: RetryEvent;
   plan_update: PlanUpdateEvent;
   compact: CompactEvent;
+  tool_start: ToolStartEvent;
+  tool_progress: ToolProgressEvent;
+  tool_end: ToolEndEvent;
   run_end: RunEndEvent;
 }
 

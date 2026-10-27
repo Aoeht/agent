@@ -132,6 +132,13 @@ export const ServerEventSchema = z.discriminatedUnion("type", [
     result: z.string().optional(),
     isError: z.boolean().optional(),
   }),
+  /** 工具执行心跳（长阻塞工具的已运行时长；callId 与 tool_call_start 同值） */
+  z.object({
+    type: z.literal("tool_progress"),
+    callId: z.string(),
+    name: z.string(),
+    elapsedMs: z.number().int().nonnegative(),
+  }),
   /** 一轮 LLM 调用完成（对应 core 的 step 事件） */
   z.object({
     type: z.literal("step"),
