@@ -114,8 +114,22 @@ function collector(manager: SessionManager, sessionId: string): ServerEvent[] {
   return events;
 }
 
-/** 等 collector 的 hello/队列快照异步回调跑完（此刻队列必然为空，不会混入回放事件） */
-const settle = (ms = 50) => new Promise(resolve => setTimeout(resolve, ms));
+/**
+ * 轮询等条件成立；超时后直接返回，让后面的断言报出真实差异而不是被 helper 吞掉。
+ * 这里原先全是固定 sleep（50/100/150ms）：本机够用，但 2 核 windows runner 上排队消息
+ * 还没派发就断言，稳定复现 toHaveLength(2) 收到 1。超时刻意压在 4s 内——再长会先撞
+ * bun test 默认的 5s 单测超时，报错退化成 "test timed out" 把断言差异丢掉。
+ */
+async function waitFor(predicate: () => boolean, timeoutMs = 4_000, intervalMs = 5): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) return;
+    await new Promise(resolve => setTimeout(resolve, intervalMs));
+  }
+}
+
+const runStarts = (events: ServerEvent[]) => events.filter(event => event.type === "run_start");
+const runEnds = (events: ServerEvent[]) => events.filter(event => event.type === "run_end");
 
 const kinds = (events: ServerEvent[]) => events.map(event => event.type);
 
@@ -126,7 +140,7 @@ test("忙时发送入队等待，回合结束后自动接续并带 queueId", asy
   const gate = new Promise<void>(resolve => { release = resolve; });
   installGatedClient(manager, "s1", gate);
   const events = collector(manager, "s1");
-  await settle();
+  await waitFor(() => events.some(event => event.type === "hello"));
 
   const first = await manager.sendMessage("s1", "第一条");
   expect(first.queued).toBe(false); // 空闲：立即开跑
@@ -135,7 +149,7 @@ test("忙时发送入队等待，回合结束后自动接续并带 queueId", asy
   expect(manager.queueSnapshot("s1")).toEqual([{ id: second.queueId, text: "第二条" }]);
 
   release();
-  await new Promise(resolve => setTimeout(resolve, 150)); // 等两条回合都收尾
+  await waitFor(() => runEnds(events).length >= 2); // 等两条回合都收尾
 
   const starts = events.filter(event => event.type === "run_start");
   const ends = events.filter(event => event.type === "run_end");
@@ -158,7 +172,7 @@ test("撤单只撤排队中的消息，正在跑的回合不受影响", async ()
   const gate = new Promise<void>(resolve => { release = resolve; });
   installGatedClient(manager, "s2", gate);
   const events = collector(manager, "s2");
-  await settle();
+  await waitFor(() => events.some(event => event.type === "hello"));
 
   await manager.sendMessage("s2", "占住回合的");
   const queuedB = await manager.sendMessage("s2", "要撤的");
@@ -169,7 +183,7 @@ test("撤单只撤排队中的消息，正在跑的回合不受影响", async ()
   expect(manager.queueSnapshot("s2")).toEqual([{ id: queuedC.queueId, text: "留下来的" }]);
 
   release();
-  await new Promise(resolve => setTimeout(resolve, 150));
+  await waitFor(() => runStarts(events).length >= 2);
 
   const starts = events.filter(event => event.type === "run_start");
   expect(starts.map(start => (start as any).userMessage)).toEqual(["占住回合的", "留下来的"]);
@@ -181,12 +195,15 @@ test("队列超过上限拒绝（8 条）", async () => {
   let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
   installGatedClient(manager, "s3", gate);
+  const events = collector(manager, "s3");
 
   await manager.sendMessage("s3", "占住回合的");
   for (let i = 1; i <= 8; i++) await manager.sendMessage("s3", `排队 ${i}`);
   await expect(manager.sendMessage("s3", "第 9 条")).rejects.toThrow("队列已满");
   release();
-  await new Promise(resolve => setTimeout(resolve, 150));
+  // 等 9 个回合真收尾再让 afterEach 删目录：否则在飞的回合会继续往已删的 dir 里写，
+  // Windows 上撞 EBUSY，还可能溢出到同进程并发跑的其他测试文件
+  await waitFor(() => runEnds(events).length >= 9);
 });
 
 test("cancel 只停当前回合，排队消息随后接续", async () => {
@@ -196,13 +213,13 @@ test("cancel 只停当前回合，排队消息随后接续", async () => {
   const gate = new Promise<void>(resolve => { release = resolve; });
   installGatedClient(manager, "s4", gate);
   const events = collector(manager, "s4");
-  await settle();
+  await waitFor(() => events.some(event => event.type === "hello"));
 
   await manager.sendMessage("s4", "会被取消的");
   const queued = await manager.sendMessage("s4", "取消后接续的");
 
   manager.cancel("s4");
-  await new Promise(resolve => setTimeout(resolve, 100));
+  await waitFor(() => runStarts(events).length >= 2);
   const starts = events.filter(event => event.type === "run_start");
   expect(starts.map(start => (start as any).userMessage)).toEqual(["会被取消的", "取消后接续的"]);
   expect((starts[1] as any).queueId).toBe(queued.queueId);

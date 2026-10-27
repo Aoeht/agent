@@ -270,10 +270,16 @@ test("Web 会话检查点基建：createAgent 挂快照钩子，回合后 entry.
     } as unknown as ServerRuntime;
     const manager = new SessionManager({ hub, bridge, runtime, sessionDir: dir, traceDir: path.join(dir, "trace") });
     const off = manager.subscribe("s1", () => {});
-    await new Promise((resolve) => setTimeout(resolve, 80)); // hello 异步建 agent
+    // hello 异步建 agent：subscribe 同步就有 entry，但 entry.agent 要等 helloFor 跑完。
+    // 原先固定 sleep 80ms，慢 runner 上不够；轮询到 agent 就绪，取不到就让下一行如实报错
+    const entryDeadline = Date.now() + 4_000;
+    let entry = (manager as any).entries.get("s1");
+    while (!entry?.agent && Date.now() < entryDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      entry = (manager as any).entries.get("s1");
+    }
 
     // 换立即应答的假 client：无 tools 的主调用与摘要调用都秒回
-    const entry = (manager as any).entries.get("s1");
     entry.agent.client = {
       chat: {
         completions: {
@@ -286,7 +292,12 @@ test("Web 会话检查点基建：createAgent 挂快照钩子，回合后 entry.
     };
     const sent = await manager.sendMessage("s1", "建检查点的一轮");
     expect(sent.queued).toBe(false);
-    await new Promise((resolve) => setTimeout(resolve, 400)); // 回合收尾（含命名/摘要后台调用）
+    // 回合收尾（含命名/摘要后台调用）。快照钩子要起 git 子进程，Windows 上动辄几百毫秒，
+    // 原先固定 sleep 400ms 在 2 核 runner 上来不及落盘，断言拿到空列表——改成轮询到出现为止
+    const ckptDeadline = Date.now() + 20_000;
+    while (((await entry.checkpoints?.list())?.length ?? 0) === 0 && Date.now() < ckptDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
 
     expect(entry.checkpoints).toBeDefined();
     const list = await entry.checkpoints.list();
@@ -299,4 +310,4 @@ test("Web 会话检查点基建：createAgent 挂快照钩子，回合后 entry.
     await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);
     await fs.rm(sandbox, { recursive: true, force: true }).catch(() => undefined);
   }
-});
+}, 30_000);
