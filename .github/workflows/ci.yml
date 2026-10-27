@@ -25,6 +25,8 @@ jobs:
   verify:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # 正常一次约 1 分钟；兜住偶发的子进程挂死，避免占着 runner 白等
+    timeout-minutes: 15
     strategy:
       # 一个平台挂了也要看完另一个：本项目有显式的 Windows 路径/EPERM 处理，
       # 平台差异本身就是需要暴露的信息，不该被 fail-fast 掩盖。
@@ -56,14 +58,16 @@ jobs:
         working-directory: web
         run: bun install --frozen-lockfile
 
-      # 根 tsconfig 的 include 只覆盖 src/ benchmarks/ tests/，web/ 有自己的 tsconfig，
-      # 两边都得查，否则前端类型错误不会出现在 CI 里
+      # 根 tsconfig 的 include 只覆盖 src/ benchmarks/ tests/
       - name: Typecheck (root)
         run: bun run typecheck
 
-      - name: Typecheck (web)
+      # web/ 有自己的 tsconfig；build 脚本是 tsc --noEmit && vite build，
+      # 类型检查和打包一次做完。只跑 typecheck 查不出打包期问题：
+      # Tailwind 样式链路、资源导入、产物体积警告都要真构建才暴露
+      - name: Build (web)
         working-directory: web
-        run: bun run typecheck
+        run: bun run build
 
       - name: Test
         run: bun test
