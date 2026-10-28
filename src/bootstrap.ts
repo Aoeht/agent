@@ -16,6 +16,8 @@ import { createMemoryTool } from "./tools/memory";
 import { createToolTelemetry } from "./tools/telemetry";
 import { createSearchWebTool } from "./tools/tavily_search";
 import { createRagSearchTool } from "./tools/rag_search";
+import { createRerankerFromEnv } from "./rag/rerank";
+import { createQueryRewriterFromEnv } from "./rag/rewrite";
 import { createInspectLinkTool } from "./tools/inspect_link";
 import { createIngestFindingsTool } from "./tools/ingest_findings";
 import { createBiliCollectTool } from "./tools/bili_collect";
@@ -135,7 +137,9 @@ export function registerSessionTools(
   // 主动澄清：信息缺失且查不到时向用户征询自由文本回答，通道由入口注入（CLI readline / UI human_input_request）
   registry.register(createAskUserTool());
   registry.register(createSearchWebTool());
-  registry.register(createRagSearchTool());
+  // 检索增强：改写器缺省用摘要模型（本地命中不足才真正调用），重排器仅在配置 RERANK_MODEL 时启用
+  const ragRewriter = createQueryRewriterFromEnv({ model: options.config?.summaryModel ?? options.config?.model });
+  registry.register(createRagSearchTool({ rewriter: ragRewriter ?? null, reranker: createRerankerFromEnv() ?? null }));
   registry.register(createInspectLinkTool());
   registry.register(createIngestFindingsTool());
   // B 站视频快照读数：读取 dataset/<BV>.json（独立采集流程产物）做证据预处理，
