@@ -33,6 +33,7 @@
  *   AGENT_CHECKPOINTS              是否开启回合级回滚检查点（/rewind），"0"/"false" 关闭（默认开启）
  *   AGENT_TOOL_CONCURRENCY         同批 parallelSafe 工具调用的并发上限（默认 4；非安全工具不进并发池）
  *   AGENT_TOOL_TIMEOUT_MS          单次工具执行死线兜底（毫秒，默认 0=关；超时转 error observation，run 继续）
+ *   AGENT_CONTEXT_WINDOW           覆盖模型上下文窗口（token，默认按模型名查表）；小窗口模型或表里没有的模型用
  *   AGENT_VISION                   所选模型能否理解图片，"0"/"false"/"off"/"no" 关闭（默认开启）；
  *                                  关闭后不提供图片通道，read_image 直接返回可读错误
  *   AGENT_MEMORY_DIR               跨会话记忆目录（缺省 .agent-memory；记忆条目 memory.jsonl + MEMORY.md 视图）
@@ -84,6 +85,8 @@ export interface AgentRunConfig {
   toolConcurrencyLimit: number;
   /** 单次工具执行死线兜底（毫秒），0 = 关；只对未声明自有 timeoutMs 的工具生效 */
   toolTimeoutMs: number;
+  /** 覆盖上下文窗口（token）；缺省按模型名查表（见 utils/model_registry.ts） */
+  contextWindow?: number;
   /** 所选模型能否理解图片；false 时不提供图片通道（read_image 返回可读错误） */
   visionCapable: boolean;
   maxHistoryTurns: number;
@@ -129,6 +132,8 @@ export function loadAgentConfig(): AgentRunConfig {
   const maxTotalTokens = limitEnv("AGENT_MAX_TOTAL_TOKENS", 500_000);
   const maxToolCalls = limitEnv("AGENT_MAX_TOOL_CALLS", 40);
   const maxToolCallsPerName = limitEnv("AGENT_MAX_TOOL_CALLS_PER_NAME", 12);
+  // 0/负数/非法值都视为未设置：缺省由模型名查表决定窗口
+  const contextWindow = limitEnv("AGENT_CONTEXT_WINDOW", 0);
   // 枚举型环境变量只认列出的字面量，其余一律落回默认值（不猜测、不告警刷屏）
   const sandboxModeRaw = process.env.AGENT_SANDBOX?.trim().toLowerCase();
   const toolSearchRaw = process.env.AGENT_TOOL_SEARCH?.trim().toLowerCase();
@@ -145,6 +150,7 @@ export function loadAgentConfig(): AgentRunConfig {
     // 并发上限至少 1：0/负数没有意义，落回 1（等价于串行）
     toolConcurrencyLimit: Math.max(1, intEnv("AGENT_TOOL_CONCURRENCY", 4)),
     toolTimeoutMs: Math.max(0, intEnv("AGENT_TOOL_TIMEOUT_MS", 0)),
+    ...(contextWindow !== undefined ? { contextWindow } : {}),
     // 默认开：厂商真拒收 image_url 时 Agent 会运行期闩锁关闭，猜错模型名的代价比误关小
     visionCapable: boolEnv("AGENT_VISION", true),
     maxHistoryTurns: intEnv("AGENT_MAX_HISTORY_TURNS", 20),

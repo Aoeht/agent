@@ -562,6 +562,7 @@ async function main() {
       toolSearch: config.toolSearch,
       toolConcurrencyLimit: config.toolConcurrencyLimit,
       toolTimeoutMs: config.toolTimeoutMs,
+      ...(config.contextWindow !== undefined ? { contextWindow: config.contextWindow } : {}),
       visionCapable: config.visionCapable,
       maxHistoryTurns: config.maxHistoryTurns,
       sessionStore: session.store,

@@ -79,6 +79,7 @@ export function createTeamChildFactory(stack: AgentStack, options: {
       model: execution.mode === "review" ? (options.reviewModel ?? stack.config.model) : stack.config.model,
       client: options.client, summaryModel: stack.config.summaryModel,
       temperature: stack.config.temperature,
+      ...(stack.config.contextWindow !== undefined ? { contextWindow: stack.config.contextWindow } : {}),
       visionCapable: stack.config.visionCapable,
       maxIterations: repairing ? 3
         : stack.config.maxIterations > 0 ? Math.min(stack.config.maxIterations, 24) : 24,

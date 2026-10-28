@@ -107,6 +107,23 @@ test("loadDelegateBudget 读环境变量，非法值回退默认", () => {
   expect(loadDelegateBudget({ AGENT_DELEGATE_TOKENS: "abc" }).maxTotalTokens).toBe(80_000);
 });
 
+test("loadAgentConfig 解析 AGENT_CONTEXT_WINDOW（缺省/非正/非法一律视为未设置）", () => {
+  const saved = process.env.AGENT_CONTEXT_WINDOW;
+  try {
+    delete process.env.AGENT_CONTEXT_WINDOW;
+    expect(loadAgentConfig().contextWindow).toBeUndefined();
+    process.env.AGENT_CONTEXT_WINDOW = "32768";
+    expect(loadAgentConfig().contextWindow).toBe(32768);
+    for (const value of ["0", "-5", "abc", " "]) {
+      process.env.AGENT_CONTEXT_WINDOW = value;
+      expect(loadAgentConfig().contextWindow).toBeUndefined();
+    }
+  } finally {
+    if (saved === undefined) delete process.env.AGENT_CONTEXT_WINDOW;
+    else process.env.AGENT_CONTEXT_WINDOW = saved;
+  }
+});
+
 test("委派：goal 进子代理、白名单防递归、报告套围栏、token 记入观察头", async () => {
   const dir = await tempDir("dsh-delegate-run-");
   const source = sourceRegistry();
