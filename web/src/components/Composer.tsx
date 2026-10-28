@@ -17,6 +17,10 @@ export interface ComposerConfig {
   model?: string;
   /** 会话级摘要模型（历史压缩/长期摘要/会话命名/记忆提取共用），undefined = 跟随服务器默认 */
   summaryModel?: string;
+  /** 当前生效的上下文窗口（覆盖优先，否则按模型名查表）：输入框留空时的占位值 */
+  contextWindow?: number;
+  /** 会话级窗口覆盖（只在设置过时出现）：输入框初值与“清空”判断都靠它 */
+  contextWindowOverride?: number;
   temperature?: number;
   maxIterations?: number;
   thinkingEffort?: ThinkingEffort;
@@ -79,10 +83,11 @@ export function Composer({
   const [text, setText] = useState("");
   const [panelOpen, setPanelOpen] = useState(false);
   const [draft, setDraft] = useState<{
-    model: string; summaryModel: string; temperature: string; maxIterations: string; thinkingEffort: string;
+    model: string; summaryModel: string; contextWindow: string; temperature: string; maxIterations: string; thinkingEffort: string;
   }>({
     model: "",
     summaryModel: "",
+    contextWindow: "",
     temperature: "",
     maxIterations: "",
     thinkingEffort: "default",
@@ -126,6 +131,9 @@ export function Composer({
         summaryModel: draftDirty.current.has("summaryModel")
           ? current.summaryModel
           : config.summaryModel ?? firstAvailableModel(models, modelStatus) ?? "",
+        contextWindow: draftDirty.current.has("contextWindow")
+          ? current.contextWindow
+          : config.contextWindowOverride !== undefined ? String(config.contextWindowOverride) : "",
         temperature: draftDirty.current.has("temperature") ? current.temperature : String(config.temperature ?? 0.1),
         maxIterations: draftDirty.current.has("maxIterations")
           ? current.maxIterations
@@ -135,7 +143,7 @@ export function Composer({
           : config.thinkingEffort ?? "default",
       }));
     }
-  }, [panelOpen, config.model, config.summaryModel, config.temperature, config.maxIterations, config.thinkingEffort, models, modelStatus]);
+  }, [panelOpen, config.model, config.summaryModel, config.contextWindow, config.contextWindowOverride, config.temperature, config.maxIterations, config.thinkingEffort, models, modelStatus]);
 
   // 点击面板外部关闭
   useEffect(() => {
@@ -180,6 +188,11 @@ export function Composer({
     const payload: SessionConfigInput = {};
     if (draftDirty.current.has("model") && next.model) payload.model = next.model;
     if (draftDirty.current.has("summaryModel") && next.summaryModel) payload.summaryModel = next.summaryModel;
+    const contextWindow = Number.parseInt(next.contextWindow, 10);
+    if (draftDirty.current.has("contextWindow") && next.contextWindow.trim() !== "" &&
+        Number.isInteger(contextWindow) && contextWindow > 0) {
+      payload.contextWindow = contextWindow;
+    }
     const temperature = Number.parseFloat(next.temperature);
     if (draftDirty.current.has("temperature") && Number.isFinite(temperature)) payload.temperature = temperature;
     const maxIterations = next.maxIterations.trim() === "" ? Number.NaN : Number.parseInt(next.maxIterations, 10);
@@ -215,6 +228,20 @@ export function Composer({
     if (draftDirty.current.has("maxIterations") && Number.isInteger(maxIterations) && maxIterations >= 0 &&
         maxIterations !== (config.maxIterations ?? 0)) {
       payload.maxIterations = maxIterations;
+    }
+    if (draftDirty.current.has("contextWindow")) {
+      const raw = draft.contextWindow.trim();
+      if (raw === "") {
+        // 留空 = 清空覆盖，回到按模型名查表（原本就没有覆盖时不必下发）
+        if (config.contextWindowOverride !== undefined) payload.contextWindow = null;
+      } else {
+        const contextWindow = Number.parseInt(raw, 10);
+        if (!Number.isInteger(contextWindow) || contextWindow <= 0) {
+          setConfigError("上下文窗口必须是正整数（留空 = 按模型名查表）");
+          return;
+        }
+        if (contextWindow !== config.contextWindowOverride) payload.contextWindow = contextWindow;
+      }
     }
     if (draftDirty.current.has("thinkingEffort") &&
         draft.thinkingEffort !== (config.thinkingEffort ?? "default") &&
@@ -320,6 +347,24 @@ export function Composer({
                 })}
               </select>
             </label>
+            <label className="mt-3 block">
+              <span className="text-xs text-ink-600">上下文窗口（token，留空 = 按模型名查表）</span>
+              <input
+                type="number"
+                min="1"
+                step="1"
+                placeholder={config.contextWindow !== undefined ? String(config.contextWindow) : "自动"}
+                value={draft.contextWindow}
+                disabled={applying}
+                onChange={(e) => {
+                  draftDirty.current.add("contextWindow");
+                  const next = { ...draft, contextWindow: e.target.value };
+                  setDraft(next);
+                  reportDraftConfig(next);
+                }}
+                className="mt-1 w-full rounded-xl border border-cream-300 bg-white/70 px-3 py-2 text-sm outline-none focus:border-clay-500"
+              />
+            </label>
             <div className="mt-3 grid grid-cols-2 gap-3">
               <label className="block">
                 <span className="text-xs text-ink-600">温度 (0–2)</span>
@@ -358,7 +403,8 @@ export function Composer({
               </label>
             </div>
             <p className="mt-2 text-[11px] leading-4 text-ink-400">
-              模型与摘要模型的切换会随会话保存；温度、迭代上限仅当前运行有效。迭代上限留空表示不限，由 token / 工具次数预算兜底。
+              模型、摘要模型与上下文窗口的切换会随会话保存；温度、迭代上限仅当前运行有效。迭代上限留空表示不限，由 token / 工具次数预算兜底。
+              上下文窗口决定压缩水位与工具按需加载阈值：小窗口模型或表里没有的私有模型可在这里填实际值，留空恢复按模型名查表。
               摘要模型用于历史压缩、跨会话长期记忆、会话命名与记忆提取，换小模型可省成本。
               思考程度在输入框右下角，按当前模型映射厂商参数，无法生效的组合自动跳过。
             </p>

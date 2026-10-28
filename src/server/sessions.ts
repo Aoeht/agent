@@ -9,7 +9,6 @@ import { ToolRegistry, ToolCallMiddleware, isErrorObservation } from "../core/re
 import { PlanStore } from "../core/plan_store";
 import { createToolTelemetry } from "../tools/telemetry";
 import { copyMcpTools, registerSessionTools } from "../bootstrap";
-import { contextWindowFor } from "../utils/model_registry";
 import type { AgentResult, ToolDefinition, ToolRuntime } from "../core/types";
 import type { UiBridge } from "./bridge";
 import { runSessionStore } from "./run_context";
@@ -202,14 +201,23 @@ export class SessionManager {
   }
 
   /**
-   * 应用会话级配置（模型/摘要模型/温度/迭代上限/思考程度）。模型与摘要模型切换会落盘
-   * （recordModel / recordSummaryModel），续聊自动恢复；温度、迭代上限与思考程度仅内存态。
-   * 成功后广播 session_config（含当前生效的全量值与该模型的上下文窗口）。
+   * 应用会话级配置（模型/摘要模型/上下文窗口/温度/迭代上限/思考程度）。模型、摘要模型与
+   * 上下文窗口切换会落盘（recordModel / recordSummaryModel / recordContextWindow），续聊自动恢复；
+   * 温度、迭代上限与思考程度仅内存态。
+   * 成功后广播 session_config（含当前生效的全量值、该模型的上下文窗口与窗口覆盖）。
+   * contextWindow 传 null 表示清空覆盖、恢复按模型名查表。
    */
   async applySessionConfig(
     sessionId: string,
-    patch: { model?: string; summaryModel?: string; temperature?: number; maxIterations?: number; thinkingEffort?: ThinkingEffort }
+    patch: {
+      model?: string; summaryModel?: string; contextWindow?: number | null;
+      temperature?: number; maxIterations?: number; thinkingEffort?: ThinkingEffort;
+    }
   ): Promise<SessionConfigEvent> {
+    if (patch.contextWindow !== undefined && patch.contextWindow !== null &&
+        (!Number.isInteger(patch.contextWindow) || patch.contextWindow <= 0)) {
+      throw new Error("上下文窗口必须是正整数");
+    }
     const entry = this.entry(sessionId);
     if (entry.controller !== undefined || entry.queue.length > 0 || entry.configuring) throw new Error("当前会话还有任务在运行或排队");
     entry.configuring = true;
@@ -226,6 +234,13 @@ export class SessionManager {
         await entry.store.recordSummaryModel(next);
         agent.setSummaryModel(next);
       }
+      if (patch.contextWindow !== undefined) {
+        const next = patch.contextWindow === null ? undefined : patch.contextWindow;
+        if (next !== agent.contextWindowOverride) {
+          await entry.store.recordContextWindow(next);
+          agent.setContextWindow(next);
+        }
+      }
       if (patch.temperature !== undefined) agent.setTemperature(patch.temperature);
       if (patch.maxIterations !== undefined) agent.setMaxIterations(patch.maxIterations);
       if (patch.thinkingEffort !== undefined) agent.setThinkingEffort(patch.thinkingEffort);
@@ -235,7 +250,8 @@ export class SessionManager {
         type: "session_config",
         configRevision: entry.configRevision,
         model: agent.model,
-        contextWindow: this.options.runtime.config.contextWindow ?? contextWindowFor(agent.model),
+        contextWindow: agent.contextWindow,
+        ...(agent.contextWindowOverride !== undefined ? { contextWindowOverride: agent.contextWindowOverride } : {}),
         summaryModel: agent.summaryModel,
         temperature: agent.temperature,
         maxIterations: agent.maxIterations,
@@ -500,7 +516,8 @@ export class SessionManager {
       summaryModel: agent.summaryModel,
       sandbox: status.sandbox,
       sandboxRoot: this.options.runtime.sandboxRoot,
-      contextWindow: this.options.runtime.config.contextWindow ?? contextWindowFor(model),
+      contextWindow: agent.contextWindow,
+      ...(agent.contextWindowOverride !== undefined ? { contextWindowOverride: agent.contextWindowOverride } : {}),
       vision: this.visionCapable,
       ...(agent !== undefined
         ? { temperature: agent.temperature, maxIterations: agent.maxIterations,
@@ -544,6 +561,8 @@ export class SessionManager {
     const { config, registry: sharedRegistry, skills, sandbox, sandboxRoot, disableRunScript, memoryStore, memoryRecall, memoryWriter, jobs } = this.options.runtime;
     const startup = await entry.store.load();
     entry.needsName = startup.messages.length === 0;
+    // 上下文窗口会话级恢复：会话里记录过就用记录，否则用服务器默认（AGENT_CONTEXT_WINDOW 或缺省查表）
+    const contextWindow = startup.contextWindow ?? config.contextWindow;
 
     // 每会话独立注册表：计划仓私有（并行 run 互不踩）；无状态内置工具按同一清单重新组装；
     // MCP 工具定义从共享注册表拷贝（定义绑定的是连接不是注册表，拷贝安全）
@@ -596,7 +615,7 @@ export class SessionManager {
       toolSearch: config.toolSearch,
       toolConcurrencyLimit: config.toolConcurrencyLimit,
       toolTimeoutMs: config.toolTimeoutMs,
-      ...(config.contextWindow !== undefined ? { contextWindow: config.contextWindow } : {}),
+      ...(contextWindow !== undefined ? { contextWindow } : {}),
       visionCapable: config.visionCapable,
       maxHistoryTurns: config.maxHistoryTurns,
       budget: config.budget,

@@ -144,6 +144,40 @@ test("摘要模型覆盖影响会话命名请求的模型选择", async () => {
   expect(naming?.model).toBe("cheap-summary");
 });
 
+test("上下文窗口会话级覆盖：应用即生效并落盘，重启恢复，清空回到查表值", async () => {
+  const { manager, dir } = await fixture();
+  const store = new SessionStore({ dir, sessionId: "a" });
+  const applied = await manager.applySessionConfig("a", { contextWindow: 32_000 });
+  expect(applied.contextWindow).toBe(32_000);
+  expect(applied.contextWindowOverride).toBe(32_000);
+  expect((await store.load()).contextWindow).toBe(32_000);
+
+  const live = await hello(manager, "a");
+  expect(live.contextWindow).toBe(32_000);
+  expect(live.contextWindowOverride).toBe(32_000);
+
+  // 模拟进程重启：丢掉内存里的 Agent，重建时从会话文件恢复窗口
+  (manager as any).entries.get("a").agent = undefined;
+  expect((await hello(manager, "a")).contextWindow).toBe(32_000);
+
+  // compact 重写会话文件时窗口记录必须原样保留
+  await store.compact(0);
+  expect((await store.load()).contextWindow).toBe(32_000);
+
+  // 清空覆盖（null）：回到模型查表值（default-model 未注册 → 128k），落盘记 auto
+  const cleared = await manager.applySessionConfig("a", { contextWindow: null });
+  expect(cleared.contextWindow).toBe(128_000);
+  expect(cleared.contextWindowOverride).toBeUndefined();
+  expect((await store.load()).contextWindow).toBeUndefined();
+  (manager as any).entries.get("a").agent = undefined;
+  expect((await hello(manager, "a")).contextWindow).toBe(128_000);
+
+  // 非法值明确拒绝，且不改动现有生效值
+  await expect(manager.applySessionConfig("a", { contextWindow: 0 })).rejects.toThrow("上下文窗口必须是正整数");
+  await expect(manager.applySessionConfig("a", { contextWindow: 1.5 })).rejects.toThrow("上下文窗口必须是正整数");
+  expect((await hello(manager, "a")).contextWindowOverride).toBeUndefined();
+});
+
 test("任务事件每个只转发一次，右栏不会收到重复更新", async () => {
   const { manager } = await fixture();
   await hello(manager, "a");

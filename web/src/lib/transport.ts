@@ -13,10 +13,12 @@ import type {
   UserImageUploadBody,
 } from "@protocol";
 
-/** 会话级可调配置（模型/摘要模型/温度/迭代上限/思考程度） */
+/** 会话级可调配置（模型/摘要模型/上下文窗口/温度/迭代上限/思考程度） */
 export interface SessionConfigInput {
   model?: string;
   summaryModel?: string;
+  /** 上下文窗口覆盖（token）；null = 清空覆盖、恢复按模型名查表 */
+  contextWindow?: number | null;
   temperature?: number;
   maxIterations?: number;
   thinkingEffort?: ThinkingEffort;

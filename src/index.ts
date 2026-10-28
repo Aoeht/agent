@@ -516,6 +516,8 @@ async function main() {
     if (startup.sessionName !== undefined) {
       console.log(`🏷️  会话名: ${startup.sessionName}`);
     }
+    // 上下文窗口：会话记录优先，其次 AGENT_CONTEXT_WINDOW，都没有则按模型名查表
+    const contextWindow = startup.contextWindow ?? config.contextWindow;
     const nameSession = createSessionNamer(session.store, startup.messages.length === 0);
 
     // 回合级检查点（/rewind）：影子 git 仓库随会话目录存放（.agent-sessions 已 gitignore），
@@ -562,7 +564,7 @@ async function main() {
       toolSearch: config.toolSearch,
       toolConcurrencyLimit: config.toolConcurrencyLimit,
       toolTimeoutMs: config.toolTimeoutMs,
-      ...(config.contextWindow !== undefined ? { contextWindow: config.contextWindow } : {}),
+      ...(contextWindow !== undefined ? { contextWindow } : {}),
       visionCapable: config.visionCapable,
       maxHistoryTurns: config.maxHistoryTurns,
       sessionStore: session.store,

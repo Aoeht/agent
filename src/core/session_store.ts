@@ -42,6 +42,9 @@ export const MODEL_PREFIX = "【模型】";
 /** 摘要模型选择记录：Web 会话级摘要模型切换时写入，续聊时据此恢复 */
 export const SUMMARY_MODEL_PREFIX = "【摘要模型】";
 
+/** 上下文窗口覆盖记录：Web 会话级窗口切换时写入（auto = 恢复按模型名查表） */
+export const CONTEXT_WINDOW_PREFIX = "【上下文窗口】";
+
 /**
  * 跨 run 长期摘要记录：每个可记忆的 run（含纯聊天）结束时增量更新一份。
  * 磁盘层 compact 只保留最近 N 个对话轮，更早的历史（以及所有跨 run 的工具发现）
@@ -55,6 +58,7 @@ const META_PREFIXES = [
   SESSION_NAME_PREFIX,
   MODEL_PREFIX,
   SUMMARY_MODEL_PREFIX,
+  CONTEXT_WINDOW_PREFIX,
   LONG_TERM_SUMMARY_PREFIX,
 ];
 
@@ -111,6 +115,13 @@ function metaValue(message: Message, prefix: string): string | undefined {
   return value === "" ? undefined : value;
 }
 
+/** 会话记录里的窗口覆盖：auto/非法值一律视为未设置（回退模型注册表或服务器默认） */
+function parseContextWindow(raw: string | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  const value = Number(raw);
+  return Number.isInteger(value) && value > 0 ? value : undefined;
+}
+
 /**
  * 会话名的规范化：摘要模型偶尔会带引号、换行、结尾句号。
  * 首尾一次性去噪（引号与标点可能交替出现，例如 “标题”。），失败返回 undefined ——
@@ -153,6 +164,7 @@ export class SessionStore {
     sessionName?: string;
     model?: string;
     summaryModel?: string;
+    contextWindow?: number;
     longTermSummary?: string;
   }> {
     const records = await SessionStore.readRecords(this.filePath);
@@ -160,6 +172,7 @@ export class SessionStore {
     const sessionName = SessionStore.lastMetaValue(records, SESSION_NAME_PREFIX);
     const model = SessionStore.lastMetaValue(records, MODEL_PREFIX);
     const summaryModel = SessionStore.lastMetaValue(records, SUMMARY_MODEL_PREFIX);
+    const contextWindow = parseContextWindow(SessionStore.lastMetaValue(records, CONTEXT_WINDOW_PREFIX));
     const longTermSummary = SessionStore.lastMetaValue(records, LONG_TERM_SUMMARY_PREFIX);
     return {
       messages: SessionStore.repairTail(messages),
@@ -168,6 +181,7 @@ export class SessionStore {
       ...(sessionName !== undefined ? { sessionName } : {}),
       ...(model !== undefined ? { model } : {}),
       ...(summaryModel !== undefined ? { summaryModel } : {}),
+      ...(contextWindow !== undefined ? { contextWindow } : {}),
       ...(longTermSummary !== undefined ? { longTermSummary } : {}),
     };
   }
@@ -212,6 +226,14 @@ export class SessionStore {
     const current = SessionStore.lastMetaValue(await SessionStore.readRecords(this.filePath), SUMMARY_MODEL_PREFIX);
     if (current === trimmed) return;
     await this.append({ role: "user", content: `${SUMMARY_MODEL_PREFIX}${trimmed}` });
+  }
+
+  /** 记下会话级上下文窗口覆盖（Web 会话级配置用）；undefined 记作 auto（恢复按模型名查表）。 */
+  async recordContextWindow(contextWindow: number | undefined): Promise<void> {
+    const value = contextWindow === undefined ? "auto" : String(contextWindow);
+    const current = SessionStore.lastMetaValue(await SessionStore.readRecords(this.filePath), CONTEXT_WINDOW_PREFIX);
+    if (current === value) return;
+    await this.append({ role: "user", content: `${CONTEXT_WINDOW_PREFIX}${value}` });
   }
 
   /**
@@ -388,6 +410,7 @@ export class SessionStore {
     const sessionName = SessionStore.lastMetaValue(records, SESSION_NAME_PREFIX);
     const model = SessionStore.lastMetaValue(records, MODEL_PREFIX);
     const summaryModel = SessionStore.lastMetaValue(records, SUMMARY_MODEL_PREFIX);
+    const contextWindow = SessionStore.lastMetaValue(records, CONTEXT_WINDOW_PREFIX);
     const longTermSummary = SessionStore.lastMetaValue(records, LONG_TERM_SUMMARY_PREFIX);
     const nonMeta = records.filter((record) => !isMetaRecord(record));
     const messages = SessionStore.toConversationTurns(SessionStore.repairTail(nonMeta));
@@ -413,6 +436,9 @@ export class SessionStore {
     }
     if (summaryModel !== undefined) {
       kept.push({ role: "user", content: `${SUMMARY_MODEL_PREFIX}${summaryModel}` });
+    }
+    if (contextWindow !== undefined) {
+      kept.push({ role: "user", content: `${CONTEXT_WINDOW_PREFIX}${contextWindow}` });
     }
     // 长期摘要必须原样回写：它是 20 轮窗口之外历史的唯一存活形态，裁掉等于失忆
     if (longTermSummary !== undefined) {

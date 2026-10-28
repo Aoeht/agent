@@ -119,6 +119,10 @@ export default function App() {
               config={{
                 model: current.model ?? current.meta?.model,
                 summaryModel: current.summaryModel ?? current.meta?.summaryModel,
+                // 窗口与覆盖以 store 的最新事件值为准：hello 快照（meta）可能是建会话后、
+                // 首次配置落地前的旧值，回退到它会复活已经清空的覆盖
+                contextWindow: current.contextWindow,
+                contextWindowOverride: current.contextWindowOverride,
                 temperature: current.temperature,
                 maxIterations: current.maxIterations,
                 thinkingEffort: current.thinkingEffort,

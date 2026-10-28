@@ -46,8 +46,16 @@ export function Welcome() {
           models={state.models}
           modelStatus={state.modelStatus}
           accountQuota={state.modelAccountQuota}
-          // 模型回退到第一个探测可用的选项：⚙ 按钮在无 config.model 时会禁用，欢迎态要能直接打开选模型
-          config={{ ...config, model: config.model ?? firstAvailableModel(state.models, state.modelStatus) }}
+          // 模型回退到第一个探测可用的选项：⚙ 按钮在无 config.model 时会禁用，欢迎态要能直接打开选模型；
+          // 欢迎态还没有会话，窗口输入框只认草稿里的覆盖值（null = 还没设过）
+          config={{
+            model: config.model ?? firstAvailableModel(state.models, state.modelStatus),
+            summaryModel: config.summaryModel,
+            contextWindowOverride: typeof config.contextWindow === "number" ? config.contextWindow : undefined,
+            temperature: config.temperature,
+            maxIterations: config.maxIterations,
+            thinkingEffort: config.thinkingEffort,
+          }}
           onSend={(text, images) =>
             void actions.createAndSend(text, Object.keys(config).length > 0 ? config : undefined, images)
           }

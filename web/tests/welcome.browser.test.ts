@@ -29,7 +29,8 @@ test.skipIf(process.env.RUN_BROWSER_TESTS !== "1")("欢迎界面：默认停留�
     expect(await sandboxRow.textContent()).toContain("A:\\welcome-fixture");
     // 欢迎态选模型：上报草稿（不调会话配置接口），chip 立即反映
     await page.getByTitle("模型与参数").click();
-    await page.getByRole("combobox").selectOption("beta-model");
+    // 面板里另有摘要模型与思考程度两个 select：模型是第一个
+    await page.getByRole("combobox").first().selectOption("beta-model");
     await page.getByRole("button", { name: "应用", exact: true }).click();
     await page.getByTitle("模型与参数").filter({ hasText: "beta-model" }).waitFor();
     // 发送首条消息：创建会话并进入聊天视图，欢迎语退场

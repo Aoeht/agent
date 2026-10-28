@@ -463,7 +463,7 @@ export class Agent {
     this.config.model = model;
     // 视觉闩锁是针对具体模型的实测结论，换模型后作废
     this.visionDisabled = false;
-    this.contextManager.setModel(model, this.config.contextWindow ?? contextWindowFor(model));
+    this.contextManager.setModel(model, this.contextWindow);
   }
 
   /** 当前是否提供图片通道：宿主声明支持，且没有被厂商实测拒收过 */
@@ -490,6 +490,28 @@ export class Agent {
   /** 调思考程度档位：只认统一枚举字面量，其余忽略 */
   setThinkingEffort(effort: ThinkingEffort): void {
     this.config.thinkingEffort = effort;
+  }
+
+  /** 会话级上下文窗口覆盖：undefined 表示按模型名查表（压缩水位/工具暴露阈值同源） */
+  get contextWindowOverride(): number | undefined {
+    return this.config.contextWindow;
+  }
+
+  /** 当前生效的上下文窗口：覆盖优先，回退模型注册表（未知模型按 128k 兜底） */
+  get contextWindow(): number {
+    return this.config.contextWindow ?? contextWindowFor(this.config.model);
+  }
+
+  /**
+   * 覆盖/清除上下文窗口（UI/宿主可调）：undefined = 恢复按模型名查表。
+   * ContextManager 的水位要一起换，否则压缩阈值停留在旧窗口。非法值（非正整数）忽略。
+   * 落盘由调用方负责（SessionStore.recordContextWindow）。
+   */
+  setContextWindow(contextWindow: number | undefined): void {
+    if (contextWindow !== undefined && (!Number.isInteger(contextWindow) || contextWindow <= 0)) return;
+    if (contextWindow === undefined) delete this.config.contextWindow;
+    else this.config.contextWindow = contextWindow;
+    this.contextManager.setModel(this.config.model, this.contextWindow);
   }
 
   /**
@@ -546,9 +568,7 @@ export class Agent {
     const mode = this.config.toolSearch ?? "auto";
     if (mode !== "off" && this.tools.has(TOOL_SEARCH_TOOL_NAME)) {
       const fullTokens = this.tokenCounter.estimateText(JSON.stringify(all), this.config.model);
-      const threshold = Math.floor(
-        (this.config.contextWindow ?? contextWindowFor(this.config.model)) * 0.1
-      );
+      const threshold = Math.floor(this.contextWindow * 0.1);
       if (mode === "on" || fullTokens > threshold) {
         const activated = new Set(this.tools.activatedToolList());
         return {

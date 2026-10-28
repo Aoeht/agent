@@ -82,6 +82,8 @@ export interface SessionUIState {
   visionCapable?: boolean;
   /** 该模型上下文窗口（token）；配合 lastPromptTokens 画上下文占用 */
   contextWindow?: number;
+  /** 会话级窗口覆盖（未覆盖时缺省，窗口按模型名查表） */
+  contextWindowOverride?: number;
   /** 最近一次 step 的 promptTokens ≈ 发送时的上下文长度 */
   lastPromptTokens?: number;
   /** 最近一次 step 的前缀缓存命中（provider 不上报时保持上次的值） */
@@ -198,24 +200,27 @@ export function applyEvent(s: SessionUIState, e: ServerEvent): SessionUIState {
       return { ...s, task: e.task, plan: e.task.plan,
         status: e.task.state === "running" ? "running" : e.task.state === "waiting_input" ? "awaiting_input"
           : e.task.state === "waiting_approval" ? "awaiting_approval" : "idle" };
-    case "hello":
-      return {
-        ...s,
-        meta: e,
-        ...((e.configRevision ?? 0) < (s.configRevision ?? 0) ? {} : {
-          model: e.model,
-          configRevision: e.configRevision,
-          contextWindow: e.contextWindow ?? s.contextWindow,
-          summaryModel: e.summaryModel ?? s.summaryModel,
-          temperature: e.temperature ?? s.temperature,
-          maxIterations: e.maxIterations ?? s.maxIterations,
-          thinkingEffort: e.thinkingEffort ?? s.thinkingEffort,
-          visionCapable: e.vision ?? s.visionCapable,
-        }),
-      };
-    case "session_config":
+    case "hello": {
+      const fresh = (e.configRevision ?? 0) >= (s.configRevision ?? 0);
+      const next: SessionUIState = { ...s, meta: e };
+      if (fresh) {
+        next.model = e.model;
+        next.configRevision = e.configRevision;
+        if (e.contextWindow !== undefined) next.contextWindow = e.contextWindow;
+        // 覆盖是"有/无"二元状态：重连后的 hello 没带就是已清空，不能沿用旧值
+        if (e.contextWindowOverride !== undefined) next.contextWindowOverride = e.contextWindowOverride;
+        else delete next.contextWindowOverride;
+        if (e.summaryModel !== undefined) next.summaryModel = e.summaryModel;
+        if (e.temperature !== undefined) next.temperature = e.temperature;
+        if (e.maxIterations !== undefined) next.maxIterations = e.maxIterations;
+        if (e.thinkingEffort !== undefined) next.thinkingEffort = e.thinkingEffort;
+        if (e.vision !== undefined) next.visionCapable = e.vision;
+      }
+      return next;
+    }
+    case "session_config": {
       if ((e.configRevision ?? 0) < (s.configRevision ?? 0)) return s;
-      return {
+      const next: SessionUIState = {
         ...s,
         model: e.model,
         configRevision: e.configRevision,
@@ -225,6 +230,10 @@ export function applyEvent(s: SessionUIState, e: ServerEvent): SessionUIState {
         maxIterations: e.maxIterations ?? s.maxIterations,
         thinkingEffort: e.thinkingEffort ?? s.thinkingEffort,
       };
+      if (e.contextWindowOverride !== undefined) next.contextWindowOverride = e.contextWindowOverride;
+      else delete next.contextWindowOverride;
+      return next;
+    }
     case "run_start": {
       // 排队消息转正：芯片移除、正式用户气泡此刻进入聊天流（未排队路径的气泡由 user_sent 先加）
       const queued = e.queueId !== undefined;

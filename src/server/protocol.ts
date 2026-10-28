@@ -106,6 +106,8 @@ export const ServerEventSchema = z.discriminatedUnion("type", [
     sandboxRoot: z.string().optional(),
     /** 该会话模型的上下文窗口（token），配合 step.tokens.promptTokens 显示上下文占用 */
     contextWindow: z.number().int().optional(),
+    /** 会话级窗口覆盖（只在实际覆盖时出现；缺省表示按模型名查表） */
+    contextWindowOverride: z.number().int().optional(),
     temperature: z.number().optional(),
     maxIterations: z.number().int().optional(),
     thinkingEffort: ThinkingEffortSchema.optional(),
@@ -163,12 +165,14 @@ export const ServerEventSchema = z.discriminatedUnion("type", [
       })
       .optional(),
   }),
-  /** 会话级配置变化（模型/摘要模型/温度/迭代上限/思考程度，POST /sessions/:id/config 后广播） */
+  /** 会话级配置变化（模型/摘要模型/上下文窗口/温度/迭代上限/思考程度，POST /sessions/:id/config 后广播） */
   z.object({
     type: z.literal("session_config"),
     model: z.string(),
     configRevision: z.number().optional(),
     contextWindow: z.number().int().optional(),
+    /** 会话级窗口覆盖（清空后不带该字段） */
+    contextWindowOverride: z.number().int().optional(),
     summaryModel: z.string().optional(),
     temperature: z.number().optional(),
     maxIterations: z.number().int().optional(),

@@ -285,15 +285,24 @@ async function route(
       return json(payload);
     }
 
-    // 会话级配置（模型/摘要模型/温度/迭代上限/思考程度）
+    // 会话级配置（模型/摘要模型/上下文窗口/温度/迭代上限/思考程度）
     const configMatch = /^\/sessions\/([^/]+)\/config$/.exec(pathname);
     if (configMatch && method === "POST") {
       const body = await readJson(req);
       const patch: {
-        model?: string; summaryModel?: string; temperature?: number; maxIterations?: number; thinkingEffort?: ThinkingEffort;
+        model?: string; summaryModel?: string; contextWindow?: number | null;
+        temperature?: number; maxIterations?: number; thinkingEffort?: ThinkingEffort;
       } = {};
       if (typeof body.model === "string") patch.model = body.model;
       if (typeof body.summaryModel === "string") patch.summaryModel = body.summaryModel;
+      // null = 清空覆盖、恢复按模型名查表
+      if (body.contextWindow === null) patch.contextWindow = null;
+      else if (typeof body.contextWindow === "number") {
+        if (!Number.isInteger(body.contextWindow) || body.contextWindow <= 0) {
+          return json({ error: "上下文窗口必须是正整数" }, 400);
+        }
+        patch.contextWindow = body.contextWindow;
+      }
       if (typeof body.temperature === "number") patch.temperature = body.temperature;
       if (typeof body.maxIterations === "number") patch.maxIterations = body.maxIterations;
       if (typeof body.thinkingEffort === "string" &&
