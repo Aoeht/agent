@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit",
     "eval:memory": "bun run benchmarks/memory_recall_eval.ts",
     "eval:scanner": "bun run benchmarks/scanner_eval.ts",
+    "eval:rag": "bun run benchmarks/rag_eval.ts",
     "trace:report": "bun run benchmarks/trace_report.ts",
     "test:memory": "bun test tests/memory_store.test.ts tests/memory_recall.test.ts tests/memory_writer.test.ts tests/memory_recall_eval.test.ts tests/context_compression.test.ts",
     "test:scanner": "bun test tests/scanner_registry.test.ts tests/scanner_eval.test.ts tests/bili_snapshot.test.ts tests/bili_collect.test.ts",

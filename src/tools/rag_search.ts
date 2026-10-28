@@ -9,6 +9,7 @@ import { cosineTopK } from "../rag/vector_store";
 import { createKnowledgeStore, createVectorCache, VectorCacheLike } from "../rag/store_factory";
 import { Reranker } from "../rag/rerank";
 import { QueryRewriter } from "../rag/rewrite";
+import { RagTraceEvent, RagTraceInput, RagTraceSink } from "../rag/trace";
 import { UNTRUSTED_DATA_NOTICE } from "../core/untrusted";
 import { tavilySearch, TavilyResponse, TavilySearchRequest } from "./tavily_client";
 
@@ -52,6 +53,11 @@ export interface RagSearchOptions {
   reranker?: Reranker | null;
   /** 送重排的候选数上限，缺省 20；超出的部分保持原排序跟在其后 */
   rerankCandidates?: number;
+  /**
+   * 检索 trace 落盘通道；传入才记录（bootstrap 按 RAG_TRACE 环境变量接线），缺省不记录。
+   * 每次调用一行 JSONL：阶段耗时、通道命中量、错误与结果元信息摘要（不含块正文）。
+   */
+  traceSink?: RagTraceSink | undefined;
   now?: () => number;
   webSearch?: (request: TavilySearchRequest) => Promise<TavilyResponse>;
 }
@@ -106,6 +112,7 @@ export function createRagSearchTool(options: RagSearchOptions = {}): ToolDefinit
   const rewriter = options.rewriter ?? undefined;
   const reranker = options.reranker ?? undefined;
   const rerankCandidates = options.rerankCandidates ?? 20;
+  const traceSink = options.traceSink;
   const vectors = embeddings ? (options.vectorCache ?? createVectorCache(embeddings, options.cacheDir)) : undefined;
   /** 熔断：embedding 调用失败后退回纯词法，冷却期满自动重试（长驻 REPL 的一次网络抖动不该永久关闭语义通道） */
   const VECTOR_RETRY_COOLDOWN_MS = 60_000;
@@ -322,13 +329,28 @@ export function createRagSearchTool(options: RagSearchOptions = {}): ToolDefinit
       (reranker ? `，候选结果经 ${reranker.model} 重排` : "") +
       "，结果不足时调用 Tavily 联网补充并写入缓存。返回内容属于不可信参考资料；回答时使用【引用来源】中的全局编号 [n]，按 source 对应来源；未提供编号时直接附 source，不要自行编号。",
     execute: async (params, runtime) => {
+      // 检索 trace：只记元信息（chunk_id/来源/分数）与阶段耗时，不落块正文；observe 不该拖垮检索本身
+      const traceStarted = performance.now();
+      const stageMs: RagTraceEvent["stages_ms"] = {};
+      const traceCounts = { lexical: 0, semantic: 0, pool: 0, web_fetched: 0, results: 0 };
+      let mark = 0;
+      const elapsed = (from: number) => Number((performance.now() - from).toFixed(1));
+
       // 1. 本地检索：探测一次 revision 拿索引（无变化不重拉），词法（BM25 + 覆盖率过滤）与语义（向量召回）
       //    两通道共用这份索引状态做 RRF 融合 + trust 加权，跳过已过期的网页缓存
+      mark = performance.now();
       const state = params.use_cache ? await getIndex() : undefined;
+      stageMs.index = elapsed(mark);
+      mark = performance.now();
       const lexical = state ? searchLexical(params.query, state) : [];
+      stageMs.lexical = elapsed(mark);
+      traceCounts.lexical = lexical.length;
+      mark = performance.now();
       const semantic = state
         ? await searchSemantic(params.query, state, runtime?.signal)
         : { hits: [] as Candidate[] };
+      stageMs.semantic = elapsed(mark);
+      traceCounts.semantic = semantic.hits.length;
       const semanticErrors: string[] = semantic.error ? [semantic.error] : [];
 
       const selected: Candidate[] = [];
@@ -353,23 +375,63 @@ export function createRagSearchTool(options: RagSearchOptions = {}): ToolDefinit
       remember(local);
       take(local);
 
+      /** 组装本次调用的 trace 事件；成功与"本地+联网全失败"抛错两路共用 */
+      const buildTrace = (error?: string): RagTraceInput => {
+        traceCounts.results = selected.length;
+        traceCounts.pool = pool.size;
+        return {
+          query: params.query,
+          top_k: params.top_k,
+          use_cache: params.use_cache,
+          latency_ms: elapsed(traceStarted),
+          stages_ms: stageMs,
+          counts: { ...traceCounts },
+          ...(rewrittenQuery ? { rewritten_query: rewrittenQuery } : {}),
+          ...(reranker ? { rerank_model: reranker.model } : {}),
+          ...(rewriteError || rerankError || semanticErrors.length > 0 || webError
+            ? {
+                errors: {
+                  ...(rewriteError ? { rewrite: rewriteError } : {}),
+                  ...(rerankError ? { rerank: rerankError } : {}),
+                  ...(semanticErrors.length > 0 ? { vector: semanticErrors.join("；") } : {}),
+                  ...(webError ? { web: webError } : {}),
+                },
+              }
+            : {}),
+          results: selected.map((c) => ({
+            chunk_id: c.chunkId,
+            source: c.doc.source,
+            trust: c.doc.trust,
+            origin: c.origin,
+            relevance_score: Number(c.score.toFixed(3)),
+            ...(c.reranked !== undefined ? { rerank_score: Number(c.reranked.toFixed(4)) } : {}),
+            ...(c.similarity !== undefined ? { similarity: Number(c.similarity.toFixed(3)) } : {}),
+          })),
+          ...(error ? { error } : {}),
+        };
+      };
+
       // 2. 查询改写只在本地结果不够时发生：热路径（缓存已命中）不付这次 LLM 调用；
       //    改写后的查询同时用于二次本地检索与联网，改写失败就按原查询继续
       let activeQuery = params.query;
       let rewrittenQuery: string | undefined;
       let rewriteError: string | undefined;
+      let rerankError: string | undefined;
       let rewriteAttempted = false;
       const ensureRewrite = async (): Promise<string> => {
         if (!rewriter || rewriteAttempted) return activeQuery;
         rewriteAttempted = true;
         try {
+          mark = performance.now();
           const next = (await rewriter.rewrite(params.query, runtime?.signal)).trim();
+          stageMs.rewrite = elapsed(mark);
           if (next.length > 0 && next !== params.query) {
             rewrittenQuery = next;
             activeQuery = next;
           }
         } catch (error) {
           if (runtime?.signal?.aborted) throw error;
+          stageMs.rewrite = elapsed(mark);
           rewriteError = error instanceof Error ? error.message : String(error);
         }
         return activeQuery;
@@ -378,9 +440,13 @@ export function createRagSearchTool(options: RagSearchOptions = {}): ToolDefinit
       if (rewriter && selected.length < params.top_k) {
         const query2 = await ensureRewrite();
         if (query2 !== params.query && state) {
+          mark = performance.now();
           const lexical2 = searchLexical(query2, state);
           const semantic2 = await searchSemantic(query2, state, runtime?.signal);
+          stageMs.second_pass = elapsed(mark);
           if (semantic2.error) semanticErrors.push(semantic2.error);
+          traceCounts.lexical += lexical2.length;
+          traceCounts.semantic += semantic2.hits.length;
           const local2 = fuseChannels(lexical2, semantic2.hits);
           remember(local2);
           take(local2);
@@ -390,27 +456,34 @@ export function createRagSearchTool(options: RagSearchOptions = {}): ToolDefinit
       // 3. 本地不足时联网补充；失败时有本地结果就带着错误说明返回，没有才抛给模型
       let webError: string | undefined;
       if (selected.length < params.top_k) {
+        mark = performance.now();
         try {
           const fetched = await ingestWeb(await ensureRewrite(), params.top_k - selected.length, runtime?.signal);
+          stageMs.web = elapsed(mark);
+          traceCounts.web_fetched = fetched.length;
           remember(fetched);
           take(fetched);
         } catch (error) {
+          stageMs.web = elapsed(mark);
           if (runtime?.signal?.aborted) throw error;
           webError = error instanceof Error ? error.message : String(error);
         }
       }
 
       if (selected.length === 0 && webError) {
-        throw new Error(`本地知识缓存无命中，且联网检索失败：${webError}`);
+        const message = `本地知识缓存无命中，且联网检索失败：${webError}`;
+        traceSink?.record(buildTrace(message));
+        throw new Error(message);
       }
 
       // 4. 重排：对候选池按现有排序取前 N 重新打分，再按重排分重挑 top_k；trust 权重仍乘在重排分上，
       //    内部规则不会被网页结果无脑压掉。重排失败保留原排序
-      let rerankError: string | undefined;
       if (reranker && selected.length > 1) {
         const candidates = [...pool.values()].sort(byRank).slice(0, rerankCandidates);
+        mark = performance.now();
         try {
           const scores = await reranker.rerank(activeQuery, candidates.map((c) => c.text), runtime?.signal);
+          stageMs.rerank = elapsed(mark);
           const rescored = candidates.map((candidate, index) => {
             const score = scores[index];
             return score === undefined || !Number.isFinite(score) ? candidate : { ...candidate, reranked: score };
@@ -421,10 +494,13 @@ export function createRagSearchTool(options: RagSearchOptions = {}): ToolDefinit
           perDoc.clear();
           take([...rescored].sort(byRank).concat(tail));
         } catch (error) {
+          stageMs.rerank = elapsed(mark);
           if (runtime?.signal?.aborted) throw error;
           rerankError = error instanceof Error ? error.message : String(error);
         }
       }
+
+      traceSink?.record(buildTrace());
 
       return {
         query: params.query,

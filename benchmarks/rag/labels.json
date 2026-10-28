@@ -1,0 +1,103 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "gongxiang-pingmu",
+      "query": "客服让我开启屏幕共享指导操作，我密码验证码都没给别人，钱怎么还是被转走了",
+      "goldSources": ["11748908"],
+      "goldTerms": ["屏幕共享", "验证码"],
+      "notes": "共享屏幕诈骗：深圳公安揭秘文，验证码/密码未泄露也可能被偷看"
+    },
+    {
+      "id": "maochong-kefu-tuikuan",
+      "query": "自称电商客服说商品有问题主动给我退款理赔，让我下载会议软件",
+      "goldSources": ["t20240115", "10897924", "bjfsh.gov.cn"],
+      "goldTerms": ["冒充", "客服", "退款"],
+      "notes": "gold 首选房山区冒充电商物流客服类诈骗专页"
+    },
+    {
+      "id": "shazhupan-jiaoyou",
+      "query": "网恋对象天天嘘寒问暖，现在带我投资说有内部消息稳赚",
+      "goldSources": ["10897874"],
+      "goldTerms": ["杀猪盘", "投资理财"],
+      "notes": "北京交管局杀猪盘专题（网络交友引诱投资理财）"
+    },
+    {
+      "id": "shuadan-fanli",
+      "query": "群里做点赞任务返了几十块佣金，现在让我垫钱做大额连单",
+      "goldSources": ["art_f736fc5da09746ea9d042d1dbd966722"],
+      "goldTerms": ["刷单", "返利"],
+      "notes": "白银区诈骗案例：刷单返利+律师挽损类"
+    },
+    {
+      "id": "jipiao-tuigaizqian",
+      "query": "航班因为机械故障取消了，客服打电话说可以申请赔偿",
+      "goldSources": ["post_10491241"],
+      "goldTerms": ["机票", "退改签"],
+      "notes": "广州黄埔：机票退改签骗局"
+    },
+    {
+      "id": "maochong-gongjianfa",
+      "query": "警察加我微信出示通缉令，说我涉嫌洗钱要把钱转到安全账户配合审查",
+      "goldSources": ["10897924", "t20200401_2197738"],
+      "goldTerms": ["公检法", "安全账户"],
+      "notes": "冒充公检法：北京交管局专题 + 晋江警方提示"
+    },
+    {
+      "id": "xujia-daikuan",
+      "query": "无抵押低利息的贷款App，额度批了但要先交保证金解冻费才能提现",
+      "goldSources": ["t20240115_2994097", "10897921"],
+      "goldTerms": ["贷款", "提现"],
+      "notes": "晋江虚假网络贷款（永远无法提现）+ 北京交管局贷款诈骗"
+    },
+    {
+      "id": "zhengxin-xiufu",
+      "query": "有人说花钱可以修复征信逾期记录，删除不良记录",
+      "goldSources": ["post_8583359"],
+      "goldTerms": ["征信"],
+      "notes": "广州信用：征信修复骗局风险提示"
+    },
+    {
+      "id": "luoliao-qiaoza",
+      "query": "和网友视频裸聊被录屏了，对方威胁不发视频给通讯录就要钱",
+      "goldSources": ["t20230210_6107918"],
+      "goldTerms": ["裸聊", "敲诈"],
+      "notes": "福建公安：防范裸聊敲诈典型案例"
+    },
+    {
+      "id": "kuaidi-lipei",
+      "query": "快递公司打电话说包裹丢了，主动要给我双倍理赔",
+      "goldSources": ["art_d9438b17d7c74ad2a5674b34a0c66672"],
+      "goldTerms": ["快递", "理赔"],
+      "notes": "泰州公安：快递包裹丢失客服主动理赔诈骗"
+    },
+    {
+      "id": "touzi-licai-xuni",
+      "query": "投资大师每天荐股带单，跟买稳赚不赔，平台还能随时提现",
+      "goldSources": ["common-online-investment-scams"],
+      "goldTerms": ["投資", "理財"],
+      "notes": "香港警務處網上投資騙案專頁（繁體，goldTerms 按文档原文）；湖南反诈宣传页不在 PG 语料，已移除"
+    },
+    {
+      "id": "jianzhi-shougonghuo",
+      "query": "在家做手工活兼职，交了押金材料费说完成任务就退",
+      "goldSources": ["art_b18ed077c7fb4b069ca0a7ddc4dba2dc", "post_2090855"],
+      "goldTerms": ["手工", "兼职"],
+      "notes": "白银区手工活儿陷阱 / 洋山手工兼职连环套"
+    },
+    {
+      "id": "maochong-lingdao",
+      "query": "微信上有人冒充我们领导，让我代为转账给合作方",
+      "goldSources": ["dba9da11590d496d8b0440c5f24b5551"],
+      "goldTerms": ["冒充", "领导"],
+      "notes": "江永：微信冒充领导诈骗"
+    },
+    {
+      "id": "xiaoyuandai",
+      "query": "注销校园贷的客服说不注销会影响征信，让我把额度提出来转到指定账户",
+      "goldSources": ["ARTIPDrIgoIzg7vFCD9QZKsL201026"],
+      "goldTerms": ["校园贷"],
+      "notes": "央视网：校园贷诈骗高发中消协警示"
+    }
+  ]
+}
