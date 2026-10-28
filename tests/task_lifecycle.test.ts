@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { createHash } from "node:crypto";
+import { Database } from "bun:sqlite";
 import { Agent } from "../src/core/agent";
 import { PlanStore } from "../src/core/plan_store";
 import { SessionStore } from "../src/core/session_store";
@@ -225,6 +226,35 @@ describe("durable tasks and recovery", () => {
     const observation = JSON.parse(result.steps[0]!.toolCalls[0]!.result);
     expect(observation.runs.map((run: any) => run.input)).toEqual(["要求0", "要求1"]);
     expect(observation.totalRuns).toBe(4); expect(observation.nextOffset).toBe(2);
+  });
+  test("旧格式单行 JSON 文件自动迁移，动作与答案不丢", async () => {
+    const root = await fixture(); const file = path.join(root, "task.sqlite");
+    const stamp = "2026-10-20T00:00:00.000Z";
+    const legacy = { id: "legacy-task", goal: "旧目标", createdAt: stamp, updatedAt: stamp, state: "answered",
+      plan: [{ content: "步骤", status: "completed" }], criteria: [],
+      verification: { status: "not_configured", checks: [] },
+      runs: [{ id: "r1", input: "旧任务", startedAt: stamp, endedAt: stamp, stopReason: "answer" }],
+      actions: [{ id: "a1", runId: "r1", tool: "write", arguments: "{}", needsReconciliation: true,
+        state: "returned", startedAt: stamp, endedAt: stamp, resultPreview: "完成" }],
+      lastAnswer: "旧答案", stopReason: "answer" };
+    // 直接造出旧实现的存储形态：单行 task_state 全量 JSON
+    const db = new Database(file, { create: true });
+    db.exec("CREATE TABLE task_state (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL)");
+    db.query("INSERT INTO task_state(id,data) VALUES(1,?)").run(JSON.stringify([legacy]));
+    db.close();
+
+    const store = new TaskStore(file);
+    const task = store.current()!;
+    expect(task.id).toBe("legacy-task");
+    expect(task.actions[0]?.resultPreview).toBe("完成");
+    expect(task.lastAnswer).toBe("旧答案");
+
+    // 迁移后继续写：仍在同一条任务链上，旧动作不丢，也不重复建任务
+    store.begin("续写");
+    const resumed = new TaskStore(file).current()!;
+    expect(resumed.runs).toHaveLength(2);
+    expect(resumed.actions).toHaveLength(1);
+    expect(store.list()).toHaveLength(1);
   });
   test("failed final task write reports failure and releases abandoned ownership", async () => {
     const store = new TaskStore(); const { agent } = setup([reply()], { taskStore: store });

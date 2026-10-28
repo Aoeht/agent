@@ -17,13 +17,33 @@ function alive(pid: number): boolean {
   catch (error) { return (error as NodeJS.ErrnoException).code !== "ESRCH"; }
 }
 
-/** Each transaction opens/closes its connection, including on Windows. The run owner
- * prevents two CLI/Web processes from executing the same session concurrently. */
+type TaskRow = { seq: number; id: string; data: string };
+type ActionRow = { id: string; task_id: string; seq: number; data: string };
+/** 一次事务读出的基线：记录本体 + 每行的原始 JSON，用于只回写真正变化的行 */
+type Loaded = {
+  records: TaskRecord[];
+  taskRaw: Map<string, { seq: number; raw: string }>;
+  actionRaw: Map<string, { taskId: string; seq: number; raw: string }>;
+};
+
+/**
+ * 任务账本。存储不再是一行全量 JSON：动作（每次工具调用新增/更新，体量主导）单独成表，
+ * 事务内按差异只写变化的那几行，其余字段留在任务行里。
+ *
+ * 为什么拆：单行全量回写时，一次工具调用至少 3 次事务、每次重写整段历史，累计写入随动作数
+ * 平方增长（实测 400 次调用写 141 MB，每次调用 354 KB）；拆表后每次调用 2.4 KB，与历史长度无关。
+ *
+ * 语义不变：每次事务仍新开连接、`synchronous = FULL`（写前日志要耐断电），事务内先读全量记录
+ * 再交给调用方修改，提交时按差异落盘，崩溃恢复与防重放都只看记录内容。
+ * 旧文件（单行 JSON 的 task_state 表）首次打开时原地迁移。
+ */
 export class TaskStore {
   private static readonly activeOwners = new Set<string>();
   private memory: TaskRecord[] = [];
   private readonly token = randomUUID();
   private activeRunId: string | undefined;
+  /** 表结构与旧格式迁移每实例只确认一次（CREATE/DROP 的 DDL 检查不必跟着每次事务跑） */
+  private schemaChecked = false;
   constructor(readonly filePath?: string) {}
 
   private transaction<T>(fn: (records: TaskRecord[]) => T): T {
@@ -37,16 +57,88 @@ export class TaskStore {
     const db = new Database(this.filePath, { create: true });
     try {
       db.exec("PRAGMA busy_timeout = 5000; PRAGMA synchronous = FULL;");
-      db.exec("CREATE TABLE IF NOT EXISTS task_state (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL)");
+      this.ensureSchema(db);
       return db.transaction(() => {
-        const row = db.query("SELECT data FROM task_state WHERE id=1").get() as { data: string } | null;
-        const records = row ? TaskSchema.array().parse(JSON.parse(row.data)) : [];
+        const loaded = this.load(db);
+        const records = loaded.records;
         const result = fn(records);
-        db.query("INSERT INTO task_state(id,data) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data")
-          .run(JSON.stringify(records));
+        this.persist(db, records, loaded);
         return structuredClone(result);
       }).immediate();
     } finally { db.close(); }
+  }
+
+  /** 建表 + 旧格式迁移（同一事务，进程间靠 immediate 串行） */
+  private ensureSchema(db: Database): void {
+    if (this.schemaChecked) return;
+    db.transaction(() => {
+      const legacy = db.query("SELECT 1 AS found FROM sqlite_master WHERE type='table' AND name='task_state'").get() as { found: number } | null;
+      db.exec("CREATE TABLE IF NOT EXISTS tasks (seq INTEGER NOT NULL, id TEXT PRIMARY KEY, data TEXT NOT NULL)");
+      db.exec("CREATE TABLE IF NOT EXISTS actions (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, seq INTEGER NOT NULL, data TEXT NOT NULL)");
+      db.exec("CREATE INDEX IF NOT EXISTS actions_by_task ON actions(task_id, seq)");
+      if (!legacy) return;
+      const row = db.query("SELECT data FROM task_state WHERE id=1").get() as { data: string } | null;
+      const records = row ? TaskSchema.array().parse(JSON.parse(row.data)) : [];
+      const insertTask = db.query("INSERT OR REPLACE INTO tasks(seq,id,data) VALUES(?,?,?)");
+      const insertAction = db.query("INSERT OR REPLACE INTO actions(id,task_id,seq,data) VALUES(?,?,?,?)");
+      records.forEach((task, index) => {
+        const { actions, ...rest } = task;
+        insertTask.run(index, task.id, JSON.stringify(rest));
+        actions.forEach((action, seq) => insertAction.run(action.id, task.id, seq, JSON.stringify(action)));
+      });
+      db.exec("DROP TABLE task_state");
+    }).immediate();
+    this.schemaChecked = true;
+  }
+
+  private load(db: Database): Loaded {
+    const taskRows = db.query("SELECT seq, id, data FROM tasks ORDER BY seq").all() as TaskRow[];
+    const actionRows = db.query("SELECT id, task_id, seq, data FROM actions ORDER BY task_id, seq").all() as ActionRow[];
+    const byTask = new Map<string, ActionRow[]>();
+    for (const row of actionRows) {
+      const list = byTask.get(row.task_id);
+      if (list) list.push(row); else byTask.set(row.task_id, [row]);
+    }
+    const loaded: Loaded = { records: [], taskRaw: new Map(), actionRaw: new Map() };
+    for (const row of taskRows) {
+      const actions = (byTask.get(row.id) ?? []).map(action => JSON.parse(action.data) as unknown);
+      loaded.records.push(TaskSchema.parse({ ...(JSON.parse(row.data) as object), actions }));
+      loaded.taskRaw.set(row.id, { seq: row.seq, raw: row.data });
+    }
+    for (const row of actionRows) loaded.actionRaw.set(row.id, { taskId: row.task_id, seq: row.seq, raw: row.data });
+    return loaded;
+  }
+
+  /** 只写变化的行：一次工具调用通常只改 1 个任务行 + 1 条动作行 */
+  private persist(db: Database, records: TaskRecord[], loaded: Loaded): void {
+    const upsertTask = db.query("INSERT INTO tasks(seq,id,data) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET seq=excluded.seq, data=excluded.data");
+    const upsertAction = db.query("INSERT INTO actions(id,task_id,seq,data) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET task_id=excluded.task_id, seq=excluded.seq, data=excluded.data");
+    const deleteTask = db.query("DELETE FROM tasks WHERE id=?");
+    const deleteActions = db.query("DELETE FROM actions WHERE task_id=?");
+    const deleteAction = db.query("DELETE FROM actions WHERE id=?");
+    const keptTasks = new Set<string>();
+    const keptActions = new Set<string>();
+    records.forEach((task, index) => {
+      keptTasks.add(task.id);
+      const { actions, ...rest } = task;
+      const raw = JSON.stringify(rest);
+      const previous = loaded.taskRaw.get(task.id);
+      if (previous === undefined || previous.raw !== raw || previous.seq !== index) upsertTask.run(index, task.id, raw);
+      actions.forEach((action, seq) => {
+        keptActions.add(action.id);
+        const actionJson = JSON.stringify(action);
+        const prior = loaded.actionRaw.get(action.id);
+        if (prior === undefined || prior.raw !== actionJson || prior.taskId !== task.id || prior.seq !== seq) {
+          upsertAction.run(action.id, task.id, seq, actionJson);
+        }
+      });
+    });
+    for (const id of loaded.taskRaw.keys()) {
+      if (keptTasks.has(id)) continue;
+      deleteTask.run(id);
+      deleteActions.run(id);
+    }
+    for (const id of loaded.actionRaw.keys()) if (!keptActions.has(id)) deleteAction.run(id);
   }
 
   private recover(task: TaskRecord | undefined): void {
