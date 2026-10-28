@@ -22,7 +22,9 @@
  * - 每次执行前必须经 runtime.requestHuman 人工确认（模型不能自己批准自己），确认提示展示
  *   后端对应的真实执行形态；非交互场景（管道 one-shot）没有确认通道，直接拒绝 ——
  *   宁可不可用也不静默放行；
- * - 超时强制终止（docker 后端终止后还要补 docker rm -f 收容器，见 sandbox_docker.ts），
+ * - 超时强制终止：后台任务按进程树收口（POSIX 以 detached 自成进程组、整组 SIGKILL；
+ *   Windows 用 taskkill /T，见 src/utils/process_tree.ts），孙进程不留孤儿；前台同步路径
+ *   仍只杀直接子进程。docker 后端终止后还要补 docker rm -f 收容器（见 sandbox_docker.ts）。
  *   stdout/stderr 各自截断，输出一律当外部数据看。
  */
 import { spawn } from "node:child_process";
@@ -163,6 +165,9 @@ function spawnToLog(
       env: options.env,
       stdio: ["ignore", out, err],
       windowsHide: true,
+      // POSIX：自成进程组，终止时 kill(-pgid) 才能把脚本派生的孙进程一起收掉；
+      // Windows 由 taskkill /T 按父子树收，detached 只会多出一个隐藏控制台
+      ...(process.platform === "win32" ? {} : { detached: true }),
     });
   } finally {
     closeSync(out);

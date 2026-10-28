@@ -9,12 +9,13 @@
  *   此时拿不到真实退出码，宁可说"不知道"也不编一个。
  * 这样即使登记者没了，留下的任务记录仍然可读、可清理。
  *
- * kill 的粒度与同步路径保持一致：host 后端杀直接子进程（不连带孙进程，见 src/tools/run_script.ts
- * 顶部注释的已知边界）；docker 后端杀 docker CLI 之后必须补 docker rm -f 收容器。
+ * kill 按进程树收口：host 后端连孙进程一起终止（见 src/utils/process_tree.ts），否则
+ * "脚本 A 调外部工具"的场景会留下孤儿；docker 后端杀 docker CLI 之后必须补 docker rm -f 收容器。
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import fs, { type FileHandle } from "node:fs/promises";
 import path from "node:path";
+import { killChildTree, killPidTree } from "../utils/process_tree";
 
 export type JobStatus = "running" | "exited" | "timed_out" | "killed";
 
@@ -182,7 +183,9 @@ export class JobStore {
 
   async save(record: JobRecord): Promise<void> {
     const target = this.paths(record.id).meta;
-    const tmp = `${target}.${process.pid}.tmp`;
+    // 临时文件名带上随机后缀：kill/expire 与 close 回填可能并发写同一条记录，
+    // 共用固定 tmp 名会让后一个 rename 撞上已被 rename 走的文件（ENOENT）
+    const tmp = `${target}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
     await fs.mkdir(this.dir, { recursive: true });
     await fs.writeFile(tmp, JSON.stringify(record), "utf-8");
     await fs.rename(tmp, target);
@@ -279,9 +282,10 @@ export class JobStore {
     const record = await this.read(id);
     if (record === undefined) return undefined;
     if (record.status !== "running") return record;
-    await this.terminate(record);
+    // 先落状态再杀：close 回填是异步的，若先杀，回填可能在本次落盘前读到 running 并写成 exited
     const killed: JobRecord = { ...record, status: "killed", endedAt: Date.now() };
     await this.save(killed);
+    await this.terminate(record);
     return killed;
   }
 
@@ -336,9 +340,9 @@ export class JobStore {
   async expire(id: string): Promise<void> {
     const record = await this.read(id);
     if (record === undefined || record.status !== "running") return;
-    await this.terminate(record);
-    // 退出码当场落定：close 回填是异步的，轮询可能在它之前就读到 timed_out
+    // 退出码与状态先落定再终止：close 回填异步到达，轮询可能在它之前就读；顺序反了会被回填成 exited
     await this.save({ ...record, status: "timed_out", endedAt: Date.now(), exitCode: EXIT_TIMED_OUT });
+    await this.terminate(record);
   }
 
   /** 关停时统一收口：把本目录下所有仍在跑的后台任务杀掉，不留孤儿 */
@@ -346,8 +350,8 @@ export class JobStore {
     let killed = 0;
     for (const record of await this.list(Number.MAX_SAFE_INTEGER)) {
       if (record.status !== "running") continue;
-      await this.terminate(record);
       await this.save({ ...record, status: "killed", endedAt: Date.now() });
+      await this.terminate(record);
       killed++;
     }
     return killed;
@@ -371,17 +375,9 @@ export class JobStore {
   private async terminate(record: JobRecord): Promise<void> {
     const tracked = this.tracked.get(record.id);
     if (tracked !== undefined) {
-      try {
-        tracked.child.kill();
-      } catch {
-        /* 进程已退出 */
-      }
+      killChildTree(tracked.child);
     } else if (processAlive(record.pid)) {
-      try {
-        process.kill(record.pid);
-      } catch {
-        /* 进程已退出或权限不足 */
-      }
+      killPidTree(record.pid);
     }
     if (record.container !== undefined) {
       // 杀 docker CLI 只是断开连接，容器还在跑：必须按可预测的名字收尸

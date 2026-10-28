@@ -240,6 +240,50 @@ test("日志窗口：首帧取尾部快照，随后按 offset 续拉增量且停
   expect(missing.size).toBe(0);
 });
 
+test("kill 收整棵进程树：脚本派生的孙进程不留孤儿", async () => {
+  const { workDir, jobs, run, inspect } = await setup("job-tree-");
+  // 直接子进程不能是 bun：bun 退出会连带收掉自己派生的进程，测不出漏杀。
+  // 用与生产同形的解释器（Windows powershell / POSIX bash）派生纯 sleep 孙进程。
+  const script = process.platform === "win32" ? "tree.ps1" : "tree.sh";
+  await fs.writeFile(
+    path.join(workDir, script),
+    process.platform === "win32"
+      ? `$p = Start-Process powershell -ArgumentList "-NoProfile","-Command","Start-Sleep 60" -PassThru\n` +
+        `Write-Output "grandchild $($p.Id)"\nStart-Sleep 60\n`
+      : `sleep 60 &\necho "grandchild $!"\nwait\n`,
+    "utf-8"
+  );
+
+  const started = (await run.execute(
+    { script, background: true, timeout_ms: 60_000 },
+    { requestHuman: allow }
+  )) as unknown as { job_id: string };
+
+  const pidOf = (text: string): number | undefined => {
+    const match = /grandchild (\d+)/.exec(text);
+    return match ? Number(match[1]) : undefined;
+  };
+  const alive = (pid: number): boolean => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "EPERM";
+    }
+  };
+
+  const grandchild = await waitFor("孙进程已启动", async () => {
+    const view = (await inspect.execute({ job_id: started.job_id }, {})) as unknown as JobView;
+    return pidOf(view.stdout_tail);
+  });
+  expect(alive(grandchild)).toBe(true);
+
+  await jobs.kill(started.job_id);
+
+  // 只杀直接子进程时孙进程会继续跑到 60s，这里必须随任务一起消失
+  await waitFor("孙进程被一起收掉", async () => (alive(grandchild) ? undefined : true));
+});
+
 test("kill 终止指定任务并标 killed；重复调用幂等", async () => {
   const { workDir, jobs, run, inspect } = await setup("job-kill-one-");
   await fs.writeFile(path.join(workDir, "stay3.js"), `setTimeout(() => {}, 60_000);`, "utf-8");
