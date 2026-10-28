@@ -182,6 +182,7 @@ export const ServerEventSchema = z.discriminatedUnion("type", [
       "summary_failed",
       "hard_truncate",
       "emergency",
+      "drop_images",
       "longterm_summary",
       "memory_write",
       "memory_failed",

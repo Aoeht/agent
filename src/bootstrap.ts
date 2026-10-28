@@ -108,6 +108,7 @@ export function registerSessionTools(
       summaryModel?: string;
       temperature?: number;
       maxIterations?: number;
+      visionCapable?: boolean;
       /** 子代理委派总开关（AGENT_DELEGATE 解析结果）：false 时不注册 delegate_task */
       delegateEnabled?: boolean;
     };

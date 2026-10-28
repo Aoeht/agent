@@ -636,6 +636,30 @@ describe("真实 Agent 接入", () => {
     expect(table).toContain("（含估算）");
   });
 
+  test("团队工作与复核子代理都遵守视觉关闭配置", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "team-vision-"));
+    try {
+      const observed: boolean[] = [];
+      const source = new ToolRegistry();
+      source.register({ name: "read_image", description: "test", parameters: { type: "object", properties: {} },
+        execute: async (_args, runtime) => { observed.push(Boolean(runtime?.emitImage)); return "完成"; } });
+      const client = clientWith(async request => {
+        if (request.messages.some((m: any) => m.role === "tool")) return reply("完成");
+        return { ...reply("", "tool_calls"), choices: [{ finish_reason: "tool_calls", message: { content: null,
+          tool_calls: [{ id: "img", type: "function", function: { name: "read_image", arguments: "{}" } }] } }] };
+      });
+      const stack = { registry: source, config: { ...loadAgentConfig(), model: "test", visionCapable: false },
+        sandboxRoot: dir, untrustedContext: "" } as AgentStack;
+      const factory = createTeamChildFactory(stack, { client });
+      for (const mode of ["work", "review"] as const) {
+        const child = factory({ parentRunId: "p", userGoal: "g", task: task("a"), dependencies: [],
+          budget: { maxTotalTokens: 1000 }, runtime: {}, round: 0, mode, feedback: [], reviewTargets: [] });
+        try { await child.run(); } finally { await child.shutdown(); }
+      }
+      expect(observed).toEqual([false, false]);
+    } finally { await fs.rm(dir, { recursive: true, force: true }); }
+  });
+
   test("复核子 Agent 可配置独立模型，工作任务仍用主模型", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "team-model-"));
     try {

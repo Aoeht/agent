@@ -139,6 +139,25 @@ test("委派：goal 进子代理、白名单防递归、报告套围栏、token 
   await fs.rm(dir, { recursive: true, force: true });
 });
 
+test("委派子代理遵守视觉关闭配置", async () => {
+  const dir = await tempDir("delegate-vision-");
+  try {
+    const source = sourceRegistry();
+    source.register(defineTool({ name: "read_image", description: "test", schema: z.object({}),
+      execute: async (_args, runtime) => ({ imageChannel: Boolean(runtime?.emitImage) }) }));
+    const { client, requests } = fakeClient(index => index === 1
+      ? { content: "", toolCalls: [{ id: "img", name: "read_image" }] }
+      : { content: "图片通道关闭" });
+    const tool = createDelegateTaskTool({ sourceRegistry: source,
+      config: { model: "test", visionCapable: false }, sandboxRoot: dir, traceDir: dir, client });
+    await tool.execute({ goal: "看图", role: "analyst" });
+    expect(requests).toHaveLength(2);
+    expect(requests[0].messages[0].content).toContain("图片通道已关闭");
+    const result = requests[1].messages.find((message: any) => message.role === "tool" && message.tool_call_id === "img");
+    expect(JSON.parse(result.content).imageChannel).toBe(false);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
 test("预算越线：强制收尾带回结果并标注不完全成功", async () => {
   const dir = await tempDir("dsh-delegate-budget-");
   // 第 1 次调工具（进入工作循环），预算在下一轮循环顶越线 → 强制收尾的第 2 次调用给终答

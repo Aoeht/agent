@@ -35,4 +35,13 @@ describe("文件操作分工", () => {
     expect(prompt).toContain("当前可用：filesystem__read_text_file。");
     expect(prompt).not.toContain("filesystem__write_file");
   });
+
+  test("模型无视觉时不再推荐 read_image，改要求脚本化处理", () => {
+    const prompt = buildSystemPrompt("/tmp/ws", [], { visionCapable: false });
+    expect(prompt).not.toContain("查看本地图片用 read_image");
+    expect(prompt).toContain("当前模型不能理解图片");
+    expect(prompt).toContain("绝不要凭文件名或路径猜测图片内容");
+    // 编号不能断档：兜底那条整体去掉，后面的规则要接着排
+    expect(prompt).toContain("4. 脚本必须写在工作区内");
+  });
 });

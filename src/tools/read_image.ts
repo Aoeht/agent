@@ -17,8 +17,8 @@ import { z } from "zod";
 import { ToolDefinition, defineTool } from "../core/types";
 import { MCP_SANDBOX_DIR } from "../mcp/config";
 
-/** 单文件上限：base64 会再放大 1/3，10MB 原图已足够覆盖截图与常见照片 */
-export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+// 7 MiB 原图编码后约 9.3 MiB；请求级总量还会受 Agent 配额约束。
+export const MAX_IMAGE_BYTES = 7 * 1024 * 1024;
 
 const MAX_IMAGE_MB = MAX_IMAGE_BYTES / (1024 * 1024);
 const SUPPORTED_FORMATS = "PNG、JPEG、WebP、GIF";
@@ -65,6 +65,9 @@ export function createReadImageTool(options: { sandboxRoot?: string } = {}): Too
       "（只返回被截断的 base64 文本，你无法读懂），也不要为了看图加载视觉技能或写脚本调用外部视觉服务。" +
       "只有在图片格式不支持、工具不可用或用户明确要求某个外部视觉服务时，才改用其他方式并说明原因。",
     execute: async (params, runtime) => {
+      if (runtime?.emitImage === undefined) {
+        throw new Error("当前运行环境没有图片通道（模型视觉能力已关闭或通道不可用），无法查看图片；请使用可用且获授权的 OCR 工具，或如实说明限制。");
+      }
       const abs = path.resolve(sandboxRoot, params.path);
       if (!abs.startsWith(sandboxRoot + path.sep)) {
         throw new Error(`图片越出工作区：${params.path}`);
@@ -82,12 +85,18 @@ export function createReadImageTool(options: { sandboxRoot?: string } = {}): Too
       if (mime === undefined) {
         throw new Error(`文件内容不是支持的图片格式（支持 ${SUPPORTED_FORMATS}）：${params.path}`);
       }
-      if (runtime?.emitImage === undefined) {
-        throw new Error("当前运行环境没有图片通道，无法把图片附加给模型");
-      }
       const relative = path.relative(sandboxRoot, abs).split(path.sep).join("/");
       const label = `工作区图片 ${relative}（${mime}，${Math.ceil(stat.size / 1024)} KB）`;
-      runtime.emitImage({ dataUrl: `data:${mime};base64,${bytes.toString("base64")}`, label });
+      const attached = runtime.emitImage({
+        dataUrl: `data:${mime};base64,${bytes.toString("base64")}`,
+        label,
+      });
+      if (!attached) {
+        throw new Error(
+          `图片未能附加到下一轮输入（图片配额已满或调用已结束）：${relative}。` +
+            "请减少同批图片数量或缩小图片后重试，不要声称已看见图片。"
+        );
+      }
       return {
         path: relative,
         mime_type: mime,

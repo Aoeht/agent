@@ -88,6 +88,7 @@ export interface CompactEvent {
     | "summary_failed" /** 摘要调用失败（已降级，不中断 run） */
     | "hard_truncate" /** 摘要不可用时的最后兜底：硬截断更早对话 */
     | "emergency" /** API 报上下文超限后的强制压缩重试 */
+    | "drop_images" /** 图片请求超限或模型不支持视觉时，移除附件重试 */
     | "longterm_summary" /** 跨 run 长期摘要已更新 */
     | "memory_write" /** 跨会话记忆已写入/更新 */
     | "memory_failed"; /** 跨会话记忆读取或写入失败（已降级，不中断 run） */

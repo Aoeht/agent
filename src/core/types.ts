@@ -17,8 +17,8 @@ export interface ToolRuntime {
   setAcceptanceCriteria?: (criteria: AcceptanceCriterion[]) => Promise<void>;
   readTaskState?: (offset: number, limit: number) => unknown;
   signal?: AbortSignal;
-  /** 本地可信工具提供的图片附件；不经 JSON 文本或 trace 传递。 */
-  emitImage?: (image: { dataUrl: string; label: string }) => void;
+  /** 图片不经文本或 trace 传递；返回 false 表示未附加，调用方不可报告成功。 */
+  emitImage?: (image: { dataUrl: string; label: string }) => boolean;
   requestHuman?: (prompt: string, signal: AbortSignal) => Promise<string | null>;
   /**
    * 模型发起的主动澄清通道：向用户要一段自由文本回答（与 requestHuman 的 y/N 审批语义分开）。

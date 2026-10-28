@@ -31,6 +31,8 @@
  *   AGENT_DELEGATE                 主对话内子 Agent 委派工具 delegate_task，"0"/"false"/"off"/"no"
  *                                  关闭（默认开启）；关闭后不注册该工具，scanner 委派随之不可用
  *   AGENT_CHECKPOINTS              是否开启回合级回滚检查点（/rewind），"0"/"false" 关闭（默认开启）
+ *   AGENT_VISION                   所选模型能否理解图片，"0"/"false"/"off"/"no" 关闭（默认开启）；
+ *                                  关闭后不提供图片通道，read_image 直接返回可读错误
  *   AGENT_MEMORY_DIR               跨会话记忆目录（缺省 .agent-memory；记忆条目 memory.jsonl + MEMORY.md 视图）
  *   AGENT_MODEL_PROBE              对话开始时探测候选模型可用性（微型补全），"0"/"false" 关闭（默认开启）
  */
@@ -76,6 +78,8 @@ export interface AgentRunConfig {
   toolSearch: "auto" | "on" | "off";
   /** 主对话内子 Agent 委派（delegate_task）：false 时整体不注册该工具 */
   delegateEnabled: boolean;
+  /** 所选模型能否理解图片；false 时不提供图片通道（read_image 返回可读错误） */
+  visionCapable: boolean;
   maxHistoryTurns: number;
   stream: boolean;
   /** Agent Skill 目录：目录不存在视为没有技能，运行时行为与未开启技能完全一致 */
@@ -132,6 +136,8 @@ export function loadAgentConfig(): AgentRunConfig {
     thinkingEffort: parseThinkingEffort(process.env.AGENT_THINKING_EFFORT),
     toolSearch: toolSearchRaw === "on" || toolSearchRaw === "off" ? toolSearchRaw : "auto",
     delegateEnabled: boolEnv("AGENT_DELEGATE", true),
+    // 默认开：厂商真拒收 image_url 时 Agent 会运行期闩锁关闭，猜错模型名的代价比误关小
+    visionCapable: boolEnv("AGENT_VISION", true),
     maxHistoryTurns: intEnv("AGENT_MAX_HISTORY_TURNS", 20),
     stream: boolEnv("AGENT_STREAM", true),
     skillsDir: process.env.AGENT_SKILLS_DIR?.trim() || ".agents/skills",

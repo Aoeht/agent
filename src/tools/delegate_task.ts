@@ -36,6 +36,7 @@ export interface DelegateTaskToolOptions {
     summaryModel?: string;
     temperature?: number;
     maxIterations?: number;
+    visionCapable?: boolean;
   };
   sandboxRoot: string;
   /** 委派运行的轨迹目录；缺省 .agent-sessions/delegates（AGENT_SESSION_DIR 可改） */
@@ -171,6 +172,7 @@ export function createDelegateTaskTool(options: DelegateTaskToolOptions) {
         ...(options.client ? { client: options.client } : {}),
         ...(options.config.summaryModel ? { summaryModel: options.config.summaryModel } : {}),
         temperature: options.config.temperature ?? 0.1,
+        visionCapable: options.config.visionCapable ?? true,
         maxIterations: Math.min(options.config.maxIterations && options.config.maxIterations > 0
           ? options.config.maxIterations : 24, 24),
         budget: effectiveBudget,

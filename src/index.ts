@@ -472,6 +472,9 @@ async function main() {
     if (config.thinkingEffort !== "default") {
       console.log(`🧠 思考程度: ${config.thinkingEffort}（AGENT_THINKING_EFFORT，按当前模型映射厂商参数）`);
     }
+    if (!config.visionCapable) {
+      console.log("视觉输入: 关（AGENT_VISION）——read_image 不提供图片通道");
+    }
 
     // 流式增量实时输出由 token 事件驱动；runTurn 依据 streamState 补换行、避免与最终回答重复打印
     const streamState = { active: false };
@@ -481,6 +484,7 @@ async function main() {
       model: startup.model ?? config.model,
       systemPrompt: buildSystemPrompt(MCP_SANDBOX_DIR, skills, {
         filesystemTools,
+        visionCapable: config.visionCapable,
         // 会话创建时快照一次，之后随 systemPrompt 固定——会话内稳定，不破坏前缀缓存
         env: snapshotEnv(MCP_SANDBOX_DIR),
       }),
@@ -488,6 +492,7 @@ async function main() {
       temperature: config.temperature,
       thinkingEffort: config.thinkingEffort,
       toolSearch: config.toolSearch,
+      visionCapable: config.visionCapable,
       maxHistoryTurns: config.maxHistoryTurns,
       sessionStore: session.store,
       verificationRoot: stack.sandboxRoot,

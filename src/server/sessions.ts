@@ -562,12 +562,14 @@ export class SessionManager {
       // 环境快照随本次重建取一次，会话生命周期内不重算（缓存安全，见 env_block.ts）
       systemPrompt: buildSystemPrompt(sandboxRoot, skills, {
         filesystemTools,
+        visionCapable: config.visionCapable,
         env: snapshotEnv(sandboxRoot),
       }),
       maxIterations: config.maxIterations,
       temperature: config.temperature,
       thinkingEffort: config.thinkingEffort,
       toolSearch: config.toolSearch,
+      visionCapable: config.visionCapable,
       maxHistoryTurns: config.maxHistoryTurns,
       budget: config.budget,
       sessionStore: entry.store,

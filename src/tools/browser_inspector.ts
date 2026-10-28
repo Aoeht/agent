@@ -98,8 +98,8 @@ export async function inspectInBrowser(url: string, runtime?: ToolRuntime): Prom
       if (page.url() !== finalUrl) throw new Error("截图期间页面发生跳转，未采用该截图");
       await fs.writeFile(file, bytes);
       screenshots.push(file);
-      runtime?.emitImage?.({ dataUrl: `data:image/jpeg;base64,${bytes.toString("base64")}`, label: `${finalUrl}，纵向位置 ${y}px` });
-      if (runtime?.emitImage) imagesSent++;
+      // 截图是补充证据，附加失败（配额满/模型无视觉）不影响正文采集，只如实计数
+      if (runtime?.emitImage?.({ dataUrl: `data:image/jpeg;base64,${bytes.toString("base64")}`, label: `${finalUrl}，纵向位置 ${y}px` })) imagesSent++;
       } catch (error) {
         runtime?.signal?.throwIfAborted();
         captureErrors.push(error instanceof Error ? error.message : String(error));
