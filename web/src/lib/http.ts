@@ -9,6 +9,7 @@ import type {
   SessionConfigEvent,
   SessionDetailDTO,
   SessionSummaryDTO,
+  UserImageUploadBody,
 } from "@protocol";
 import type { SessionConfigInput, ToolStateDTO, Transport } from "./transport";
 
@@ -124,11 +125,15 @@ export class HttpTransport implements Transport {
     return () => source.close();
   }
 
-  async sendMessage(sessionId: string, text: string): Promise<Omit<MessageSendResponse, "ok">> {
+  async sendMessage(
+    sessionId: string,
+    text: string,
+    images?: UserImageUploadBody[]
+  ): Promise<Omit<MessageSendResponse, "ok">> {
     const resp = await this.request(`/sessions/${encodeURIComponent(sessionId)}/messages`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify(images !== undefined && images.length > 0 ? { text, images } : { text }),
     });
     const parsed = (await resp.json()) as Partial<MessageSendResponse>;
     return {

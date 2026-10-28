@@ -48,7 +48,9 @@ export function Welcome() {
           accountQuota={state.modelAccountQuota}
           // 模型回退到第一个探测可用的选项：⚙ 按钮在无 config.model 时会禁用，欢迎态要能直接打开选模型
           config={{ ...config, model: config.model ?? firstAvailableModel(state.models, state.modelStatus) }}
-          onSend={(text) => void actions.createAndSend(text, Object.keys(config).length > 0 ? config : undefined)}
+          onSend={(text, images) =>
+            void actions.createAndSend(text, Object.keys(config).length > 0 ? config : undefined, images)
+          }
           onCancel={() => {}}
           onApplyConfig={async () => {}}
           onDraftConfig={setConfig}

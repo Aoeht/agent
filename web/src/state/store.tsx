@@ -18,15 +18,26 @@ import type {
   SessionDetailDTO,
   SessionSummaryDTO,
   ThinkingEffort,
-} from "@protocol";import type { SessionConfigInput, Transport } from "../lib/transport";
+} from "@protocol";
+import type { SessionConfigInput, Transport } from "../lib/transport";
+import type { LocalImageAttachment } from "../lib/attachments";
+import { toUploadBodies } from "../lib/attachments";
 import { MockTransport } from "../lib/mock";
 import { STOP_REASON_LABELS, type RunOutcome } from "../../../src/core/run_outcome";
 import type { TaskRecord } from "../../../src/core/task_types";
 
 // ---------- 会话内的可渲染项 ----------
 
+/** 用户气泡上的图片标识：本端乐观气泡带 dataUrl 画缩略图，转正/重连后只剩元数据 */
+export interface UserImageBadge {
+  name: string;
+  mimeType: string;
+  sizeBytes: number;
+  dataUrl?: string;
+}
+
 export type ChatItem =
-  | { kind: "user"; id: string; text: string }
+  | { kind: "user"; id: string; text: string; images?: UserImageBadge[] }
   | {
       kind: "assistant";
       id: string;
@@ -67,6 +78,8 @@ export interface SessionUIState {
   maxIterations?: number;
   /** 思考程度档位（hello / session_config 更新；default 跟随厂商默认） */
   thinkingEffort?: ThinkingEffort;
+  /** 模型是否接受图片输入（hello.vision）：false 时输入框的附件按钮禁用 */
+  visionCapable?: boolean;
   /** 该模型上下文窗口（token）；配合 lastPromptTokens 画上下文占用 */
   contextWindow?: number;
   /** 最近一次 step 的 promptTokens ≈ 发送时的上下文长度 */
@@ -76,7 +89,7 @@ export interface SessionUIState {
   /** 本次页面会话里累计消耗（每次 run_end 累加） */
   accumulatedTokens?: number;
   /** 排队中的消息（忙时发送；回合结束后自动按序执行，run_start.queueId 到达时转正） */
-  queue?: Array<{ id: string; text: string }>;
+  queue?: Array<{ id: string; text: string; imageCount?: number }>;
   /** 最近一次开始执行的排队消息 id：撤掉"响应比 SSE 慢"时重复补芯片的竞态 */
   lastRunQueueId?: string;
   /** 工具清单与本会话的关闭集合（切换会话时加载） */
@@ -126,9 +139,9 @@ type Action =
   | { type: "session_created"; summary: SessionSummaryDTO }
   | { type: "session_opened"; detail: SessionDetailDTO }
   | { type: "select"; id: string | null }
-  | { type: "user_sent"; id: string; text: string }
+  | { type: "user_sent"; id: string; text: string; images?: LocalImageAttachment[] }
   /** POST /messages 返回 queued=true 后补芯片（SSE 的 queue_changed 可能先/后到，按 id 幂等） */
-  | { type: "queue_item_synced"; id: string; item: { id: string; text: string } }
+  | { type: "queue_item_synced"; id: string; item: { id: string; text: string; imageCount?: number } }
   | { type: "queue_item_removed"; id: string; queueId: string }
   | { type: "event"; id: string; event: ServerEvent }
   | { type: "approval_resolved"; id: string }
@@ -197,6 +210,7 @@ export function applyEvent(s: SessionUIState, e: ServerEvent): SessionUIState {
           temperature: e.temperature ?? s.temperature,
           maxIterations: e.maxIterations ?? s.maxIterations,
           thinkingEffort: e.thinkingEffort ?? s.thinkingEffort,
+          visionCapable: e.vision ?? s.visionCapable,
         }),
       };
     case "session_config":
@@ -214,8 +228,11 @@ export function applyEvent(s: SessionUIState, e: ServerEvent): SessionUIState {
     case "run_start": {
       // 排队消息转正：芯片移除、正式用户气泡此刻进入聊天流（未排队路径的气泡由 user_sent 先加）
       const queued = e.queueId !== undefined;
+      const images = e.images && e.images.length > 0
+        ? e.images.map(({ name, mimeType, sizeBytes }) => ({ name, mimeType, sizeBytes }))
+        : undefined;
       const items = queued
-        ? [...s.items, { kind: "user" as const, id: uid(), text: e.userMessage }]
+        ? [...s.items, { kind: "user" as const, id: uid(), text: e.userMessage, ...(images ? { images } : {}) }]
         : s.items;
       const queue = queued ? s.queue?.filter((item) => item.id !== e.queueId) : s.queue;
       return {
@@ -479,7 +496,15 @@ function reducer(state: AppState, action: Action): AppState {
             status: "running",
             stats: undefined,
             cancelledByUser: false,
-            items: [...s.items, { kind: "user", id: uid(), text: action.text }],
+            items: [
+              ...s.items,
+              {
+                kind: "user",
+                id: uid(),
+                text: action.text,
+                ...(action.images && action.images.length > 0 ? { images: action.images } : {}),
+              },
+            ],
           },
         },
       };
@@ -578,8 +603,8 @@ export interface Store {
     goWelcome(): void;
     newSession(): Promise<void>;
     /** 欢迎界面首发：创建会话 →（可选）应用模型等配置 → 发送第一条消息 */
-    createAndSend(text: string, config?: SessionConfigInput): Promise<void>;
-    send(text: string): Promise<void>;
+    createAndSend(text: string, config?: SessionConfigInput, images?: LocalImageAttachment[]): Promise<void>;
+    send(text: string, images?: LocalImageAttachment[]): Promise<void>;
     /** 撤销一条排队中的消息 */
     removeQueued(queueId: string): Promise<void>;
     cancel(): Promise<void>;
@@ -733,12 +758,18 @@ export function StoreProvider({
 
   const actions = useMemo<Store["actions"]>(() => {
     // 发送主体按会话 id 操作：send 走当前会话，createAndSend 在刚建的新会话上复用同一段逻辑
-    const sendMessageTo = async (id: string, text: string) => {
-      // 空闲时保留即时本地回显；忙时不加气泡——消息进队列，等 run_start.queueId 转正
+    const sendMessageTo = async (id: string, text: string, images: LocalImageAttachment[] = []) => {
+      // 空闲时保留即时本地回显（含缩略图）；忙时不加气泡——消息进队列，等 run_start.queueId 转正
       const busy = (stateRef.current.byId[id]?.status ?? "idle") !== "idle";
-      if (!busy) dispatch({ type: "user_sent", id, text });
+      if (!busy) {
+        dispatch({ type: "user_sent", id, text, ...(images.length > 0 ? { images } : {}) });
+      }
       try {
-        const result = await resolvedTransport.sendMessage(id, text);
+        const result = await resolvedTransport.sendMessage(
+          id,
+          text,
+          images.length > 0 ? toUploadBodies(images) : undefined
+        );
         if (result.handled) {
           // 斜杠命令通道：会话文件被改写（/rewind）时先重拉历史，再补命令卡
           // （user_sent 的乐观气泡由 command_result 收回换成命令卡；/task 不走这里）
@@ -753,7 +784,17 @@ export function StoreProvider({
           dispatch({ type: "command_result", id, text, lines: result.lines ?? [] });
           return;
         }
-        if (result.queued) dispatch({ type: "queue_item_synced", id, item: { id: result.queueId, text } });
+        if (result.queued) {
+          dispatch({
+            type: "queue_item_synced",
+            id,
+            item: {
+              id: result.queueId,
+              text,
+              ...(images.length > 0 ? { imageCount: images.length } : {}),
+            },
+          });
+        }
       } catch (error) {
         dispatch({
           type: "run_failed_local",
@@ -774,7 +815,7 @@ export function StoreProvider({
         dispatch({ type: "session_created", summary });
         dispatch({ type: "select", id: summary.sessionId });
       },
-      async createAndSend(text: string, config?: SessionConfigInput) {
+      async createAndSend(text: string, config?: SessionConfigInput, images?: LocalImageAttachment[]) {
         const summary = await resolvedTransport.createSession();
         dispatch({ type: "session_created", summary });
         dispatch({ type: "select", id: summary.sessionId });
@@ -787,12 +828,12 @@ export function StoreProvider({
             // 模型名失效等情况：会话沿用服务器默认配置继续
           }
         }
-        await sendMessageTo(summary.sessionId, text);
+        await sendMessageTo(summary.sessionId, text, images);
       },
-      async send(text: string) {
+      async send(text: string, images?: LocalImageAttachment[]) {
         const id = stateRef.current.currentId;
         if (!id) return;
-        await sendMessageTo(id, text);
+        await sendMessageTo(id, text, images);
       },
       async removeQueued(queueId: string) {
         const id = stateRef.current.currentId;

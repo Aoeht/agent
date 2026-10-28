@@ -74,6 +74,7 @@ const HELP_LINES = [
   "  /task new <目标>         开始独立任务",
   "  /task resolve <id|all> <applied|not_applied> <说明>   核对中断的操作",
   "  /tokens                 上一回合用量",
+  "  /image <路径...>        附加本地图片到下一轮（仅 CLI；Web 用输入框的 📎 上传）",
   "  /help                   本清单",
   "普通消息直接输入即可。",
 ];
@@ -188,7 +189,10 @@ export async function handleSlashCommand(text: string, deps: CommandRouterDeps):
     // 未知斜杠命令：拦截并提示，不再当普通文本喂给 LLM
     const firstToken = input.split(/\s+/)[0] ?? input;
     lines.push(`⌨️ 未知命令 ${firstToken}`);
-    lines.push("输入 /help 查看可用命令。");
+    // /image 只在 REPL 认领（要读本机文件）；Web 端走附件按钮，这里给一句明确指引
+    lines.push(firstToken === "/image"
+      ? "Web 端请用输入框左侧的 📎 按钮上传图片（支持粘贴与拖入）。"
+      : "输入 /help 查看可用命令。");
     return { kind: "handled", lines };
   } catch (error) {
     lines.push(`❌ 命令执行失败: ${error instanceof Error ? error.message : String(error)}`);

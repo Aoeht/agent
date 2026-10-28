@@ -21,6 +21,9 @@ describe("文件操作分工", () => {
     expect(prompt).toContain("一律自己写脚本文件");
     expect(prompt).toContain("查看本地图片用 read_image");
     expect(prompt).toContain("不要用 filesystem 的 read_media_file");
+    expect(prompt).toContain("MCP 工具已附加的图片同样可直接观察");
+    expect(prompt).toContain("标注未附加时不能声称看见");
+    expect(prompt).not.toContain("只返回被截断的 base64");
   });
 
   test("未挂载 filesystem 时明确所有文件操作写脚本", () => {

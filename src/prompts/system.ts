@@ -43,7 +43,7 @@ function fileToolsSection(filesystemTools: string[], visionCapable: boolean): st
   const rules = [
     `简单单文件文本读写（读配置、写一份小报告、改几行文本）优先用 filesystem MCP，一次调用能完成就用它。${availability}`,
     visionCapable
-      ? "查看本地图片用 read_image：它会把图片直接附到你的下一轮输入，由你自己观察和推理。不要用 filesystem 的 read_media_file（只返回被截断的 base64 文本，你读不懂），也不要为了看图加载视觉技能或写脚本调用外部视觉服务。"
+      ? "查看本地图片用 read_image：它会把图片直接附到你的下一轮输入，由你自己观察和推理。MCP 工具已附加的图片同样可直接观察；标注未附加时不能声称看见。不要用 filesystem 的 read_media_file 重复读取已附加的图片，也不要为了看图加载视觉技能或写脚本调用外部视觉服务。"
       : "当前模型不能理解图片：不要调用 read_image；仅在工具可用且获授权时用 OCR 或像素级统计获取信息，否则如实说明无法查看，绝不要凭文件名或路径猜测图片内容。",
     "其余文件操作一律自己写脚本文件，再用 run_script 执行（.ps1→PowerShell、.js/.ts→bun、.py→python、.sh→bash）：批量处理、递归遍历或搜索、图片/音视频的批量处理或格式转换、跨目录复制/移动/改名、统计大小，以及任何多步骤或需要外部库的操作。不要把一个批量任务拆成一长串 filesystem 调用。",
     ...(visionCapable

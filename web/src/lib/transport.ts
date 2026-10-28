@@ -10,6 +10,7 @@ import type {
   SessionDetailDTO,
   SessionSummaryDTO,
   ThinkingEffort,
+  UserImageUploadBody,
 } from "@protocol";
 
 /** 会话级可调配置（模型/摘要模型/温度/迭代上限/思考程度） */
@@ -65,7 +66,11 @@ export interface Transport {
   /** 发送消息：会话忙时不报错而是排队（服务端 FIFO，回合结束后自动接续）；
    *  queued=true 表示这条消息在等待，queueId 用于撤单与 run_start 转正；
    *  handled=true 表示命中斜杠命令通道：就地执行，lines 为命令输出（不入队、无 run 事件） */
-  sendMessage(sessionId: string, text: string): Promise<Omit<MessageSendResponse, "ok">>;
+  sendMessage(
+    sessionId: string,
+    text: string,
+    images?: UserImageUploadBody[]
+  ): Promise<Omit<MessageSendResponse, "ok">>;
   /** 撤销一条排队中的消息（不影响正在运行的回合） */
   removeQueuedMessage(sessionId: string, queueId: string): Promise<void>;
   cancel(sessionId: string): Promise<void>;

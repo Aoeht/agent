@@ -27,6 +27,7 @@ import { createServerRuntime, rebuildRuntimeWithSandboxRoot, type ServerRuntime 
 import { EventHub, SessionManager } from "./sessions";
 import type { ServerEvent, JobSummaryDTO } from "./protocol";
 import type { JobRecord } from "../core/job_store";
+import { UserImageError, MAX_REQUEST_IMAGE_BYTES } from "../core/user_images";
 
 const PORT = intEnv("AGENT_UI_PORT", 8787);
 const HOST = process.env.AGENT_UI_HOST?.trim() || "127.0.0.1";
@@ -35,6 +36,8 @@ const APPROVAL_TIMEOUT_MS = intEnv("AGENT_UI_APPROVAL_TIMEOUT_MS", 120_000);
 const SESSION_DIR = resolveSessionDir();
 const TRACE_DIR = process.env.AGENT_TRACE_DIR ?? path.join(process.cwd(), ".traces");
 const DIST_DIR = path.resolve(import.meta.dir, "../../web/dist");
+// 图片 20MiB 编码 + JSON 外层：其余端点的请求体都只有几 KB，统一卡在这个上限
+const MAX_MESSAGE_BODY_BYTES = MAX_REQUEST_IMAGE_BYTES + 2 * 1024 * 1024;
 
 function intEnv(name: string, fallback: number): number {
   const value = Number.parseInt(process.env[name] ?? "", 10);
@@ -101,6 +104,7 @@ async function main(): Promise<void> {
   const server = Bun.serve({
     port: PORT,
     hostname: HOST,
+    maxRequestBodySize: MAX_MESSAGE_BODY_BYTES,
     fetch: (req) => route(req, sessions, bridge, hub, runtime, gate),
   });
   console.log(`🌐 [UI] 工作台已就绪: http://${HOST}:${server.port}/`);
@@ -139,18 +143,28 @@ async function route(
     // ---- 单个会话 ----
     const messagesMatch = /^\/sessions\/([^/]+)\/messages$/.exec(pathname);
     if (messagesMatch && method === "POST") {
+      // 先按声明长度挡掉超大请求体，再解析 JSON：别为一个注定被拒的上传分配几十 MB
+      const declared = Number.parseInt(req.headers.get("content-length") ?? "", 10);
+      if (Number.isFinite(declared) && declared > MAX_MESSAGE_BODY_BYTES) {
+        return json({ error: "请求体过大：图片总量超过上限（20MB）" }, 413);
+      }
       const body = await readJson(req);
       const text = typeof body.text === "string" ? body.text.trim() : "";
-      if (text === "") return json({ error: "text 不能为空" }, 400);
+      const images = Array.isArray(body.images) ? body.images : [];
+      // 允许只传图：纯图片消息的说明文字由 Agent 补
+      if (text === "" && images.length === 0) return json({ error: "text 不能为空" }, 400);
       const sessionId = decodeURIComponent(messagesMatch[1]!);
       // 202：回合在后台跑，过程与结果经 SSE 推送。忙时不再 409——消息进会话队列，
       // 当前回合结束后自动接续（queued=true 时前端展示为排队芯片，run_start.queueId 转正）
       try {
-        const result = await sessions.sendMessage(sessionId, text);
+        const result = await sessions.sendMessage(sessionId, text, images);
         return json({ ok: true, ...result }, 202);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        return json({ error: message }, message.includes("队列已满") || message.includes("更新配置") ? 409 : 500);
+        // 图片格式/大小/张数是用户输入问题：400，不要报成服务端故障
+        const status = error instanceof UserImageError ? 400
+          : message.includes("队列已满") || message.includes("更新配置") ? 409 : 500;
+        return json({ error: message }, status);
       }
     }
 

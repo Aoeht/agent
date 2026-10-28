@@ -2,6 +2,14 @@
 import { useEffect, useRef, useState } from "react";
 import type { ModelProbeStatus, ThinkingEffort } from "@protocol";
 import type { SessionConfigInput } from "../lib/transport";
+import {
+  addImageFiles,
+  formatImageSize,
+  imageFilesFrom,
+  MAX_IMAGES_PER_REQUEST,
+  MAX_USER_IMAGE_BYTES,
+  type LocalImageAttachment,
+} from "../lib/attachments";
 import { firstAvailableModel, visibleModelOptions } from "../lib/modelOptions";
 import { useMediaQuery } from "../lib/useMediaQuery";
 
@@ -44,6 +52,7 @@ export function Composer({
   modelStatus,
   accountQuota,
   config,
+  visionCapable,
   onSend,
   onCancel,
   onApplyConfig,
@@ -58,7 +67,9 @@ export function Composer({
   /** 账户级配额/余额（服务商支持时才有） */
   accountQuota?: string;
   config: ComposerConfig;
-  onSend: (text: string) => void;
+  /** 当前模型是否接受图片输入（hello.vision）；false/未知时按可用处理，服务端仍会复核 */
+  visionCapable?: boolean;
+  onSend: (text: string, images: LocalImageAttachment[]) => void;
   onCancel: () => void;
   onApplyConfig: (config: SessionConfigInput) => Promise<void>;
   /** 欢迎态（sessionId=null）专用：草稿一变就上报，由上层暂存、随首条消息经 createAndSend 落地 */
@@ -77,7 +88,12 @@ export function Composer({
     thinkingEffort: "default",
   });
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+  // 待发送图片：只在本端内存里，随本轮请求编码上传，不进会话文件
+  const [pending, setPending] = useState<LocalImageAttachment[]>([]);
+  const [attachError, setAttachError] = useState<string | null>(null);
+  const [dragging, setDragging] = useState(false);
   const draftDirty = useRef(new Set<keyof ComposerConfig>());
   const activeSession = useRef(sessionId);
   activeSession.current = sessionId;
@@ -90,8 +106,17 @@ export function Composer({
     setPanelOpen(false);
     setConfigError(null);
     setApplying(false);
+    setPending([]);
+    setAttachError(null);
     draftDirty.current.clear();
   }, [sessionId]);
+
+  // 模型不支持图片时就地清空待发送附件，避免发出去才被服务端拒绝
+  useEffect(() => {
+    if (visionCapable !== false) return;
+    setPending([]);
+    setAttachError(null);
+  }, [visionCapable]);
 
   // 打开面板时用当前生效值填充草稿；摘要模型未知时落到第一个可用项（未动过就不会被应用）
   useEffect(() => {
@@ -122,11 +147,22 @@ export function Composer({
     return () => document.removeEventListener("mousedown", onDown);
   }, [panelOpen]);
 
+  // 选文件 / 粘贴 / 拖入共用：不合规的逐个报错，合格的追加到待发送列表
+  const ingestFiles = async (files: File[]) => {
+    if (disabled || visionCapable === false || files.length === 0) return;
+    setAttachError(null);
+    const { added, errors } = await addImageFiles(pending, files);
+    if (added.length > 0) setPending((current) => [...current, ...added]);
+    if (errors.length > 0) setAttachError(errors.join("；"));
+  };
+
   const submit = () => {
     const trimmed = text.trim();
-    if (!trimmed || disabled) return;
-    onSend(trimmed);
+    if (disabled || (!trimmed && pending.length === 0)) return;
+    onSend(trimmed, pending);
     setText("");
+    setPending([]);
+    setAttachError(null);
     if (textareaRef.current) textareaRef.current.style.height = "auto";
   };
 
@@ -339,7 +375,80 @@ export function Composer({
           </div>
         )}
 
-        <div className="flex items-end gap-2 rounded-2xl border border-cream-300 bg-cream-50 p-2 shadow-sm transition focus-within:border-clay-500/50">
+        <div
+          onDragOver={(e) => {
+            if (disabled) return;
+            e.preventDefault();
+            setDragging(true);
+          }}
+          onDragLeave={() => setDragging(false)}
+          onDrop={(e) => {
+            if (disabled) return;
+            e.preventDefault();
+            setDragging(false);
+            void ingestFiles(imageFilesFrom(e.dataTransfer));
+          }}
+          className={`rounded-2xl border bg-cream-50 p-2 shadow-sm transition ${
+            dragging ? "border-clay-500 bg-clay-50/60" : "border-cream-300 focus-within:border-clay-500/50"
+          }`}
+        >
+          {pending.length > 0 && (
+            <div className="mb-1.5 flex flex-wrap gap-2 px-1">
+              {pending.map((image) => (
+                <div
+                  key={image.id}
+                  className="flex items-center gap-2 rounded-xl border border-cream-300 bg-cream-100 p-1.5 pr-1"
+                >
+                  <img
+                    src={image.dataUrl}
+                    alt={image.name}
+                    title={image.name}
+                    className="h-11 w-11 rounded-lg object-cover"
+                  />
+                  <div className="min-w-0">
+                    <p className="max-w-36 truncate text-[11px] font-medium text-ink-600" title={image.name}>
+                      {image.name}
+                    </p>
+                    <p className="text-[10px] text-ink-400">{formatImageSize(image.sizeBytes)}</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setPending((list) => list.filter((item) => item.id !== image.id))}
+                    title="移除这张图片"
+                    className="shrink-0 rounded-full px-1 text-xs text-ink-400 transition hover:bg-cream-200 hover:text-terra-500"
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="flex items-end gap-2">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/png,image/jpeg,image/webp,image/gif"
+            multiple
+            hidden
+            onChange={(e) => {
+              const files = [...(e.target.files ?? [])];
+              e.target.value = ""; // 允许连续选同一个文件
+              void ingestFiles(files);
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={disabled || visionCapable === false}
+            title={
+              visionCapable === false
+                ? "当前模型的图片通道已关闭（AGENT_VISION=0）"
+                : `上传图片（最多 ${MAX_IMAGES_PER_REQUEST} 张，单张 ≤ ${formatImageSize(MAX_USER_IMAGE_BYTES)}；也可粘贴或拖入）`
+            }
+            className="shrink-0 rounded-full px-2 py-2 text-base text-ink-600 transition hover:bg-cream-200 disabled:opacity-40"
+          >
+            📎
+          </button>
           <button
             onClick={() => {
               if (!panelOpen) { draftDirty.current.clear(); setConfigError(null); }
@@ -357,6 +466,14 @@ export function Composer({
             onChange={(e) => {
               setText(e.target.value);
               autoGrow();
+            }}
+            onPaste={(e) => {
+              // 直接粘贴截图时把像素收为附件，而不是当成文本
+              const files = imageFilesFrom(e.clipboardData);
+              if (files.length > 0) {
+                e.preventDefault();
+                void ingestFiles(files);
+              }
             }}
             onKeyDown={(e) => {
               // 中文输入法组词中的 Enter 不应发送
@@ -400,12 +517,14 @@ export function Composer({
           ) : (
             <button
               onClick={submit}
-              disabled={disabled || !text.trim()}
+              disabled={disabled || (!text.trim() && pending.length === 0)}
               className="shrink-0 rounded-full bg-clay-600 px-5 py-2 text-sm font-medium text-cream-50 transition hover:bg-clay-500 disabled:cursor-not-allowed disabled:opacity-40"
             >
               发送
             </button>
           )}
+          </div>
+          {attachError && <p role="alert" className="mt-1.5 px-1 text-xs text-terra-500">{attachError}</p>}
         </div>
       </div>
     </div>

@@ -14,6 +14,7 @@ import {
   McpAuditHandler,
   McpProgressHandler,
   ToolContentBlock,
+  ToolImageContent,
   ToolExecutionContext,
   ToolExecutionResult,
   ToolMiddleware,
@@ -445,7 +446,7 @@ export class McpAdapter {
           };
         });
 
-        return this.formatForLlm(result);
+        return this.formatForLlm(result, name, runtime);
       },
     };
   }
@@ -502,20 +503,30 @@ export class McpAdapter {
     return blocks;
   }
 
-  /**
-   * tool 角色的消息只能是字符串，多模态块直接塞进去会把 base64 灌进上下文，
-   * 所以这里统一压平成文本：图片/二进制资源只保留元信息。
-   * structuredContent 是 Server 显式声明过的类型化结果，优先于文本猜测。
-   */
-  private formatForLlm(result: ToolExecutionResult): unknown {
-    if (result.structured !== undefined) return this.formatStructured(result.structured);
+  private formatForLlm(result: ToolExecutionResult, name: string, runtime?: ToolRuntime): unknown {
+    const reports = result.content.filter((block) => block.type === "image")
+      .map((block, index) => this.attachImage(block, `${name} 图片 ${index + 1}`, runtime));
+    let images = reports.map((report) => report.note);
+    // 拒绝的图片也可能很多，状态区最多占一半预算，给正文留空间。
+    const statusBudget = Math.floor(this.maxResultChars / 2);
+    if (images.length > 0 && JSON.stringify(images).length > statusBudget) {
+      const attached = reports.filter((report) => report.attached).length;
+      const reasons = [...new Set(reports.flatMap((report) => report.reason ? [report.reason] : []))];
+      const summary = `[MCP 图片共 ${reports.length} 张：已附加 ${attached} 张，未附加 ${reports.length - attached} 张；` +
+        "未附加的图片不能声称已看见。逐图详情已省略。" + reasons.join("；") + "]";
+      images = [summary.slice(0, Math.max(0, statusBudget - 4))];
+    }
+    if (result.structured !== undefined) {
+      return this.formatStructured(images.length > 0
+        ? { images, structuredContent: result.structured } : result.structured);
+    }
 
-    const blocks = result.content;
-    if (blocks.length === 0) return "";
+    const blocks = result.content.filter((block) => block.type !== "image");
+    if (blocks.length === 0 && images.length === 0) return "";
 
     const texts = blocks.filter((b): b is { type: "text"; text: string } => b.type === "text");
 
-    if (texts.length === blocks.length) {
+    if (images.length === 0 && texts.length === blocks.length) {
       const joined = texts.map((b) => b.text).join("\n");
       if (this.parseJsonText) {
         const trimmed = joined.trim();
@@ -530,20 +541,31 @@ export class McpAdapter {
       return this.truncate(joined);
     }
 
-    const flattened = blocks
-      .map((block) => {
-        switch (block.type) {
-          case "text":
-            return block.text;
-          case "image":
-            return `[image ${block.mimeType}, base64 已省略, ${block.data.length} chars]`;
-          case "resource":
-            return this.describeResource(block.resource);
-        }
-      })
-      .join("\n");
-
+    // 附加状态放在正文前，长文本截断时不能把图片拒绝原因一起丢掉。
+    const flattened = [...images, ...blocks.map((block) =>
+      block.type === "text" ? block.text : this.describeResource(block.resource))].join("\n");
     return this.truncate(flattened);
+  }
+
+  private attachImage(block: ToolImageContent, label: string, runtime?: ToolRuntime): {
+    attached: boolean; note: string; reason?: string;
+  } {
+    const mimeType = block.mimeType.trim().toLowerCase();
+    const { data } = block;
+    const padding = data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0;
+    const body = data.slice(0, data.length - padding);
+    let reason: string | undefined;
+    if (runtime?.signal?.aborted) reason = "调用已取消";
+    else if (!/^image\/(png|jpeg|webp|gif)$/.test(mimeType)) reason = "图片格式不支持";
+    else if (!body || /[^A-Za-z0-9+/]/.test(body) || body.length % 4 === 1 ||
+      (padding > 0 && data.length % 4 !== 0)) reason = "图片 base64 无效";
+    else if (!runtime?.emitImage) reason = "没有图片通道，模型视觉能力已关闭或通道不可用";
+    else if (!runtime.emitImage({ dataUrl: `data:${mimeType};base64,${data}`, label })) {
+      reason = "图片配额已满或调用已结束；请减少图片数量或缩小尺寸后重试";
+    }
+    return reason
+      ? { attached: false, reason, note: `[${label}：未附加（${reason}），不能声称已看见图片]` }
+      : { attached: true, note: `[${label}：已附加到下一轮视觉输入，像素不在文本结果中]` };
   }
 
   private describeResource(resource: unknown): string {
@@ -554,11 +576,19 @@ export class McpAdapter {
     return `[resource ${uri ?? "unknown"}${suffix}]`;
   }
 
-  /** 结构化结果原样交给上层序列化；只有超长时才退化成截断文本 */
   private formatStructured(value: unknown): unknown {
-    const text = JSON.stringify(value);
+    let omittedImages = false;
+    // 部分 MCP 服务在 structuredContent 内重复图片块，不能把副本写入历史或 trace。
+    const text = JSON.stringify(value, function (key, item) {
+      if (key === "data" && this.type === "image" && typeof this.mimeType === "string" && typeof item === "string") {
+        omittedImages = true;
+        return "[图片 base64 已省略，不能据此判断图片内容]";
+      }
+      return item;
+    });
     if (text === undefined) return undefined;
-    return text.length <= this.maxResultChars ? value : this.truncate(text);
+    if (text.length > this.maxResultChars) return this.truncate(text);
+    return omittedImages ? JSON.parse(text) : value;
   }
 
   private truncate(text: string): string {

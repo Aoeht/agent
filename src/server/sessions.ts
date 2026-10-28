@@ -20,6 +20,7 @@ import { TaskStore } from "../core/task_store";
 import { formatBudgetExtensionPrompt } from "../core/budget_prompt";
 import { handleSlashCommand, isCommandText, type RunStatsSummary } from "../core/command_router";
 import { CheckpointStore, createCheckpointSnapshotHook } from "../core/checkpoint_store";
+import { prepareUserImages, UserImageError, type PreparedUserImage } from "../core/user_images";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 
@@ -75,12 +76,16 @@ export class EventHub {
 interface QueuedMessage {
   id: string;
   text: string;
+  /** 随消息上传的图片（已校验）；像素只在内存里等待，不进事件流与历史 */
+  images: PreparedUserImage[];
   /** 入队时会话正忙（这条消息等待过）：run_start 才带 queueId，前端据此把芯片转成气泡 */
   waited: boolean;
 }
 
 /** 单会话排队上限：防失控堆积；满了拒绝并提示 */
 const MAX_QUEUE_LENGTH = 8;
+/** 排队消息的图片总量上限：单条最多 20MiB 编码，8 条全带图会吃掉上百 MB 内存 */
+const MAX_QUEUED_IMAGE_ENCODED_BYTES = 40 * 1024 * 1024;
 
 interface SessionEntry {
   initializing?: Promise<Agent> | undefined;
@@ -344,10 +349,17 @@ export class SessionManager {
    */
   async sendMessage(
     sessionId: string,
-    text: string
+    text: string,
+    images?: readonly unknown[]
   ): Promise<Omit<MessageSendResponse, "ok">> {
     const entry = this.entry(sessionId);
     if (entry.configuring) throw new Error("当前会话正在更新配置，请稍后再发");
+    // 入口先校验：格式/大小不合格直接 400，不进队列、不扣一次模型调用
+    const preparedImages = prepareUserImages(images ?? []);
+    if (preparedImages.length > 0) {
+      if (isCommandText(text)) throw new UserImageError("斜杠命令不能附带图片");
+      if (!this.visionCapable) throw new UserImageError("当前模型的图片通道已关闭（AGENT_VISION=0），图片未发送");
+    }
     if (isCommandText(text)) {
       const agent = await this.ensureAgent(entry, sessionId);
       const outcome = await handleSlashCommand(text, {
@@ -370,9 +382,16 @@ export class SessionManager {
       // /task* 落回普通消息路径（Agent.runManaged 内部拦截）
     }
     if (entry.queue.length >= MAX_QUEUE_LENGTH) throw new Error(`发送队列已满（${MAX_QUEUE_LENGTH} 条），请等当前回合结束`);
+    const queuedImageBytes = entry.queue.reduce((sum, item) =>
+      sum + item.images.reduce((bytes, image) => bytes + image.encodedBytes, 0), 0);
+    const incomingImageBytes = preparedImages.reduce((sum, image) => sum + image.encodedBytes, 0);
+    if (queuedImageBytes + incomingImageBytes > MAX_QUEUED_IMAGE_ENCODED_BYTES) {
+      throw new UserImageError("排队中的图片总量已达上限，请等当前回合结束后再发");
+    }
     const item: QueuedMessage = {
       id: `q-${randomUUID().slice(0, 8)}`,
       text,
+      images: preparedImages,
       waited: entry.controller !== undefined,
     };
     // 先取快照再派发：runNext 会同步置位 controller，派发后再读会把"立即执行"误判成"已排队"
@@ -397,6 +416,11 @@ export class SessionManager {
   /** 当前队列快照（测试与诊断用） */
   queueSnapshot(sessionId: string): Array<{ id: string; text: string }> {
     return this.entry(sessionId).queue.map(({ id, text }) => ({ id, text }));
+  }
+
+  /** 宿主配置层是否声明模型能看图；运行期被厂商拒收后的闩锁只有 Agent 自己知道 */
+  get visionCapable(): boolean {
+    return this.options.runtime.config.visionCapable;
   }
 
   cancel(sessionId: string): void {
@@ -428,7 +452,7 @@ export class SessionManager {
     const controller = new AbortController();
     entry.controller = controller;
     try {
-      await this.runTurn(entry, sessionId, next.text, controller.signal, next.waited ? next.id : undefined);
+      await this.runTurn(entry, sessionId, next.text, next.images, controller.signal, next.waited ? next.id : undefined);
     } catch (error) {
       // runTurn 内部已把 agent.run 的失败兜成 error 事件；这里只兜逃逸异常，链条继续
       this.options.hub.publish(sessionId, {
@@ -477,6 +501,7 @@ export class SessionManager {
       sandbox: status.sandbox,
       sandboxRoot: this.options.runtime.sandboxRoot,
       contextWindow: contextWindowFor(model),
+      vision: this.visionCapable,
       ...(agent !== undefined
         ? { temperature: agent.temperature, maxIterations: agent.maxIterations,
             thinkingEffort: agent.thinkingEffort }
@@ -681,6 +706,7 @@ export class SessionManager {
     entry: SessionEntry,
     sessionId: string,
     text: string,
+    images: readonly PreparedUserImage[],
     signal: AbortSignal,
     queueId?: string
   ): Promise<void> {
@@ -693,6 +719,10 @@ export class SessionManager {
       userMessage: text,
       promptHash: agent.systemPromptHash,
       ...(queueId !== undefined ? { queueId } : {}),
+      // 只带名称与大小：前端用来画附件标签，像素不进事件流
+      ...(images.length > 0
+        ? { images: images.map(({ name, mimeType, sizeBytes }) => ({ name, mimeType, sizeBytes })) }
+        : {}),
     });
     const runtime: ToolRuntime = {
       signal,
@@ -705,7 +735,7 @@ export class SessionManager {
     let result: AgentResult;
     try {
       // ALS 作用域：run 内的一切（工具执行、run_script 确认）都能归属到这个会话
-      result = await runSessionStore.run({ sessionId }, () => agent.run(text, runtime));
+      result = await runSessionStore.run({ sessionId }, () => agent.run(text, runtime, images));
     } catch (error) {
       this.options.hub.publish(sessionId, {
         type: "error",

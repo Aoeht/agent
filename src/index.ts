@@ -20,6 +20,13 @@ import { AgentResult, StepInfo, ToolRuntime } from "./core/types";
 import { STOP_REASON_LABELS } from "./core/run_outcome";
 import { acceptedBudgetExtension, formatBudgetExtensionPrompt } from "./core/budget_prompt";
 import { formatHistoryReplay } from "./core/session_replay";
+import {
+  MAX_IMAGES_PER_REQUEST,
+  formatImageSize,
+  prepareUserImages,
+  readLocalImageFiles,
+  type PreparedUserImage,
+} from "./core/user_images";
 
 /**
  * 会话选择：AGENT_SESSION_ID 显式指定时直接用（跳过询问，适合脚本/定时任务）；
@@ -180,7 +187,8 @@ async function runTurn(
   input: string,
   signal: AbortSignal,
   ui: TurnUi,
-  channels: TurnChannels = {}
+  channels: TurnChannels = {},
+  images: readonly PreparedUserImage[] = []
 ): Promise<AgentResult> {
   const { requestHuman, askUser, requestBudgetExtension, nameSession } = channels;
   ui.streamState.active = false;
@@ -189,7 +197,7 @@ async function runTurn(
     ...(requestHuman ? { requestHuman } : {}),
     ...(askUser ? { askUser } : {}),
     ...(requestBudgetExtension ? { requestBudgetExtension } : {}),
-  });
+  }, images.length > 0 ? [...images] : undefined);
   if (ui.streamState.active) process.stdout.write("\n");
 
   if (result.finalAnswer && (!ui.stream || !ui.streamState.active ||
@@ -261,6 +269,25 @@ async function runOneShot(
   }
 }
 
+/** REPL 专属命令：/image 把本地图片挂到下一轮消息（Web 端用输入框的附件按钮） */
+function isImageCommand(input: string): boolean {
+  return /^\/image(?:\s|$)/.test(input);
+}
+
+/** 拆参数：支持 "带 空格 的路径"——Windows 路径经常带空格 */
+function splitCommandArgs(raw: string): string[] {
+  const args: string[] = [];
+  for (const match of raw.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)) {
+    const value = match[1] ?? match[2] ?? match[3] ?? "";
+    if (value !== "") args.push(value);
+  }
+  return args;
+}
+
+function formatPendingImages(images: readonly PreparedUserImage[]): string {
+  return images.map(image => `${image.name}（${formatImageSize(image.sizeBytes)}）`).join("、");
+}
+
 /**
  * 交互 REPL：一行一个任务，跑完回到提示符继续输入。
  * Ctrl+C 取消进行中的回合（回到提示符），空闲时 Ctrl+C / exit / quit 退出。
@@ -272,7 +299,8 @@ async function runRepl(
   ui: TurnUi,
   store: SessionStore,
   nameSession: SessionNamer,
-  checkpoints?: CheckpointStore
+  checkpoints?: CheckpointStore,
+  visionCapable = true
 ): Promise<void> {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   // 行队列必须在任何 await 之前挂上监听：'line' 事件没有监听者即丢，
@@ -283,6 +311,8 @@ async function runRepl(
   let exitRequested = false;
   // 上一回合用量摘要（/tokens 用）：回合结束后更新
   let lastStats: RunStatsSummary | undefined;
+  // /image 挂上的本地图片：下一轮普通消息带走即清空；不算进历史，只活在这一轮请求里
+  let pendingImages: PreparedUserImage[] = [];
   // 主循环是否正停在提示符上等输入：后台事件（长期摘要 fold 完成等）此时打印，
   // 先清掉提示行再输出、最后重绘提示符，避免糊成 "你> 🗜️ ..."
   let atPrompt = false;
@@ -331,17 +361,48 @@ async function runRepl(
   rl.on("SIGINT", onSigint);
   process.on("SIGINT", onSigint);
 
-  console.log("💬 交互模式：每行输入一个任务；/help 查看全部命令（/model /prompts /prompt /rewind /task* /tokens）；exit / quit / Ctrl+C 退出。");
+  console.log("💬 交互模式：每行输入一个任务；/help 查看全部命令（/model /prompts /prompt /rewind /task* /tokens /image）；exit / quit / Ctrl+C 退出。");
   try {
     while (!exitRequested) {
       atPrompt = true;
-      const line = await lines.next("你> ");
+      const line = await lines.next(pendingImages.length > 0 ? `你[+${pendingImages.length}图]> ` : "你> ");
       atPrompt = false;
       if (line === null) break; // 流结束（EOF）
 
       const input = line.trim();
       if (!input) continue;
       if (["exit", "quit", "/exit", "/quit", "q"].includes(input.toLowerCase())) break;
+
+      // /image：REPL 专属，把本地图片挂到下一轮消息。斜杠命令走不了图片，所以在这里拦。
+      if (isImageCommand(input)) {
+        const arg = input.replace(/^\/image\b/, "").trim();
+        if (arg === "" || arg === "list") {
+          console.log(pendingImages.length === 0
+            ? `📎 还没有待发送的图片。用法：/image <图片路径> [更多路径...]（一次最多 ${MAX_IMAGES_PER_REQUEST} 张），下一轮输入时随消息发送。`
+            : `📎 待发送 ${pendingImages.length} 张：${formatPendingImages(pendingImages)}。直接输入问题即可带走；/image clear 清空。`);
+          continue;
+        }
+        if (arg === "clear") {
+          pendingImages = [];
+          console.log("📎 已清空待发送图片。");
+          continue;
+        }
+        try {
+          const uploads = await readLocalImageFiles(splitCommandArgs(arg));
+          if (uploads.length === 0) {
+            console.log("⚠️ 没有有效的图片路径。用法：/image <图片路径> [更多路径...]");
+            continue;
+          }
+          // 与已有待发送图片合并后整体校验（张数/单张/总量）
+          pendingImages = prepareUserImages([...pendingImages, ...uploads]);
+          console.log(`📎 已加入 ${uploads.length} 张（共 ${pendingImages.length} 张待发送）：${formatPendingImages(pendingImages)}。`);
+          if (!visionCapable) console.log("⚠️ 当前模型的图片通道已关闭（AGENT_VISION=0），这轮不会发送像素。");
+          else console.log("直接输入问题即可带上这些图片。");
+        } catch (error) {
+          console.log(`⚠️ ${error instanceof Error ? error.message : String(error)}`);
+        }
+        continue;
+      }
 
       // 斜杠命令：REPL 与 Web 走同一条路由（命令不进 LLM、不落会话文件、
       // /task* 仍交回主循环走 Agent 内部拦截）
@@ -361,6 +422,9 @@ async function runRepl(
 
       // 普通输入：模板走独立注入通道，本轮跑完即止；不再拼进用户输入
       agent.setPromptTemplate(templateRef.current);
+      // 图片随这一轮带走：即使回合失败也不留着，误发旧图的代价比重新 /image 高
+      const turnImages = pendingImages;
+      pendingImages = [];
       const controller = new AbortController();
       activeController = controller;
       try {
@@ -379,7 +443,7 @@ async function runRepl(
               : "⏹️  未追加预算，本轮按预算上限收尾。");
             return approved;
           },
-        });
+        }, turnImages);
         // 上一回合用量摘要（/tokens 用）：模型取当前值（回合中途没切过就是本回合模型）
         lastStats = {
           totalTokens: result.totalTokens,
@@ -574,7 +638,7 @@ async function main() {
     // 7. 终端进 REPL；管道进单次模式；AGENT_REPL=1 强制逐行 REPL（多回合脚本/测试用）
     //    单次模式不自动套用会话里选定的模板：CI/脚本场景要的是"只按我给的任务跑"
     if (process.stdin.isTTY || process.env.AGENT_REPL === "1") {
-      await runRepl(agent, mcp, ui, session.store, nameSession, checkpoints);
+      await runRepl(agent, mcp, ui, session.store, nameSession, checkpoints, config.visionCapable);
     } else {
       await runOneShot(agent, mcp, ui, nameSession);
     }

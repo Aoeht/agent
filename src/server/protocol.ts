@@ -16,7 +16,7 @@
  *   POST   /sessions                  → SessionSummaryDTO（新建）
  *   GET    /sessions/:id/history      → SessionDetailDTO（摘要 + 历史）
  *   GET    /sessions/:id/tasks        → TaskRecord[]（独立任务历史）
- *   POST   /sessions/:id/messages     body { text } → 202；忙时 409 { error }
+ *   POST   /sessions/:id/messages     body { text, images? } → 202；忙时 409 { error }
  *   POST   /sessions/:id/cancel       → 204
  *   GET    /jobs                      → { jobs: JobSummaryDTO[] }（最近 50 条，按开始时间倒序）
  *   GET    /jobs/:id/log?stream=&after= → JobLogChunkDTO（不带 after 取尾部快照）
@@ -109,6 +109,8 @@ export const ServerEventSchema = z.discriminatedUnion("type", [
     temperature: z.number().optional(),
     maxIterations: z.number().int().optional(),
     thinkingEffort: ThinkingEffortSchema.optional(),
+    /** 该会话的模型是否接受图片输入（AGENT_VISION 且通道可用）：前端据此禁用附件按钮 */
+    vision: z.boolean().optional(),
     promptHash: z.string().optional(),
     skills: z.array(z.string()).optional(),
     mcpServers: z
@@ -117,7 +119,9 @@ export const ServerEventSchema = z.discriminatedUnion("type", [
   }),
   z.object({ type: z.literal("run_start"), userMessage: z.string(), promptHash: z.string().optional(),
     /** 该回合来自排队消息时携带：前端把排队芯片转成正式用户气泡（等待过的消息才有，立即执行的不带） */
-    queueId: z.string().optional() }),
+    queueId: z.string().optional(),
+    /** 随消息上传的图片元数据（名称/类型/原图大小）：前端画附件标签用，像素不进事件流 */
+    images: z.array(z.object({ name: z.string(), mimeType: z.string(), sizeBytes: z.number().int() })).optional() }),
   /** 流式增量文本；与 step.llmContent 二选一消费（流式开启时消费方忽略 step.llmContent） */
   z.object({ type: z.literal("token"), delta: z.string() }),
   /** 工具开始执行（UI 渲染转圈状态）；由服务器侧工具中间件桥接发布 */
@@ -255,6 +259,17 @@ export const ServerEventSchema = z.discriminatedUnion("type", [
 
 export type ServerEvent = z.infer<typeof ServerEventSchema>;
 export type SessionConfigEvent = Extract<ServerEvent, { type: "session_config" }>;
+
+/**
+ * POST /sessions/:id/messages 请求体里的一张图片。像素只在请求体里走一次：
+ * 不写会话文件、不进 SSE、不进 trace；服务端按 src/core/user_images.ts 的口径复核。
+ */
+export interface UserImageUploadBody {
+  name?: string;
+  mimeType?: string;
+  /** `data:image/(png|jpeg|webp|gif);base64,...` */
+  dataUrl: string;
+}
 
 /**
  * POST /sessions/:id/messages 响应：普通消息入队走 run 生命周期（queued=true）；

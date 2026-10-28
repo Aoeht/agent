@@ -123,7 +123,8 @@ export default function App() {
                 maxIterations: current.maxIterations,
                 thinkingEffort: current.thinkingEffort,
               }}
-              onSend={(text) => void actions.send(text)}
+              visionCapable={current.visionCapable}
+              onSend={(text, images) => void actions.send(text, images)}
               onCancel={() => void actions.cancel()}
               onApplyConfig={actions.applySessionConfig}
             />

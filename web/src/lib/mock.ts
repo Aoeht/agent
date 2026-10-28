@@ -8,6 +8,7 @@ import type {
   SessionDetailDTO,
   SessionSummaryDTO,
   ThinkingEffort,
+  UserImageUploadBody,
 } from "@protocol";
 import type { Transport } from "./transport";
 
@@ -48,6 +49,7 @@ const helloEvent: Extract<ServerEvent, { type: "hello" }> = {
   contextWindow: 200_000,
   temperature: 0.1,
   maxIterations: 0,
+  vision: true,
   promptHash: "a3f19c02e4b7",
   skills: ["qianwen-audio-tts", "qianwen-image-generation", "qianwen-video-generation"],
   mcpServers: [
@@ -197,9 +199,11 @@ async function runDemoScript(
   emit: (event: ServerEvent) => void,
   signal: AbortSignal,
   userMessage: string,
-  awaitApproval: (id: string) => Promise<ApprovalDecisionBody>
+  awaitApproval: (id: string) => Promise<ApprovalDecisionBody>,
+  images?: Array<{ name: string; mimeType: string; sizeBytes: number }>
 ): Promise<void> {
-  emit({ type: "run_start", userMessage, promptHash: "a3f19c02e4b7" });
+  emit({ type: "run_start", userMessage, promptHash: "a3f19c02e4b7",
+    ...(images !== undefined && images.length > 0 ? { images } : {}) });
   try {
     await sleep(500, signal);
     await stream(
@@ -362,7 +366,12 @@ export class MockTransport implements Transport {
   private runs = new Map<string, AbortController>();
   private approvals = new Map<string, (body: ApprovalDecisionBody) => void>();
   /** 忙时消息的会话队列（FIFO），回合结束后自动接续——与真实服务器同语义 */
-  private queues = new Map<string, Array<{ id: string; text: string; waited: boolean }>>();
+  private queues = new Map<string, Array<{
+    id: string;
+    text: string;
+    waited: boolean;
+    images?: Array<{ name: string; mimeType: string; sizeBytes: number }>;
+  }>>();
   private queueSeq = 0;
   private sessions: SessionDetailDTO[];
   private seq = 0;
@@ -540,10 +549,24 @@ export class MockTransport implements Transport {
     this.emit(sessionId, { type: "queue_changed", items: queue.map(({ id, text }) => ({ id, text })) });
   }
 
-  async sendMessage(sessionId: string, text: string): Promise<{ queued: boolean; queueId: string }> {
+  async sendMessage(
+    sessionId: string,
+    text: string,
+    images?: UserImageUploadBody[]
+  ): Promise<{ queued: boolean; queueId: string }> {
     const queue = this.queues.get(sessionId) ?? [];
     this.queues.set(sessionId, queue);
-    const item = { id: `mock-q-${++this.queueSeq}`, text, waited: this.runs.has(sessionId) };
+    const meta = images?.map((image, index) => ({
+      name: image.name?.trim() || `图片 ${index + 1}`,
+      mimeType: image.mimeType ?? "image/png",
+      sizeBytes: Math.max(0, Math.floor((image.dataUrl.length - image.dataUrl.indexOf(",") - 1) * 3 / 4)),
+    }));
+    const item = {
+      id: `mock-q-${++this.queueSeq}`,
+      text,
+      waited: this.runs.has(sessionId),
+      ...(meta !== undefined && meta.length > 0 ? { images: meta } : {}),
+    };
     queue.push(item);
     this.publishQueue(sessionId);
     if (this.runs.has(sessionId)) return { queued: true, queueId: item.id };
@@ -566,7 +589,8 @@ export class MockTransport implements Transport {
         (id) =>
           new Promise<ApprovalDecisionBody>((resolve) => {
             this.approvals.set(id, resolve);
-          })
+          }),
+        next.images
       );
     } finally {
       this.runs.delete(sessionId);

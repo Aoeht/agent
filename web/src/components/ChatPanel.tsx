@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useStore, type ChatItem, type RunStatus } from "../state/store";
+import { formatImageSize } from "../lib/attachments";
 
 /** 工具名 → 中文说明（未收录的回退原名） */
 const TOOL_NAMES: Record<string, string> = {
@@ -93,12 +94,39 @@ function ToolCard({ item }: { item: Extract<ChatItem, { kind: "tool" }> }) {
 
 function ChatItemView({ item }: { item: ChatItem }) {
   switch (item.kind) {
-    case "user":
+    case "user": {
+      const images = item.images ?? [];
       return (
         <div className="max-w-[80%] self-end whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-clay-100 px-4 py-2.5 text-[15px] leading-7">
-          {item.text}
+          {images.length > 0 && (
+            <div className={`flex flex-wrap gap-2 ${item.text ? "mb-2" : ""}`}>
+              {images.map((image, index) =>
+                image.dataUrl ? (
+                  <img
+                    key={index}
+                    src={image.dataUrl}
+                    alt={image.name}
+                    title={`${image.name}（${formatImageSize(image.sizeBytes)}）`}
+                    className="h-24 max-w-40 rounded-lg object-cover"
+                  />
+                ) : (
+                  // 转正/重连后只有元数据（像素从不进事件流）：用文字标签承载
+                  <span
+                    key={index}
+                    title={`${image.name}（${image.mimeType}，${formatImageSize(image.sizeBytes)}）`}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-clay-300/60 bg-cream-50 px-2 py-1 text-xs text-ink-600"
+                  >
+                    🖼 {image.name}
+                    <span className="text-[10px] text-ink-400">{formatImageSize(image.sizeBytes)}</span>
+                  </span>
+                )
+              )}
+            </div>
+          )}
+          {item.text && <span>{item.text}</span>}
         </div>
       );
+    }
     case "assistant":
       return (
         <div className="max-w-[85%] self-start break-words rounded-2xl rounded-bl-md border border-cream-300 bg-cream-50 px-4 py-2.5 shadow-sm">
@@ -210,12 +238,14 @@ function EmptyState() {
 }
 
 /** 排队中的消息芯片：当前回合结束后按序执行；✕ 撤单（不影响正在跑的回合） */
-function QueueChips({ queue }: { queue: Array<{ id: string; text: string }> }) {
+function QueueChips({ queue }: { queue: Array<{ id: string; text: string; imageCount?: number }> }) {
   const { actions } = useStore();
   if (queue.length === 0) return null;
   return (
     <div className="flex flex-col items-end gap-1.5">
-      {queue.map((item, index) => (
+      {queue.map((item, index) => {
+        const label = item.text || (item.imageCount ? `🖼 ${item.imageCount} 张图片` : "（空消息）");
+        return (
         <div
           key={item.id}
           className="flex max-w-[80%] items-center gap-2 rounded-2xl rounded-br-md border border-dashed border-clay-400/60 bg-clay-50/70 px-3.5 py-2"
@@ -223,8 +253,8 @@ function QueueChips({ queue }: { queue: Array<{ id: string; text: string }> }) {
           <span className="shrink-0 text-xs text-clay-500">
             {index === 0 ? "⏳ 下一个执行" : `⏳ 排队中（第 ${index + 1} 位）`}
           </span>
-          <span className="truncate text-sm text-ink-600" title={item.text}>
-            {item.text}
+          <span className="truncate text-sm text-ink-600" title={label}>
+            {label}
           </span>
           <button
             onClick={() => void actions.removeQueued(item.id)}
@@ -234,7 +264,8 @@ function QueueChips({ queue }: { queue: Array<{ id: string; text: string }> }) {
             ✕
           </button>
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
