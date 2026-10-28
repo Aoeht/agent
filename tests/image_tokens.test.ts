@@ -74,13 +74,34 @@ describe("estimateImageTokensFromDataUrl", () => {
     expect(estimateImageTokensFromDataUrl(webpDataUrl(1200, 800))).toBe(1_105);
   });
 
-  test("Qwen 系按 28×28 像素块计，和文本 tokenizer 口径分开", () => {
-    expect(estimateImageTokensFromDataUrl(pngDataUrl(1280, 900), { model: "qwen3-vl-plus" })).toBe(1_470);
+  test("Qwen3-VL 按 32×32 块，默认 2560 token 上限，另加 2 个视觉边界", () => {
+    expect(estimateImageTokensFromDataUrl(pngDataUrl(1280, 900), { model: "qwen3-vl-plus" })).toBe(1_122);
+    expect(estimateImageTokensFromDataUrl(pngDataUrl(4000, 3000), { model: "qwen3.5-vl" })).toBe(2_496);
+    expect(estimateImageTokensFromDataUrl(pngDataUrl(1, 1), { model: "qwen3-vl-max" })).toBe(6);
   });
 
-  test("尺寸读不出来时按体积退估，绝不返回 0", () => {
+  test("Qwen2.5-VL / QVQ 按 28×28 块，上下限 256/1280", () => {
+    expect(estimateImageTokensFromDataUrl(pngDataUrl(1280, 900), { model: "qwen2.5-vl-72b" })).toBe(1_262);
+    expect(estimateImageTokensFromDataUrl(pngDataUrl(1, 1), { model: "qvq-max" })).toBe(258);
+  });
+
+  test("GLM 按官方 FAQ 单图固定 1047 tokens", () => {
+    expect(estimateImageTokensFromDataUrl(pngDataUrl(1280, 900), { model: "glm-4.6v" })).toBe(1_047);
+    expect(estimateImageTokensFromDataUrl(pngDataUrl(2048, 1152), { model: "glm-4v-flash" })).toBe(1_047);
+  });
+
+  test("DeepSeek 按像素近似并夹到单图 1024 上限", () => {
+    expect(estimateImageTokensFromDataUrl(pngDataUrl(1280, 900), { model: "deepseek-flash" })).toBe(699);
+    expect(estimateImageTokensFromDataUrl(pngDataUrl(4000, 3000), { model: "deepseek-flash" })).toBe(1_024);
+  });
+
+  test("尺寸读不出来时按体积退估，并按模型上限夹紧，绝不返回 0", () => {
     const payload = Buffer.alloc(300_000, 0x07).toString("base64");
-    expect(estimateImageTokensFromDataUrl(`data:image/png;base64,${payload}`)).toBe(2_000);
+    const url = `data:image/png;base64,${payload}`;
+    expect(estimateImageTokensFromDataUrl(url)).toBe(1_445); // OpenAI 分块上限
+    expect(estimateImageTokensFromDataUrl(url, { model: "deepseek-flash" })).toBe(1_024);
+    expect(estimateImageTokensFromDataUrl(url, { model: "glm-4.6v" })).toBe(1_047);
+    expect(estimateImageTokensFromDataUrl(url, { model: "qwen3-vl-plus" })).toBe(2_000); // 未触到 2562 上限
     expect(estimateImageTokensFromDataUrl("https://example.test/a.png")).toBe(800);
     expect(estimateImageTokensFromDataUrl("not-a-data-url")).toBe(800);
   });
