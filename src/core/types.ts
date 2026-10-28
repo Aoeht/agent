@@ -56,6 +56,12 @@ export interface ToolDefinition {
    */
   parallelSafe?: boolean;
   /**
+   * 单次执行死线（毫秒）。缺省落 Agent 级 toolTimeoutMs（缺省关）；
+   * 设 0 表示显式豁免——自己管超时或时长合法地不可预估的工具（run_script、ask_user、
+   * delegate_task）用得上。超时把该次调用转成 error observation，run 继续走。
+   */
+  timeoutMs?: number;
+  /**
    * 该调用结果不可确认时，是否需要人工核对它对真实世界的影响（缺省按需要，最保守）。
    * 和 parallelSafe 是两回事：后者问"能不能并发"，这里问"要不要人工核对"。
    * 只读工具、以及只写自有幂等存储（检索索引、任务账本、计划）的工具设为 false。
@@ -84,6 +90,7 @@ export function defineTool<T extends z.ZodType>(config: {
   description: string;
   schema: T;
   parallelSafe?: boolean;
+  timeoutMs?: number;
   needsReconciliation?: boolean;
   execute: (args: z.output<T>, runtime?: ToolRuntime) => Promise<unknown>;
 }): ToolDefinition {
@@ -92,6 +99,7 @@ export function defineTool<T extends z.ZodType>(config: {
     description: config.description,
     parameters: z.toJSONSchema(config.schema, { io: "input" }) as Record<string, unknown>,
     ...(config.parallelSafe !== undefined ? { parallelSafe: config.parallelSafe } : {}),
+    ...(config.timeoutMs !== undefined ? { timeoutMs: config.timeoutMs } : {}),
     ...(config.needsReconciliation !== undefined ? { needsReconciliation: config.needsReconciliation } : {}),
     // async 包装：校验失败必须以 rejected promise 形式抛出（契约是 Promise<unknown>），
     // 否则直连 execute 的调用方会在拿到 Promise 之前遭遇同步异常

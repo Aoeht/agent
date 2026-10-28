@@ -31,6 +31,8 @@ export function createAskUserTool(): ToolDefinition {
     schema: AskUserParamsSchema,
     // 阻塞等待用户输入，不允许与同批工具并发
     parallelSafe: false,
+    // 等多久取决于用户什么时候回答，任何死线都不得打断
+    timeoutMs: 0,
     // 只是问一句话，中断后外部世界没有任何变化
     needsReconciliation: false,
     description:

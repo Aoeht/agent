@@ -263,6 +263,8 @@ export function createRunScriptTool(options: {
     name: "run_script",
     schema: RunScriptParamsSchema,
     parallelSafe: false,
+    // 前台超时由 timeout_ms 参数自己管（JobStore 托管后台分支）；全局死线不得干预
+    timeoutMs: 0,
     description:
       backend.kind === "docker"
         ? "执行工作区内的脚本文件（技能附带脚本或你写入工作区的脚本），在一次性 docker 容器中运行：" +

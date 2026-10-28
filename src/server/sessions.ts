@@ -594,6 +594,8 @@ export class SessionManager {
       temperature: config.temperature,
       thinkingEffort: config.thinkingEffort,
       toolSearch: config.toolSearch,
+      toolConcurrencyLimit: config.toolConcurrencyLimit,
+      toolTimeoutMs: config.toolTimeoutMs,
       visionCapable: config.visionCapable,
       maxHistoryTurns: config.maxHistoryTurns,
       budget: config.budget,

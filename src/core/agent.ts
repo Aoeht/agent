@@ -24,6 +24,7 @@ import { LONGTERM_FRESH_PROMPT, LONGTERM_MERGE_PROMPT } from "./summary_prompts"
 import { runOutcome, responseStopReason, isContentPolicyError, type RunOutcome, type StopReason } from "./run_outcome";
 import { isRetryableTransportError, retryDelayMs } from "./llm_retry";
 import { TaskStore } from "./task_store";
+import { partitionToolCalls, mapWithConcurrency, raceWithToolTimeout, ToolTimeoutError } from "./tool_batch";
 import { AcceptanceCriteriaSchema, TASK_STATE_LABELS, type AcceptanceCriterion, type TaskRecord, type Verification } from "./task_types";
 import { validateAcceptancePaths, verifyTask } from "./task_verifier";
 import {
@@ -167,6 +168,17 @@ interface AgentConfig {
    *  设为 false：请求携带 parallel_tool_calls=false（模型每轮最多发一个调用，顺序由跨轮观察保证），
    *  客户端对忽略该参数的兼容服务端按序串行兜底 */
   parallelToolCalls?: boolean;
+  /**
+   * 并发道宽度上限（信号量）：同批 parallelSafe 调用最多同时在飞 N 个，防一批只读调用
+   * 同时打满外部 API。非 parallelSafe 工具不进并发池（互相串行，副作用顺序确定）。默认 4。
+   */
+  toolConcurrencyLimit?: number;
+  /**
+   * 工具执行死线（毫秒）兜底，缺省 0 = 关：只对未声明自有 timeoutMs 的工具生效；
+   * 挂死的工具不再拖住整个 run，超时转成 error observation、run 继续走。
+   * 工具可用 ToolDefinition.timeoutMs 覆盖或设 0 显式豁免。
+   */
+  toolTimeoutMs?: number;
   /** 外部注入的 LLM 客户端（不传则按环境变量自建；注入方可自行控制超时/重试/代理） */
   client?: OpenAI;
   /** 压缩摘要使用的模型（不传则复用主模型） */
@@ -254,6 +266,8 @@ const PARTIAL_STREAM = Symbol("PartialStream");
  * 短工具一次心跳都不会发，不增加噪音。
  */
 const TOOL_PROGRESS_INTERVAL_MS = 5_000;
+/** 并发道默认宽度：一批 parallelSafe 调用最多同时在飞 4 个 */
+const TOOL_CONCURRENCY_LIMIT = 4;
 
 // 请求级配额按编码后的字节计量，包含 base64 膨胀，不是原文件大小。
 // 定义在 user_images（与用户上传共用同一份预算），这里 re-export 保持既有引用不变。
@@ -367,6 +381,10 @@ export class Agent {
   private running = false;
   /** 工具心跳间隔：默认 5s，测试可缩短以验证 progress 事件 */
   private readonly toolProgressIntervalMs: number;
+  /** 并发道宽度上限（parallelSafe 子集同时在飞的调用数），默认 4 */
+  private readonly toolConcurrencyLimit: number;
+  /** 工具执行死线兜底（毫秒），0 = 关；只对未声明自有 timeoutMs 的工具生效 */
+  private readonly toolTimeoutMs: number;
   // 能力拒绝只对当前模型生效，切换模型后允许重新尝试。
   private visionDisabled = false;
 
@@ -380,6 +398,8 @@ export class Agent {
     this.client = config.client ?? new OpenAI({ maxRetries: 0 });
     this.tools = config.tools ?? new ToolRegistry();
     this.toolProgressIntervalMs = config.toolProgressIntervalMs ?? TOOL_PROGRESS_INTERVAL_MS;
+    this.toolConcurrencyLimit = Math.max(1, config.toolConcurrencyLimit ?? TOOL_CONCURRENCY_LIMIT);
+    this.toolTimeoutMs = Math.max(0, config.toolTimeoutMs ?? 0);
     this.systemPromptHash = systemPromptFingerprint(config.systemPrompt);
     // promptTemplate 单独摘出来存字段（可被 setPromptTemplate 换/清），不留在 config 里
     const { promptTemplate, ...rest } = config;
@@ -395,6 +415,8 @@ export class Agent {
       maxRetries: 2,
       retryBaseDelayMs: 500,
       parallelToolCalls: true,
+      toolConcurrencyLimit: TOOL_CONCURRENCY_LIMIT,
+      toolTimeoutMs: 0,
       visionCapable: true,
       ...rest,
     };
@@ -1136,7 +1158,12 @@ export class Agent {
             } else {
               delete callRuntime.emitImage;
             }
-            const returned = await this.executeToolCall(toolCall, callRuntime);
+            // per-tool 死线：工具声明 timeoutMs 优先（0=显式豁免），否则落 Agent 级兜底（缺省关）。
+            // 超时转 error observation、run 继续走；派生信号让尊重取消的工具真正停下来
+            const deadlineMs = this.toolDeadlineFor(toolName);
+            const returned = deadlineMs > 0
+              ? await this.executeWithDeadline(toolCall, callRuntime, deadlineMs)
+              : await this.executeToolCall(toolCall, callRuntime);
             this.events.emit("tool_end", {
               callId: toolCall.id,
               name: toolName,
@@ -1176,21 +1203,39 @@ export class Agent {
             .map((p) => [p.toolCall.id, JSON.stringify({ error: "运行预算已用尽，未执行该工具调用" })])
         );
 
-        const canRunInParallel =
-          this.config.parallelToolCalls &&
-          allowedToolCalls.every((toolCall) => this.tools.get(toolCall.function.name)?.parallelSafe === true);
+        // 双车道调度（tool_batch.ts）：parallelSafe 子集进并发池（宽度上限），其余进串行道——
+        // 混合批次不再"一个不安全整批串行"。两条道同时跑：副作用工具互不重叠且按声明顺序发生，
+        // 只读工具与任何东西并发（"同批可能并发"已写进系统提示，模型有依赖就该分轮发）。
         const executed = new Map<string, string>();
-        if (!canRunInParallel) {
+        if (!this.config.parallelToolCalls) {
+          // 串行兜底：请求已带 parallel_tool_calls=false，忽略服务端无视该参数的行为
           for (const toolCall of allowedToolCalls) {
             const { toolResult } = await runToolCall(toolCall);
             executed.set(toolCall.id, toolResult);
           }
         } else {
-          const results = await Promise.allSettled(allowedToolCalls.map(runToolCall));
-          for (const returned of results) {
+          const { parallel, serial } = partitionToolCalls(allowedToolCalls, (name) =>
+            this.tools.get(name)?.parallelSafe === true);
+          const serialLane = (async () => {
+            for (const toolCall of serial) {
+              const { toolResult } = await runToolCall(toolCall);
+              executed.set(toolCall.id, toolResult);
+            }
+          })();
+          const settled = await mapWithConcurrency(parallel, this.toolConcurrencyLimit, runToolCall);
+          // 先等两条道都收干再统一判失败：取消/系统性错误照旧终止 run，
+          // 已完成的工具结果已进 executed，作为证据保留（与原 allSettled 语义一致）
+          let serialError: unknown;
+          try {
+            await serialLane;
+          } catch (error) {
+            serialError = error;
+          }
+          for (const returned of settled) {
             if (returned.status === "fulfilled") executed.set(returned.value.toolCall.id, returned.value.toolResult);
           }
-          const failed = results.find(returned => returned.status === "rejected");
+          const failed = settled.find((returned) => returned.status === "rejected");
+          if (serialError !== undefined) throw serialError;
           if (failed?.status === "rejected") throw failed.reason;
         }
 
@@ -1821,6 +1866,44 @@ export class Agent {
   }
 
   /** 执行单个工具：未知工具/参数解析失败不抛出，统一转为 JSON observation 回给模型 */
+  /** 单次调用死线：工具声明 timeoutMs 优先，未声明落 Agent 级兜底；0 = 不限时 */
+  private toolDeadlineFor(toolName: string): number {
+    const declared = this.tools.get(toolName)?.timeoutMs;
+    return declared ?? this.toolTimeoutMs;
+  }
+
+  /**
+   * 带死线执行一次工具调用：超时不是 run 终态，而是该次调用的 error observation
+   * （tool_end 照发、taskStore 照记，模型可以据此换路子重试）。外层取消原样抛出，
+   * 维持"取消终止 run"的既有契约。
+   */
+  private async executeWithDeadline(
+    toolCall: ToolCall,
+    runtime: ToolRuntime,
+    timeoutMs: number
+  ): Promise<{ toolCall: ToolCall; toolResult: string }> {
+    try {
+      return await raceWithToolTimeout(
+        (signal) => this.executeToolCall(toolCall, { ...runtime, signal }),
+        {
+          toolName: toolCall.function.name,
+          timeoutMs,
+          ...(runtime.signal !== undefined ? { outer: runtime.signal } : {}),
+        }
+      );
+    } catch (error) {
+      if (error instanceof ToolTimeoutError) {
+        return {
+          toolCall,
+          toolResult: JSON.stringify({
+            error: `${error.message}。请缩小任务范围后重试，或改用后台/分步方式完成。`,
+          }),
+        };
+      }
+      throw error;
+    }
+  }
+
   private async executeToolCall(
     toolCall: ToolCall,
     runtime?: ToolRuntime

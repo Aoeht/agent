@@ -151,6 +151,8 @@ export function createDelegateTaskTool(options: DelegateTaskToolOptions) {
       "scanner 对 B 站视频做诈骗风险扫描（需已存在采集快照，goal 里给 BV 号）。" +
       "不适合委派的：一步就能完成的调用、需要写文件或跑脚本的任务（子代理只读）。",
     parallelSafe: true,
+    // 子代理是完整的多轮 run，时长合法地长（预算/墙钟在子代理内部治理）
+    timeoutMs: 0,
     needsReconciliation: false,
     schema: z.object({
       goal: z.string().min(1).max(12_000).describe("自包含的任务描述：目标、范围、期望的交付形式"),

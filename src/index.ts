@@ -536,6 +536,10 @@ async function main() {
     if (config.thinkingEffort !== "default") {
       console.log(`🧠 思考程度: ${config.thinkingEffort}（AGENT_THINKING_EFFORT，按当前模型映射厂商参数）`);
     }
+    if (config.toolConcurrencyLimit !== 4 || config.toolTimeoutMs > 0) {
+      const deadline = config.toolTimeoutMs > 0 ? `${Math.round(config.toolTimeoutMs / 1000)}s` : "关";
+      console.log(`🧵 工具调度: 同批并发上限 ${config.toolConcurrencyLimit} · 单工具死线 ${deadline}（AGENT_TOOL_CONCURRENCY / AGENT_TOOL_TIMEOUT_MS）`);
+    }
     if (!config.visionCapable) {
       console.log("视觉输入: 关（AGENT_VISION）——read_image 不提供图片通道");
     }
@@ -556,6 +560,8 @@ async function main() {
       temperature: config.temperature,
       thinkingEffort: config.thinkingEffort,
       toolSearch: config.toolSearch,
+      toolConcurrencyLimit: config.toolConcurrencyLimit,
+      toolTimeoutMs: config.toolTimeoutMs,
       visionCapable: config.visionCapable,
       maxHistoryTurns: config.maxHistoryTurns,
       sessionStore: session.store,
