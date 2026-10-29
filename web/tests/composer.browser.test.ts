@@ -98,6 +98,8 @@ test.skipIf(process.env.RUN_BROWSER_TESTS !== "1")("上下文窗口：填数字�
     expect(await submissions()).toEqual([{ sessionId: "a", contextWindow: 32000 }]);
     await page.getByTitle("模型与参数").click();
     expect(await windowInput.inputValue()).toBe("32000");
+    // 手填值落在某个档位上时，该档位显示为选中
+    expect(await page.getByRole("button", { name: "32K" }).getAttribute("aria-pressed")).toBe("true");
 
     // 清空：下发 null 收回覆盖，重开后留空、占位回到模型查表值
     await windowInput.fill("");
@@ -110,6 +112,28 @@ test.skipIf(process.env.RUN_BROWSER_TESTS !== "1")("上下文窗口：填数字�
     await page.getByTitle("模型与参数").click();
     expect(await windowInput.inputValue()).toBe("");
     expect(await windowInput.getAttribute("placeholder")).toBe("200000");
+
+    // 点档位：一键填入并下发覆盖
+    await page.getByRole("button", { name: "64K" }).click();
+    expect(await windowInput.inputValue()).toBe("64000");
+    expect(await page.getByRole("button", { name: "64K" }).getAttribute("aria-pressed")).toBe("true");
+    await page.getByRole("button", { name: "应用", exact: true }).click();
+    await panelTitle.waitFor({ state: "hidden" });
+    await page.getByTitle("模型与参数").click();
+    expect(await windowInput.inputValue()).toBe("64000");
+
+    // 点「自动」清空覆盖，回到按模型查表
+    await page.getByRole("button", { name: "自动", exact: true }).click();
+    expect(await windowInput.inputValue()).toBe("");
+    expect(await page.getByRole("button", { name: "自动", exact: true }).getAttribute("aria-pressed")).toBe("true");
+    await page.getByRole("button", { name: "应用", exact: true }).click();
+    await panelTitle.waitFor({ state: "hidden" });
+    expect(await submissions()).toEqual([
+      { sessionId: "a", contextWindow: 32000 },
+      { sessionId: "a", contextWindow: null },
+      { sessionId: "a", contextWindow: 64000 },
+      { sessionId: "a", contextWindow: null },
+    ]);
   } finally {
     await browser.close();
     server.stop(true);

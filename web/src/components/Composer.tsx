@@ -35,6 +35,15 @@ const THINKING_EFFORT_OPTIONS: ReadonlyArray<{ value: ThinkingEffort; label: str
   { value: "high", label: "高" },
 ];
 
+/** 上下文窗口档位：一键填入常用窗口，仍可在输入框里手填任意值 */
+const CONTEXT_WINDOW_TIERS: ReadonlyArray<{ label: string; value: number }> = [
+  { label: "32K", value: 32_000 },
+  { label: "64K", value: 64_000 },
+  { label: "128K", value: 128_000 },
+  { label: "200K", value: 200_000 },
+  { label: "1M", value: 1_000_000 },
+];
+
 /** 探测结果的展示标记：ok 不加前缀（默认即正常），失败档位给前缀与 tooltip 说明 */
 function modelOptionLabel(model: string, probe: ModelProbeStatus | undefined): string {
   if (!probe || probe.ok) return model;
@@ -206,6 +215,18 @@ export function Composer({
     onDraftConfig(payload);
   };
 
+  // 档位与手填走同一条草稿链路：点档位只改草稿，应用时仍按「是否与当前覆盖相同」决定下发
+  const pickContextWindow = (value: string) => {
+    const next = { ...draft, contextWindow: value };
+    draftDirty.current.add("contextWindow");
+    setDraft(next);
+    reportDraftConfig(next);
+  };
+  const draftWindow = draft.contextWindow.trim() === "" ? undefined : Number.parseInt(draft.contextWindow, 10);
+  const tierClass = (active: boolean) =>
+    `rounded-full border px-2 py-0.5 text-[11px] transition disabled:opacity-40 ${
+      active ? "border-clay-600 bg-clay-600 text-cream-50" : "border-cream-300 bg-white/70 text-ink-600 hover:border-clay-500"}`;
+
   const applyConfig = async () => {
     if (applying) return;
     if (sessionId === null) {
@@ -365,6 +386,18 @@ export function Composer({
                 className="mt-1 w-full rounded-xl border border-cream-300 bg-white/70 px-3 py-2 text-sm outline-none focus:border-clay-500"
               />
             </label>
+            <div className="mt-1.5 flex flex-wrap gap-1" role="group" aria-label="上下文窗口档位">
+              <button type="button" disabled={applying} aria-pressed={draft.contextWindow.trim() === ""}
+                onClick={() => pickContextWindow("")} className={tierClass(draft.contextWindow.trim() === "")}>
+                自动
+              </button>
+              {CONTEXT_WINDOW_TIERS.map((tier) => (
+                <button key={tier.value} type="button" disabled={applying} aria-pressed={draftWindow === tier.value}
+                  onClick={() => pickContextWindow(String(tier.value))} className={tierClass(draftWindow === tier.value)}>
+                  {tier.label}
+                </button>
+              ))}
+            </div>
             <div className="mt-3 grid grid-cols-2 gap-3">
               <label className="block">
                 <span className="text-xs text-ink-600">温度 (0–2)</span>
@@ -404,7 +437,7 @@ export function Composer({
             </div>
             <p className="mt-2 text-[11px] leading-4 text-ink-400">
               模型、摘要模型与上下文窗口的切换会随会话保存；温度、迭代上限仅当前运行有效。迭代上限留空表示不限，由 token / 工具次数预算兜底。
-              上下文窗口决定压缩水位与工具按需加载阈值：小窗口模型或表里没有的私有模型可在这里填实际值，留空恢复按模型名查表。
+              上下文窗口决定压缩水位与工具按需加载阈值：点档位一键填入常用值，也可手填实际值，留空恢复按模型名查表。
               摘要模型用于历史压缩、跨会话长期记忆、会话命名与记忆提取，换小模型可省成本。
               思考程度在输入框右下角，按当前模型映射厂商参数，无法生效的组合自动跳过。
             </p>
