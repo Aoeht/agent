@@ -8,6 +8,7 @@ import { Agent } from "../src/core/agent";
 import { PlanStore } from "../src/core/plan_store";
 import { SessionStore } from "../src/core/session_store";
 import { TaskStore } from "../src/core/task_store";
+import { isProcessAlive, processStartedAt } from "../src/core/process_identity";
 import { verifyTask } from "../src/core/task_verifier";
 import { runOutcome } from "../src/core/run_outcome";
 import { ToolRegistry } from "../src/core/registry";
@@ -225,7 +226,32 @@ describe("durable tasks and recovery", () => {
     const result = await agent.run("继续");
     const observation = JSON.parse(result.steps[0]!.toolCalls[0]!.result);
     expect(observation.runs.map((run: any) => run.input)).toEqual(["要求0", "要求1"]);
-    expect(observation.totalRuns).toBe(4); expect(observation.nextOffset).toBe(2);
+    expect(observation.totalRuns).toBe(4); expect(observation.nextRunsOffset).toBe(2);
+    expect(observation.nextActionsOffset).toBeNull();
+  });
+  test("pid 被复用时按中断恢复，只有启动时间也对得上才拦住并发执行", async () => {
+    const root = await fixture(); const file = path.join(root, "task.sqlite");
+    const other = process.ppid;
+    const startedAt = isProcessAlive(other) ? processStartedAt(other) : undefined;
+    // 平台探测不可用时就只剩「pid 存活」判断，这里没有可验证的
+    if (startedAt === undefined) return;
+    new TaskStore(file).begin("原任务");
+    const seedOwner = (owner: { pid: number; token: string; processStartedAt?: number }) => {
+      const db = new Database(file);
+      const row = db.query("SELECT id, data FROM tasks ORDER BY seq DESC LIMIT 1").get() as { id: string; data: string };
+      db.query("UPDATE tasks SET data=? WHERE id=?").run(JSON.stringify({ ...JSON.parse(row.data), owner }), row.id);
+      db.close();
+    };
+
+    // 这个 pid 现在活着，但属于启动时间对不上的另一个进程：不能当成原执行器
+    seedOwner({ pid: other, token: "dead-executor", processStartedAt: startedAt - 3_600_000 });
+    const recovered = new TaskStore(file).current()!;
+    expect(recovered.owner).toBeUndefined();
+    expect(recovered.state).toBe("interrupted");
+
+    // 同一 pid 且启动时间一致：确实是仍在运行的另一个执行器，begin 必须拦住
+    seedOwner({ pid: other, token: "live-executor", processStartedAt: startedAt });
+    expect(() => new TaskStore(file).begin("插队")).toThrow("已由另一个执行器运行");
   });
   test("旧格式单行 JSON 文件自动迁移，动作与答案不丢", async () => {
     const root = await fixture(); const file = path.join(root, "task.sqlite");

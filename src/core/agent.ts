@@ -24,6 +24,7 @@ import { LONGTERM_FRESH_PROMPT, LONGTERM_MERGE_PROMPT } from "./summary_prompts"
 import { runOutcome, responseStopReason, isContentPolicyError, type RunOutcome, type StopReason } from "./run_outcome";
 import { isRetryableTransportError, retryDelayMs } from "./llm_retry";
 import { TaskStore } from "./task_store";
+import { readTaskStatePage } from "./task_paging";
 import { partitionToolCalls, mapWithConcurrency, raceWithToolTimeout, ToolTimeoutError } from "./tool_batch";
 import { AcceptanceCriteriaSchema, TASK_STATE_LABELS, type AcceptanceCriterion, type TaskRecord, type Verification } from "./task_types";
 import { validateAcceptancePaths, verifyTask } from "./task_verifier";
@@ -694,13 +695,7 @@ export class Agent {
           }
         };
       result = await this.runLoop(userMessage, { ...runtime, browserFailures: new Set<string>(),
-        readTaskState: (offset, limit) => {
-          const task = this.taskStore.current()!;
-          return { id: task.id, goal: task.goal, plan: task.plan, criteria: task.criteria, verification: task.verification,
-            runs: task.runs.slice(offset, offset + limit), actions: task.actions.slice(offset, offset + limit),
-            totalRuns: task.runs.length, totalActions: task.actions.length,
-            nextOffset: offset + limit < Math.max(task.runs.length, task.actions.length) ? offset + limit : null };
-        },
+        readTaskState: (request) => readTaskStatePage(this.taskStore.current()!, request),
         ...(runtime?.askUser ? { askUser: wrapHuman("input", runtime.askUser) } : {}),
         ...(runtime?.requestHuman ? { requestHuman: wrapHuman("approval", runtime.requestHuman) } : {}),
         setAcceptanceCriteria: async (criteria) => {

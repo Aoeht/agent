@@ -38,7 +38,8 @@ export const TaskSchema = z.object({
     startedAt: z.string(), endedAt: z.string().optional(), resultPreview: z.string().optional(),
     resolution: z.string().optional(),
   })),
-  owner: z.object({ pid: z.number(), token: z.string() }).optional(),
+  /** processStartedAt 用于识别 pid 复用：旧记录没有它时只能退回「pid 还活着」判断 */
+  owner: z.object({ pid: z.number(), token: z.string(), processStartedAt: z.number().optional() }).optional(),
   lastAnswer: z.string().nullable().optional(),
   stopReason: z.string().optional(),
 });

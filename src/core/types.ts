@@ -4,6 +4,7 @@ import type { BudgetExtensionRequest, BudgetStopReason } from "./run_budget";
 import type { Citation } from "./citations";
 import type { RunOutcome } from "./run_outcome";
 import type { AcceptanceCriterion, TaskRecord } from "./task_types";
+import type { TaskStatePageRequest } from "./task_paging";
 
 // 直接使用官方定义的类型
 // type Message = OpenAI.Chat.Completions.ChatCompletionMessageParam;
@@ -15,7 +16,7 @@ type ContentPart = OpenAI.Chat.Completions.ChatCompletionContentPart;
 export interface ToolRuntime {
   /** Host-bound task controller; tools cannot set their own verification result. */
   setAcceptanceCriteria?: (criteria: AcceptanceCriterion[]) => Promise<void>;
-  readTaskState?: (offset: number, limit: number) => unknown;
+  readTaskState?: (request: TaskStatePageRequest) => unknown;
   signal?: AbortSignal;
   /** 图片不经文本或 trace 传递；返回 false 表示未附加，调用方不可报告成功。 */
   emitImage?: (image: { dataUrl: string; label: string }) => boolean;

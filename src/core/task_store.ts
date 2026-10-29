@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { TaskSchema, type TaskRecord, type AcceptanceCriterion, type Verification } from "./task_types";
+import { isSameProcess, ownProcessStartedAt } from "./process_identity";
 import type { PlanStep } from "./plan_store";
 import type { RunOutcome } from "./run_outcome";
 
@@ -11,10 +12,6 @@ function argumentKey(raw: string): string {
   const sort = (value: unknown): unknown => Array.isArray(value) ? value.map(sort)
     : value !== null && typeof value === "object" ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, v]) => [key, sort(v)])) : value;
   try { return JSON.stringify(sort(JSON.parse(raw))); } catch { return raw; }
-}
-function alive(pid: number): boolean {
-  try { process.kill(pid, 0); return true; }
-  catch (error) { return (error as NodeJS.ErrnoException).code !== "ESRCH"; }
 }
 
 type TaskRow = { seq: number; id: string; data: string };
@@ -141,9 +138,15 @@ export class TaskStore {
     for (const id of loaded.actionRaw.keys()) if (!keptActions.has(id)) deleteAction.run(id);
   }
 
+  /** 属主是否仍由本进程（同一 token）或另一个仍在运行的执行器持有 */
+  private static ownerAlive(owner: NonNullable<TaskRecord["owner"]>): boolean {
+    if (owner.pid === process.pid) return TaskStore.activeOwners.has(owner.token);
+    return isSameProcess(owner.pid, owner.processStartedAt);
+  }
+
   private recover(task: TaskRecord | undefined): void {
     if (!task?.owner) return;
-    if (task.owner.pid === process.pid ? TaskStore.activeOwners.has(task.owner.token) : alive(task.owner.pid)) return;
+    if (TaskStore.ownerAlive(task.owner)) return;
     delete task.owner;
     task.state = "interrupted";
     task.stopReason = "process_interrupted";
@@ -187,7 +190,7 @@ export class TaskStore {
       }
       task.state = "running";
       task.updatedAt = now();
-      task.owner = { pid: process.pid, token: this.token };
+      task.owner = { pid: process.pid, token: this.token, processStartedAt: ownProcessStartedAt() };
       task.runs.push({ id: randomUUID(), input, startedAt: now() });
       return task;
     });
