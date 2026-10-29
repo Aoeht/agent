@@ -410,6 +410,7 @@ async function runRepl(
         agent,
         store,
         mcp,
+        resources: mcp,
         checkpoints,
         ask: (question) => lines.next(question),
         lastRunStats: () => lastStats,

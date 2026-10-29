@@ -51,6 +51,8 @@ bun run src/server/main.ts          # 默认 http://127.0.0.1:8787
 
 页头 **⏪ 检查点** 是 `/rewind` 的可视化入口：列出本会话每个回合开始前的工作区快照，选中后按"只恢复代码 / 只恢复对话 / 两者"回滚。回合进行中不能回滚；含对话的回滚会在下一轮生效，并让同会话的其它标签页自动重拉历史。
 
+页头 **🧩 MCP 目录** 浏览已挂载 MCP server 的资源和提示模板：选中资源看预览后"注入下一轮"（内容包在不可信围栏里只喂一轮），选模板填参数后"载入"。终端里等价命令是 `/resources [serverId]`、`/resource <serverId:name|uri>`、`/prompts`、`/prompt <serverId:name> [JSON]`。
+
 **团队**——多个子 Agent 并发干活，再独立复核：
 
 ```bash

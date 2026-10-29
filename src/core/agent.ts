@@ -372,6 +372,8 @@ export class Agent {
   private readonly backgroundAbort = new AbortController();
   /** 当前选定的提示模板；由 setPromptTemplate 换/清，不参与 config 的默认值合并 */
   private promptTemplate: PromptTemplateInjection | undefined;
+  /** /resource 选定的资源正文：一次性，下一轮注入后即清空（资源是资料，不该每轮重复烧 token） */
+  private pinnedResources: string | undefined;
   /**
    * 进程内显式切换过的模型（REPL 的 /model）。undefined 表示"没在本进程里切过"，
    * 此时 runLoop 会按会话记录恢复；显式切换优先于会话记录，也优先于配置默认值。
@@ -441,6 +443,15 @@ export class Agent {
    */
   setPromptTemplate(template: PromptTemplateInjection | undefined): void {
     this.promptTemplate = template;
+  }
+
+  /**
+   * 钉住一条 MCP 资源正文（REPL/Web 的 /resource 命令用）。
+   * 一次性语义：下一轮拼进消息后即清空——资源是外部资料，重复注入只烧 token，
+   * 需要再看一遍就再执行一次命令。undefined 表示清除（空 /resource）。
+   */
+  setPinnedResources(text: string | undefined): void {
+    this.pinnedResources = text;
   }
 
   /** 当前生效的主模型（含会话恢复与 /model 切换的结果） */
@@ -1974,9 +1985,12 @@ export class Agent {
   private injectedMessages(): Message[] {
     const injected: Message[] = [];
 
-    const untrusted = this.config.untrustedContext?.trim();
-    if (untrusted) {
-      injected.push({ role: "user", content: wrapUntrustedData("MCP resources", untrusted) });
+    const untrustedParts = [this.config.untrustedContext?.trim(), this.pinnedResources?.trim()]
+      .filter((part): part is string => Boolean(part));
+    // 一次性消费：本轮已拼进消息，下一轮不再重复注入
+    this.pinnedResources = undefined;
+    if (untrustedParts.length > 0) {
+      injected.push({ role: "user", content: wrapUntrustedData("MCP resources", untrustedParts.join("\n\n")) });
     }
 
     const template = this.promptTemplate;

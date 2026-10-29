@@ -4,6 +4,8 @@ import type {
   CheckpointListDTO,
   JobLogChunkDTO,
   JobSummaryDTO,
+  McpCatalogDTO,
+  McpResourceReadDTO,
   MessageSendResponse,
   ModelProbeStatusResponse,
   RewindResponse,
@@ -119,6 +121,15 @@ export class HttpTransport implements Transport {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ seq, scope }),
     })).json();
+  }
+
+  async listMcpCatalog(): Promise<McpCatalogDTO> {
+    return (await this.request("/mcp/catalog")).json();
+  }
+
+  async readMcpResource(serverId: string, uri: string): Promise<McpResourceReadDTO> {
+    const query = new URLSearchParams({ serverId, uri });
+    return (await this.request(`/mcp/resource?${query.toString()}`)).json();
   }
 
   subscribe(

@@ -13,7 +13,7 @@ import type { AgentResult, ToolDefinition, ToolRuntime } from "../core/types";
 import type { UiBridge } from "./bridge";
 import { runSessionStore } from "./run_context";
 import type { ServerRuntime } from "./runtime";
-import type { ServerEvent, SessionConfigEvent, SessionDetailDTO, SessionSummaryDTO, StatusDTO, Citation, ThinkingEffort, MessageSendResponse, CheckpointListDTO, RewindResponse, RewindScope } from "./protocol";
+import type { ServerEvent, SessionConfigEvent, SessionDetailDTO, SessionSummaryDTO, StatusDTO, Citation, ThinkingEffort, MessageSendResponse, CheckpointListDTO, RewindResponse, RewindScope, McpCatalogDTO, McpResourceReadDTO } from "./protocol";
 import { RunOutcomeSchema } from "./protocol";
 import { TaskStore } from "../core/task_store";
 import { formatBudgetExtensionPrompt } from "../core/budget_prompt";
@@ -86,6 +86,12 @@ interface QueuedMessage {
 const MAX_QUEUE_LENGTH = 8;
 /** 排队消息的图片总量上限：单条最多 20MiB 编码，8 条全带图会吃掉上百 MB 内存 */
 const MAX_QUEUED_IMAGE_ENCODED_BYTES = 40 * 1024 * 1024;
+/** 资源预览上限：面板只用来"看一眼"，全文注入走 /resource 的 8k 通道 */
+const MAX_RESOURCE_PREVIEW_CHARS = 20_000;
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 interface SessionEntry {
   initializing?: Promise<Agent> | undefined;
@@ -372,6 +378,64 @@ export class SessionManager {
     };
   }
 
+  /**
+   * MCP 目录（🧩 面板用）：资源 + 提示模板清单。
+   * 单项能力失败只降级成空清单并把原因放进 errors——与启动注入的容错口径一致，
+   * 一个坏 server 不该让另一半也看不了。
+   */
+  async mcpCatalog(): Promise<McpCatalogDTO> {
+    const mcp = this.options.runtime.mcp;
+    const errors: string[] = [];
+    const resources = await mcp.listResources().catch((error: unknown) => {
+      errors.push(`列出资源失败: ${errorText(error)}`);
+      return [];
+    });
+    const prompts = await mcp.listPrompts().catch((error: unknown) => {
+      errors.push(`列出模板失败: ${errorText(error)}`);
+      return [];
+    });
+    return {
+      resources: resources.map((resource) => ({
+        serverId: resource.serverId,
+        uri: resource.uri,
+        name: resource.name,
+        ...(resource.description !== undefined ? { description: resource.description } : {}),
+        ...(resource.mimeType !== undefined ? { mimeType: resource.mimeType } : {}),
+        ...(resource.size !== undefined ? { size: resource.size } : {}),
+      })),
+      prompts: prompts.map((prompt) => ({
+        serverId: prompt.serverId,
+        name: prompt.name,
+        ...(prompt.description !== undefined ? { description: prompt.description } : {}),
+        arguments: (prompt.arguments ?? []).map((arg) => ({
+          name: arg.name,
+          ...(arg.description !== undefined ? { description: arg.description } : {}),
+          ...(arg.required !== undefined ? { required: arg.required } : {}),
+        })),
+      })),
+      ...(errors.length > 0 ? { errors } : {}),
+    };
+  }
+
+  /**
+   * 读一条资源给面板预览：文本按 20k 字符截断，二进制只回字节数（不回传 base64）。
+   * 路径守卫沿用 McpClientManager.readResource（file:// 白名单 + 受保护路径黑名单）。
+   */
+  async readMcpResource(serverId: string, uri: string): Promise<McpResourceReadDTO> {
+    const contents = await this.options.runtime.mcp.readResource(serverId, uri);
+    return {
+      contents: contents.map((content) => ({
+        uri: content.uri,
+        ...(content.mimeType !== undefined ? { mimeType: content.mimeType } : {}),
+        ...("text" in content
+          ? content.text.length > MAX_RESOURCE_PREVIEW_CHARS
+            ? { text: content.text.slice(0, MAX_RESOURCE_PREVIEW_CHARS), truncated: true }
+            : { text: content.text }
+          : { blobBytes: Buffer.from(content.blob, "base64").byteLength }),
+      })),
+    };
+  }
+
   async status(): Promise<StatusDTO> {
     const { config, skills, sandbox, mcp } = this.options.runtime;
     return {
@@ -440,6 +504,7 @@ export class SessionManager {
         agent,
         store: entry.store,
         mcp: this.options.runtime.mcp,
+        resources: this.options.runtime.mcp,
         checkpoints: entry.checkpoints,
         isBusy: () => entry.controller !== undefined || entry.queue.length > 0,
         lastRunStats: () => entry.lastRunStats,

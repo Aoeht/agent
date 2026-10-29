@@ -5,6 +5,8 @@ import type {
   CheckpointSummaryDTO,
   JobLogChunkDTO,
   JobSummaryDTO,
+  McpCatalogDTO,
+  McpResourceReadDTO,
   ModelProbeStatusResponse,
   RewindResponse,
   RewindScope,
@@ -577,6 +579,57 @@ export class MockTransport implements Transport {
     }
     if (response.refresh === "history") this.emit(sessionId, { type: "history_rewound", seq, scope });
     return response;
+  }
+
+  async listMcpCatalog(): Promise<McpCatalogDTO> {
+    return {
+      resources: [
+        {
+          serverId: "local",
+          uri: "file:///docs/anti_fraud.md",
+          name: "anti_fraud.md",
+          mimeType: "text/markdown",
+          description: "反诈话术样本（演示资源）",
+          size: 2048,
+        },
+        {
+          serverId: "local",
+          uri: "file:///assets/logo.png",
+          name: "logo.png",
+          mimeType: "image/png",
+          description: "二进制资源（演示不可注入）",
+          size: 12_345,
+        },
+      ],
+      prompts: [
+        {
+          serverId: "local",
+          name: "review",
+          description: "审查一段文本并按风险分级",
+          arguments: [{ name: "text", description: "待审查的文本", required: true }],
+        },
+        {
+          serverId: "local",
+          name: "daily_brief",
+          description: "生成当日简报（无参数）",
+          arguments: [],
+        },
+      ],
+    };
+  }
+
+  async readMcpResource(serverId: string, uri: string): Promise<McpResourceReadDTO> {
+    if (serverId !== "local") throw new Error(`Server "${serverId}" 不存在或未声明 resources 能力`);
+    if (uri.endsWith(".png")) {
+      return { contents: [{ uri, mimeType: "image/png", blobBytes: 12_345 }] };
+    }
+    return {
+      contents: [{
+        uri,
+        mimeType: "text/markdown",
+        text: "# 反诈话术样本\n\n“您好，我是平台客服，您的账户存在异常……”\n\n（演示资源正文，真实后端会返回 server 给出的内容。）",
+      }],
+    };
   }
 
   subscribe(

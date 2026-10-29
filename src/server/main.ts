@@ -212,6 +212,27 @@ async function route(
       }
     }
 
+    // ---- MCP 目录：🧩 面板浏览（与 /resources /resource 命令同源） ----
+    // 目录是运行栈级数据（不属于某个会话），但沿用全局鉴权门禁
+    if (pathname === "/mcp/catalog" && method === "GET") {
+      return json(await sessions.mcpCatalog());
+    }
+
+    if (pathname === "/mcp/resource" && method === "GET") {
+      const serverId = url.searchParams.get("serverId")?.trim() ?? "";
+      const uri = url.searchParams.get("uri")?.trim() ?? "";
+      if (serverId === "" || uri === "") return json({ error: "serverId 与 uri 不能为空" }, 400);
+      try {
+        return json(await sessions.readMcpResource(serverId, uri));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        // 守卫拒绝（白名单外/受保护路径）是调用方给错了 uri，不是服务端故障
+        const status = message.includes("不存在") ? 404
+          : message.includes("Security Exception") ? 400 : 500;
+        return json({ error: message }, status);
+      }
+    }
+
     const eventsMatch = /^\/sessions\/([^/]+)\/events$/.exec(pathname);
     if (eventsMatch && method === "GET") {
       return sseResponse(req, decodeURIComponent(eventsMatch[1]!), sessions);

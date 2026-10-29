@@ -4,6 +4,8 @@ import type {
   CheckpointListDTO,
   JobLogChunkDTO,
   JobSummaryDTO,
+  McpCatalogDTO,
+  McpResourceReadDTO,
   MessageSendResponse,
   ModelProbeStatusResponse,
   RewindResponse,
@@ -66,6 +68,10 @@ export interface Transport {
   listCheckpoints(sessionId: string): Promise<CheckpointListDTO>;
   /** 回滚到某个检查点；含对话时服务端会广播 history_rewound，本端按 refresh 重拉历史 */
   rewindCheckpoint(sessionId: string, seq: number, scope: RewindScope): Promise<RewindResponse>;
+  /** MCP 目录：资源 + 提示模板清单（🧩 面板用；单侧失败只降级为空数组） */
+  listMcpCatalog(): Promise<McpCatalogDTO>;
+  /** 读一条资源给面板预览（文本超长截断，二进制只回字节数） */
+  readMcpResource(serverId: string, uri: string): Promise<McpResourceReadDTO>;
   /** 订阅事件流。返回退订函数；连接状态变化经 onStatus 上报 */
   subscribe(
     sessionId: string,

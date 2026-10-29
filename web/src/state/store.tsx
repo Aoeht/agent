@@ -13,6 +13,8 @@ import type {
   ApprovalDecisionBody,
   CheckpointListDTO,
   JobSummaryDTO,
+  McpCatalogDTO,
+  McpResourceReadDTO,
   ModelProbeStatus,
   PlanStep,
   RewindResponse,
@@ -638,6 +640,10 @@ export interface Store {
     listCheckpoints(sessionId: string): Promise<CheckpointListDTO>;
     /** 回滚到某个检查点；含对话时重拉历史（其它标签页由 SSE history_rewound 触发同样动作） */
     rewindCheckpoint(seq: number, scope: RewindScope): Promise<RewindResponse>;
+    /** MCP 目录清单（🧩 面板打开时拉取） */
+    listMcpCatalog(): Promise<McpCatalogDTO>;
+    /** 读一条 MCP 资源给面板预览 */
+    readMcpResource(serverId: string, uri: string): Promise<McpResourceReadDTO>;
   };
 }
 
@@ -954,6 +960,12 @@ export function StoreProvider({
           dispatch({ type: "command_result", id, text: `/rewind ${seq} c`, lines: result.lines });
         }
         return result;
+      },
+      async listMcpCatalog() {
+        return resolvedTransport.listMcpCatalog();
+      },
+      async readMcpResource(serverId, uri) {
+        return resolvedTransport.readMcpResource(serverId, uri);
       },
     };
   }, [resolvedTransport]);

@@ -18,6 +18,8 @@
  *   GET    /sessions/:id/tasks        → TaskRecord[]（独立任务历史）
  *   GET    /sessions/:id/checkpoints  → CheckpointListDTO（回合级检查点，最新在前）
  *   POST   /sessions/:id/checkpoints/rewind body { seq, scope } → RewindResponse；回合中 409
+ *   GET    /mcp/catalog               → McpCatalogDTO（资源 + 提示模板清单，🧩 面板用）
+ *   GET    /mcp/resource?serverId=&uri= → McpResourceReadDTO（正文预览，超长截断）
  *   POST   /sessions/:id/messages     body { text, images? } → 202；忙时 409 { error }
  *   POST   /sessions/:id/cancel       → 204
  *   GET    /jobs                      → { jobs: JobSummaryDTO[] }（最近 50 条，按开始时间倒序）
@@ -404,6 +406,51 @@ export interface RewindResponse {
   lines: string[];
   /** "history" = 会话文件被改写，前端应重拉历史与 session 详情 */
   refresh?: "history";
+}
+
+// ---------- MCP 目录（GET /mcp/catalog、GET /mcp/resource） ----------
+
+/** 面板列表用的一条资源摘要（不含正文；正文按需读，见 McpResourceReadDTO） */
+export interface McpResourceSummaryDTO {
+  serverId: string;
+  uri: string;
+  name: string;
+  description?: string;
+  mimeType?: string;
+  size?: number;
+}
+
+export interface McpPromptArgumentDTO {
+  name: string;
+  description?: string;
+  required?: boolean;
+}
+
+export interface McpPromptSummaryDTO {
+  serverId: string;
+  name: string;
+  description?: string;
+  arguments: McpPromptArgumentDTO[];
+}
+
+/** 资源与模板清单；单侧列取失败只降级为空数组，原因进 errors 供面板提示 */
+export interface McpCatalogDTO {
+  resources: McpResourceSummaryDTO[];
+  prompts: McpPromptSummaryDTO[];
+  errors?: string[];
+}
+
+/** 一条资源内容：文本（超 20k 截断）或二进制字节数，二选一 */
+export interface McpResourceContentDTO {
+  uri: string;
+  mimeType?: string;
+  text?: string;
+  truncated?: boolean;
+  blobBytes?: number;
+}
+
+export interface McpResourceReadDTO {
+  contents: McpResourceContentDTO[];
 }
 
 // ---------- 后台脚本任务（GET /jobs） ----------

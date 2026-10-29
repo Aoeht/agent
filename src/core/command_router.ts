@@ -25,6 +25,7 @@ import {
   toTemplateInjection,
   type PromptSource,
 } from "../prompts/commands";
+import { handleResourceCommand, isResourceCommand, type ResourceSource } from "../mcp/resource_commands";
 
 /** /tokens 展示的上一回合用量摘要（调用方从 AgentResult/run_end 里摘） */
 export interface RunStatsSummary {
@@ -41,6 +42,8 @@ export interface CommandRouterDeps {
   store: SessionStore;
   /** 提示模板来源（McpClientManager 天然满足该接口） */
   mcp: PromptSource;
+  /** 资源来源（通常与 mcp 是同一个 McpClientManager；不传则 /resources 提示未接入） */
+  resources?: ResourceSource | undefined;
   /** 检查点未启用（AGENT_CHECKPOINTS=0 或初始化失败）时为 undefined */
   checkpoints?: CheckpointStore | undefined;
   /** REPL 交互通道（裸 /rewind 两步问答用）；Web 不传 → 只列清单并提示序号式用法 */
@@ -69,6 +72,8 @@ const HELP_LINES = [
   "  /model [名称]           查看/切换模型（写入本会话，续聊自动恢复）",
   "  /prompts                列出 MCP 提示模板",
   "  /prompt <serverId:name> [JSON参数]   选用模板；空 /prompt 清除",
+  "  /resources [serverId]   列出 MCP 资源",
+  "  /resource <serverId:name|uri>   读取资源并钉到下一轮（不可信资料）；空 /resource 清除",
   "  /rewind [编号] [c|t|a]  列出/回滚检查点（c=只代码 t=只对话 a=全部，缺省 a）",
   "  /task [status]          查看当前任务",
   "  /task new <目标>         开始独立任务",
@@ -149,6 +154,31 @@ export async function handleSlashCommand(text: string, deps: CommandRouterDeps):
         return { kind: "handled", lines };
       }
       // 形如 /promptfoo 的未知斜杠命令：落到底部统一提示
+    }
+
+    // /resources 列表只读随时可用；/resource 钉住/清除虽只改内存字段，
+    // 忙时也拒绝——否则正在跑的回合会把"下一轮"提前消费成"这一轮"
+    if (isResourceCommand(input)) {
+      const readOnly = input === "/resources" || input.startsWith("/resources ");
+      if (deps.isBusy?.() && !readOnly) {
+        return { kind: "handled", lines: ["⏳ 回合进行中，结束后再读取资源。"] };
+      }
+      if (!deps.resources) {
+        return { kind: "handled", lines: ["（本环境未接入 MCP 资源来源）"] };
+      }
+      const resourceResult = await handleResourceCommand(input, deps.resources, collect);
+      if (resourceResult.kind === "inject") {
+        deps.agent.setPinnedResources(resourceResult.text);
+        lines.push(`📎 已钉住资源 ${resourceResult.label}`);
+        lines.push(`   下一轮作为不可信参考资料注入（${resourceResult.chars} 字符），输入 /resource 清除。`);
+        lines.push(`   预览：${resourceResult.preview}`);
+        return { kind: "handled", lines };
+      }
+      if (resourceResult.kind === "handled") {
+        // 空 /resource 是"清除"：立即同步，避免紧接着那一轮还带着旧资源
+        if (input === "/resource") deps.agent.setPinnedResources(undefined);
+        return { kind: "handled", lines };
+      }
     }
 
     // /rewind：变更操作（截断会话文件 + 覆写工作区），忙时绝对拒绝
