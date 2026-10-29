@@ -33,6 +33,7 @@ import { JobStore } from "./core/job_store";
 import { createReadImageTool } from "./tools/read_image";
 import { createToolSearchTool } from "./core/tool_search";
 import { createDelegateTaskTool } from "./tools/delegate_task";
+import { createTeamTaskTool } from "./tools/team_task";
 import { resolveScriptSandbox, ScriptSandboxResolution } from "./tools/sandbox_docker";
 import { loadSkills, SkillManifest } from "./skills/loader";
 import { McpAdapter } from "./mcp/adapter";
@@ -114,9 +115,13 @@ export function registerSessionTools(
       visionCapable?: boolean;
       /** 子代理委派总开关（AGENT_DELEGATE 解析结果）：false 时不注册 delegate_task */
       delegateEnabled?: boolean;
+      /** 主对话内重 DAG 团队开关（AGENT_TEAM_TOOL 解析结果）：false 时不注册 team_task */
+      teamToolEnabled?: boolean;
     };
     /** 委派子代理的轨迹目录；缺省 .agent-sessions/delegates */
     delegateTraceDir?: string;
+    /** 团队运行目录；缺省 .agent-sessions/teams（Web 传会话目录，随会话一起可查） */
+    teamDir?: string;
     /** 跨会话记忆仓；传入才注册 memory 工具（与 Agent 注入共用同一实例） */
     memoryStore?: MemoryStore;
     /**
@@ -169,6 +174,16 @@ export function registerSessionTools(
       sandboxRoot,
       ...(options.delegateTraceDir ? { traceDir: options.delegateTraceDir } : {}),
     }));
+    // 重 DAG 团队：同一套只读白名单，但由协调者拆解、并发执行、独立复核与定向补查；
+    // 与委派共用 AGENT_DELEGATE 这一信任基准，另外可用 AGENT_TEAM_TOOL=off 单独关闭
+    if (options.config.teamToolEnabled !== false) {
+      registry.register(createTeamTaskTool({
+        sourceRegistry: registry,
+        config: options.config,
+        sandboxRoot,
+        ...(options.teamDir ? { teamDir: options.teamDir } : {}),
+      }));
+    }
   }
   // 沙箱脚本执行器：技能脚本（load_skill 物化到 .skills/）与模型自写脚本共用的唯一执行面；
   // 执行后端由 AGENT_SANDBOX 解析结果决定（宿主机进程或一次性容器），
@@ -277,6 +292,11 @@ export async function createAgentStack(options: AgentStackOptions = {}): Promise
   );
   console.log(
     `🤝 ${prefix}子代理委派: ${config.delegateEnabled ? "已启用（delegate_task）" : "已关闭（AGENT_DELEGATE）"}`
+  );
+  console.log(
+    `🧭 ${prefix}重 DAG 团队: ${
+      config.delegateEnabled && config.teamToolEnabled ? "已启用（team_task）" : "已关闭"
+    }`
   );
   // 后台任务仓：目录先建好；run_script 的 background 分支与 job_output 共用同一个根，
   // 关停时统一 killAll（后台进程是 agent 的子进程，不能留成没人管的孤儿）

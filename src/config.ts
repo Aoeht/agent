@@ -30,6 +30,8 @@
  *                                  切换后每轮只暴露第一方工具 + tool_search + 已激活的 MCP 工具
  *   AGENT_DELEGATE                 主对话内子 Agent 委派工具 delegate_task，"0"/"false"/"off"/"no"
  *                                  关闭（默认开启）；关闭后不注册该工具，scanner 委派随之不可用
+ *   AGENT_TEAM_TOOL                主对话内重 DAG 团队工具 team_task，同上关闭（默认开启）；
+ *                                  仅在 AGENT_DELEGATE 开启时生效
  *   AGENT_CHECKPOINTS              是否开启回合级回滚检查点（/rewind），"0"/"false" 关闭（默认开启）
  *   AGENT_TOOL_CONCURRENCY         同批 parallelSafe 工具调用的并发上限（默认 4；非安全工具不进并发池）
  *   AGENT_TOOL_TIMEOUT_MS          单次工具执行死线兜底（毫秒，默认 0=关；超时转 error observation，run 继续）
@@ -81,6 +83,8 @@ export interface AgentRunConfig {
   toolSearch: "auto" | "on" | "off";
   /** 主对话内子 Agent 委派（delegate_task）：false 时整体不注册该工具 */
   delegateEnabled: boolean;
+  /** 主对话内重 DAG 团队（team_task）：与 delegateEnabled 同时为真才注册 */
+  teamToolEnabled: boolean;
   /** 同批 parallelSafe 工具调用的并发上限（信号量宽度），≥1；默认 4 */
   toolConcurrencyLimit: number;
   /** 单次工具执行死线兜底（毫秒），0 = 关；只对未声明自有 timeoutMs 的工具生效 */
@@ -147,6 +151,7 @@ export function loadAgentConfig(): AgentRunConfig {
     thinkingEffort: parseThinkingEffort(process.env.AGENT_THINKING_EFFORT),
     toolSearch: toolSearchRaw === "on" || toolSearchRaw === "off" ? toolSearchRaw : "auto",
     delegateEnabled: boolEnv("AGENT_DELEGATE", true),
+    teamToolEnabled: boolEnv("AGENT_TEAM_TOOL", true),
     // 并发上限至少 1：0/负数没有意义，落回 1（等价于串行）
     toolConcurrencyLimit: Math.max(1, intEnv("AGENT_TOOL_CONCURRENCY", 4)),
     toolTimeoutMs: Math.max(0, intEnv("AGENT_TOOL_TIMEOUT_MS", 0)),

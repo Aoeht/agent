@@ -104,6 +104,7 @@ REPL 与 Web 共用同一套斜杠命令：`/help` `/model` `/prompts` `/prompt`
 | `AGENT_MEMORY_DIR` | `.agent-memory` | 跨会话记忆目录 |
 | `AGENT_TRACE_DIR` | `.traces` | 运行轨迹目录 |
 | `AGENT_JOB_DIR` | `.agent-data/jobs` | 后台脚本任务目录（任务 JSON + stdout/stderr 日志） |
+| `AGENT_DELEGATE` / `AGENT_TEAM_TOOL` | `on` / `on` | 主对话内子代理：`delegate_task` 与重 DAG `team_task`，可分别关闭 |
 | `AGENT_UI_PORT` / `AGENT_UI_TOKEN` | `8787` / — | Web 服务器端口与访问口令 |
 | `EMBEDDING_BASE_URL` / `EMBEDDING_API_KEY` / `EMBEDDING_MODEL` | — | 向量检索；不配则只用关键词召回 |
 

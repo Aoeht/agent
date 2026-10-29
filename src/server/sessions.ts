@@ -579,6 +579,8 @@ export class SessionManager {
       jobs,
       // 委派子代理的轨迹落在本会话目录下，随会话一起可查
       delegateTraceDir: path.join(entry.store.dir, "delegates"),
+      // 团队运行的 events.jsonl/result.json 同样落在本会话目录下
+      teamDir: path.join(entry.store.dir, "teams"),
     });
     copyMcpTools(sharedRegistry, registry);
 

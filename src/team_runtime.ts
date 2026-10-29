@@ -1,6 +1,5 @@
 import path from "node:path";
 import type OpenAI from "openai";
-import type { AgentStack } from "./bootstrap";
 import { Agent } from "./core/agent";
 import { ToolRegistry } from "./core/registry";
 import { PlanStore } from "./core/plan_store";
@@ -60,7 +59,26 @@ export function createScannerRegistry(source: ToolRegistry, planStore: PlanStore
   return registry;
 }
 
-export function createTeamChildFactory(stack: AgentStack, options: {
+/**
+ * 团队子代理只需要这几样东西：只读白名单的拷贝来源、工作区、模型参数与不可信上下文。
+ * 独立 CLI（AgentStack）与主对话内的 team_task（会话注册表 + 配置）都按这个结构传入，
+ * 避免工具层为了复用工厂而拼出一个假的 AgentStack。
+ */
+export interface TeamChildStack {
+  registry: ToolRegistry;
+  sandboxRoot: string;
+  config: {
+    model: string;
+    summaryModel: string;
+    temperature: number;
+    maxIterations: number;
+    visionCapable: boolean;
+    contextWindow?: number;
+  };
+  untrustedContext?: string;
+}
+
+export function createTeamChildFactory(stack: TeamChildStack, options: {
   client: OpenAI;
   runDirectory?: string;
   /** 独立复核（含其格式修复）使用的模型；缺省与工作任务相同。配置不同模型可获得跨模型独立性。 */
