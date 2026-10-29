@@ -1,9 +1,13 @@
 // web/src/lib/mock.ts
 import type {
   ApprovalDecisionBody,
+  CheckpointListDTO,
+  CheckpointSummaryDTO,
   JobLogChunkDTO,
   JobSummaryDTO,
   ModelProbeStatusResponse,
+  RewindResponse,
+  RewindScope,
   ServerEvent,
   SessionDetailDTO,
   SessionSummaryDTO,
@@ -380,6 +384,8 @@ export class MockTransport implements Transport {
   private configRevision = Date.now();
   private disabledTools = new Map<string, Set<string>>();
   private sandboxRoot = "A:/ai_agent/.mcp-sandbox（演示）";
+  /** 演示用检查点：按历史里的 user 消息生成（消息下标即 seq 边界） */
+  private checkpoints = new Map<string, CheckpointSummaryDTO[]>();
 
   constructor() {
     this.sessions = fixtureSessions();
@@ -523,6 +529,54 @@ export class MockTransport implements Transport {
 
   async killJob(_jobId: string): Promise<void> {
     // 演示环境没有真实进程
+  }
+
+  private checkpointsFor(sessionId: string): CheckpointSummaryDTO[] {
+    const cached = this.checkpoints.get(sessionId);
+    if (cached !== undefined) return cached;
+    const found = this.sessions.find((s) => s.summary.sessionId === sessionId);
+    const base = Date.now() - 90 * 60_000;
+    const list = (found?.messages ?? []).flatMap((message, index): CheckpointSummaryDTO[] =>
+      message.role === "user"
+        ? [{
+            seq: index + 1,
+            time: new Date(base + index * 7 * 60_000).toISOString(),
+            input: message.content,
+            records: index,
+          }]
+        : []);
+    this.checkpoints.set(sessionId, list);
+    return list;
+  }
+
+  async listCheckpoints(sessionId: string): Promise<CheckpointListDTO> {
+    // 最新在前（与服务端列表一致）
+    return { enabled: true, checkpoints: [...this.checkpointsFor(sessionId)].reverse() };
+  }
+
+  async rewindCheckpoint(sessionId: string, seq: number, scope: RewindScope): Promise<RewindResponse> {
+    if (this.runs.has(sessionId)) throw new Error("回合进行中，结束后再回滚");
+    const picked = this.checkpointsFor(sessionId).find((info) => info.seq === seq);
+    if (picked === undefined) throw new Error(`检查点 #${seq} 不存在（可能已被裁剪）`);
+    const lines: string[] = [];
+    const response: RewindResponse = { ok: true, seq, scope, lines };
+    if (scope !== "chat") {
+      response.restored = 3;
+      response.deleted = 1;
+      lines.push(`⏪ 已恢复工作区：写回 3 个文件，删除 1 个该时点之后新增的文件。`);
+    }
+    if (scope !== "code") {
+      const found = this.sessions.find((s) => s.summary.sessionId === sessionId);
+      if (found !== undefined) {
+        found.messages = found.messages.slice(0, picked.records);
+        found.summary = { ...found.summary, messageCount: found.messages.length };
+      }
+      response.records = picked.records;
+      response.refresh = "history";
+      lines.push(`⏪ 已恢复对话：会话历史截断到第 ${seq} 号检查点的边界（${picked.records} 条记录），下轮生效。`);
+    }
+    if (response.refresh === "history") this.emit(sessionId, { type: "history_rewound", seq, scope });
+    return response;
   }
 
   subscribe(

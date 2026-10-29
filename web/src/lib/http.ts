@@ -1,10 +1,13 @@
 // web/src/lib/http.ts
 import type {
   ApprovalDecisionBody,
+  CheckpointListDTO,
   JobLogChunkDTO,
   JobSummaryDTO,
   MessageSendResponse,
   ModelProbeStatusResponse,
+  RewindResponse,
+  RewindScope,
   ServerEvent,
   SessionConfigEvent,
   SessionDetailDTO,
@@ -104,6 +107,18 @@ export class HttpTransport implements Transport {
 
   async killJob(jobId: string): Promise<void> {
     await this.request(`/jobs/${encodeURIComponent(jobId)}/kill`, { method: "POST" });
+  }
+
+  async listCheckpoints(sessionId: string): Promise<CheckpointListDTO> {
+    return (await this.request(`/sessions/${encodeURIComponent(sessionId)}/checkpoints`)).json();
+  }
+
+  async rewindCheckpoint(sessionId: string, seq: number, scope: RewindScope): Promise<RewindResponse> {
+    return (await this.request(`/sessions/${encodeURIComponent(sessionId)}/checkpoints/rewind`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ seq, scope }),
+    })).json();
   }
 
   subscribe(

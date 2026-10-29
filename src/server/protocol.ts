@@ -16,6 +16,8 @@
  *   POST   /sessions                  → SessionSummaryDTO（新建）
  *   GET    /sessions/:id/history      → SessionDetailDTO（摘要 + 历史）
  *   GET    /sessions/:id/tasks        → TaskRecord[]（独立任务历史）
+ *   GET    /sessions/:id/checkpoints  → CheckpointListDTO（回合级检查点，最新在前）
+ *   POST   /sessions/:id/checkpoints/rewind body { seq, scope } → RewindResponse；回合中 409
  *   POST   /sessions/:id/messages     body { text, images? } → 202；忙时 409 { error }
  *   POST   /sessions/:id/cancel       → 204
  *   GET    /jobs                      → { jobs: JobSummaryDTO[] }（最近 50 条，按开始时间倒序）
@@ -258,6 +260,15 @@ export const ServerEventSchema = z.discriminatedUnion("type", [
    * 无载荷：前端收到后重新 GET /sessions/:id/tools 刷新开关面板。
    */
   z.object({ type: z.literal("tools_changed") }),
+  /**
+   * 会话被回滚到某个检查点（检查点面板回滚对话/全部时发）：
+   * 其他标签页收到后重拉历史，避免显示已被截断的旧消息。
+   */
+  z.object({
+    type: z.literal("history_rewound"),
+    seq: z.number().int().positive(),
+    scope: z.enum(["code", "chat", "all"]),
+  }),
   z.object({ type: z.literal("error"), message: z.string() }),
 ]);
 
@@ -351,6 +362,48 @@ export interface StatusDTO {
   promptHash?: string;
   skills: string[];
   mcpServers: Array<{ id: string; ok: boolean; tools?: number }>;
+}
+
+// ---------- 回合级检查点（GET /sessions/:id/checkpoints） ----------
+
+/** 回滚范围：code=只恢复工作区文件，chat=只截断对话，all=两者都做（与 /rewind 的 c/t/a 对齐） */
+export const RewindScopeSchema = z.enum(["code", "chat", "all"]);
+export type RewindScope = z.infer<typeof RewindScopeSchema>;
+
+/**
+ * 一个回合级检查点：seq 是影子仓库的 ref 序号（稳定标识，删旧后仍可比对），
+ * records 是快照边界处的会话记录数——回滚对话即截断到该条数。
+ */
+export interface CheckpointSummaryDTO {
+  seq: number;
+  /** ISO 8601 */
+  time: string;
+  /** 该回合的用户输入（列表标题） */
+  input: string;
+  records: number;
+}
+
+export interface CheckpointListDTO {
+  /** AGENT_CHECKPOINTS=0 时为 false：面板据此显示"已关闭"而不是空列表 */
+  enabled: boolean;
+  /** 最新在前 */
+  checkpoints: CheckpointSummaryDTO[];
+}
+
+/** POST /sessions/:id/checkpoints/rewind 的响应：lines 为与 REPL 同口径的执行输出 */
+export interface RewindResponse {
+  ok: true;
+  seq: number;
+  scope: RewindScope;
+  /** 恢复的文件数（scope 含 code 才有） */
+  restored?: number;
+  /** 删除的新增文件数（scope 含 code 才有） */
+  deleted?: number;
+  /** 截断后的会话记录数（scope 含 chat 才有） */
+  records?: number;
+  lines: string[];
+  /** "history" = 会话文件被改写，前端应重拉历史与 session 详情 */
+  refresh?: "history";
 }
 
 // ---------- 后台脚本任务（GET /jobs） ----------

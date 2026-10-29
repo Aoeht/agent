@@ -186,6 +186,32 @@ async function route(
       return json(sessions.tasks(decodeURIComponent(tasksMatch[1]!)));
     }
 
+    // ---- 回合级检查点：面板列表 / 回滚（与 /rewind 同一段执行逻辑） ----
+    const checkpointsMatch = /^\/sessions\/([^/]+)\/checkpoints$/.exec(pathname);
+    if (checkpointsMatch && method === "GET") {
+      return json(await sessions.listCheckpoints(decodeURIComponent(checkpointsMatch[1]!)));
+    }
+
+    const rewindMatch = /^\/sessions\/([^/]+)\/checkpoints\/rewind$/.exec(pathname);
+    if (rewindMatch && method === "POST") {
+      const body = await readJson(req);
+      const seq = typeof body.seq === "number" ? body.seq : Number.NaN;
+      const scope = body.scope;
+      if (!Number.isInteger(seq) || seq <= 0) return json({ error: "seq 必须是正整数" }, 400);
+      if (scope !== "code" && scope !== "chat" && scope !== "all") {
+        return json({ error: "scope 必须是 code / chat / all" }, 400);
+      }
+      try {
+        return json(await sessions.rewindCheckpoint(decodeURIComponent(rewindMatch[1]!), seq, scope));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const status = message.includes("回合") ? 409
+          : message.includes("不存在") ? 404
+            : message.includes("未启用") ? 400 : 500;
+        return json({ error: message }, status);
+      }
+    }
+
     const eventsMatch = /^\/sessions\/([^/]+)\/events$/.exec(pathname);
     if (eventsMatch && method === "GET") {
       return sseResponse(req, decodeURIComponent(eventsMatch[1]!), sessions);

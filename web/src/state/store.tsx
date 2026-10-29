@@ -11,9 +11,12 @@ import {
 } from "react";
 import type {
   ApprovalDecisionBody,
+  CheckpointListDTO,
   JobSummaryDTO,
   ModelProbeStatus,
   PlanStep,
+  RewindResponse,
+  RewindScope,
   ServerEvent,
   SessionDetailDTO,
   SessionSummaryDTO,
@@ -259,6 +262,9 @@ export function applyEvent(s: SessionUIState, e: ServerEvent): SessionUIState {
       return { ...s, queue: e.items };
     case "tools_changed":
       // 无载荷信号：订阅回调里直接重拉 listTools，这里无需迁移状态
+      return s;
+    case "history_rewound":
+      // 会话被回滚：历史由订阅回调重拉（这里不拼 items，避免与 history_reloaded 打架）
       return s;
     case "token": {
       const items = [...s.items];
@@ -628,6 +634,10 @@ export interface Store {
     killJob(id: string): Promise<void>;
     /** 后台任务日志增量（面板自己持有文本状态，不进全局 store） */
     readJobLog(jobId: string, stream: "stdout" | "stderr", after?: number): Promise<import("@protocol").JobLogChunkDTO>;
+    /** 检查点清单（面板打开/回滚后刷新；enabled=false 表示服务端关了 AGENT_CHECKPOINTS） */
+    listCheckpoints(sessionId: string): Promise<CheckpointListDTO>;
+    /** 回滚到某个检查点；含对话时重拉历史（其它标签页由 SSE history_rewound 触发同样动作） */
+    rewindCheckpoint(seq: number, scope: RewindScope): Promise<RewindResponse>;
   };
 }
 
@@ -757,6 +767,13 @@ export function StoreProvider({
         return;
       }
       if (event.type === "run_end") refreshModelStatus();
+      // 检查点回滚改写了会话文件（本端或其它标签页触发）：重拉历史，别继续显示已截断的消息
+      if (event.type === "history_rewound") {
+        void resolvedTransport.openSession(currentId).then((detail) => {
+          if (alive) dispatch({ type: "history_reloaded", id: currentId, detail });
+        }).catch(() => {});
+        return;
+      }
       dispatch({ type: "event", id: currentId, event });
     });
     return () => {
@@ -915,6 +932,28 @@ export function StoreProvider({
       },
       async readJobLog(jobId, stream, after) {
         return resolvedTransport.readJobLog(jobId, stream, after);
+      },
+      async listCheckpoints(sessionId) {
+        return resolvedTransport.listCheckpoints(sessionId);
+      },
+      async rewindCheckpoint(seq, scope) {
+        const id = stateRef.current.currentId;
+        if (!id) throw new Error("未选择会话");
+        const result = await resolvedTransport.rewindCheckpoint(id, seq, scope);
+        if (result.refresh === "history") {
+          try {
+            const detail = await resolvedTransport.openSession(id);
+            dispatch({ type: "history_reloaded", id, detail });
+          } catch {
+            // 重拉失败保留现状；回滚本身已经成功
+          }
+        }
+        // 只回滚代码时在对话流里留一条与 /rewind 同口径的命令卡（回滚对话会重拉历史，
+        // 命令卡会被历史快照覆盖，所以那时不补）
+        if (scope === "code") {
+          dispatch({ type: "command_result", id, text: `/rewind ${seq} c`, lines: result.lines });
+        }
+        return result;
       },
     };
   }, [resolvedTransport]);

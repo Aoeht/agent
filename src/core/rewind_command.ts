@@ -40,6 +40,20 @@ export interface RewindCommandResult {
   executed?: boolean;
 }
 
+/** 恢复范围：代码 / 对话 / 两者（CLI 的 c/t/a 与此一一对应） */
+export type RewindScope = "code" | "chat" | "all";
+
+/** 执行结果（结构化，供命令输出与 Web 面板接口共用） */
+export interface RewindExecution {
+  ok: boolean;
+  /** 写回的文件数（scope 含代码时） */
+  restored?: number;
+  /** 删除的多余文件数（scope 含代码时） */
+  deleted?: number;
+  /** 截断后的会话记录条数（scope 含对话时） */
+  records?: number;
+}
+
 export function isRewindCommand(input: string): boolean {
   const normalized = input.trim().toLowerCase();
   return (
@@ -93,9 +107,8 @@ export async function handleRewindCommand(input: string, deps: RewindDeps): Prom
       out(`❌ 编号超出范围（1-${shown.length}），未执行。`);
       return { consumed: true };
     }
-    const scope = argsMatch[2] ?? "a";
-    const executed = await executeRewind(picked, scope, deps, out);
-    return { consumed: true, ...(executed ? { executed: true } : {}) };
+    const executed = await executeRewind(picked, toScope(argsMatch[2] ?? "a"), deps, out);
+    return { consumed: true, ...(executed.ok ? { executed: true } : {}) };
   }
   if (rest !== "") {
     out(`❌ 用法: /rewind <编号> [c|t|a]（c=只代码 t=只对话 a=全部，缺省 a）`);
@@ -121,8 +134,12 @@ export async function handleRewindCommand(input: string, deps: RewindDeps): Prom
     out("未知的恢复范围，已取消。");
     return { consumed: true };
   }
-  const executed = await executeRewind(picked, scopeAnswer, deps, out);
-  return { consumed: true, ...(executed ? { executed: true } : {}) };
+  const executed = await executeRewind(picked, toScope(scopeAnswer), deps, out);
+  return { consumed: true, ...(executed.ok ? { executed: true } : {}) };
+}
+
+function toScope(code: string): RewindScope {
+  return code === "c" ? "code" : code === "t" ? "chat" : "all";
 }
 
 function printCheckpointList(
@@ -137,28 +154,69 @@ function printCheckpointList(
   if (total > shown.length) out(`  …（其余 ${total - shown.length} 个未显示）`);
 }
 
-/** 执行恢复；成功返回 true（调用方据此决定是否刷新历史显示） */
+/**
+ * 按序号回滚（Web 面板用）：序号是检查点的稳定标识，不随列表分页/排序变化。
+ * 与聊天里的 /rewind <编号> 共用同一段执行逻辑，语义完全一致。
+ */
+export async function rewindToCheckpoint(
+  seq: number,
+  scope: RewindScope,
+  deps: RewindDeps,
+  out: (line: string) => void = () => undefined
+): Promise<RewindExecution> {
+  const checkpoints = deps.checkpoints;
+  if (checkpoints === undefined) {
+    out("⚠️ 检查点未启用（AGENT_CHECKPOINTS=0 关闭了它），/rewind 不可用。");
+    return { ok: false };
+  }
+  let infos: Awaited<ReturnType<CheckpointStore["list"]>>;
+  try {
+    infos = await checkpoints.list();
+  } catch (error) {
+    out(`⚠️ 读取检查点失败: ${error instanceof Error ? error.message : error}`);
+    return { ok: false };
+  }
+  const picked = infos.find((info) => info.seq === seq);
+  if (picked === undefined) {
+    out(`❌ 检查点 #${seq} 不存在（可能已被裁剪）。`);
+    return { ok: false };
+  }
+  return executeRewind(picked, scope, deps, out);
+}
+
+/** 执行恢复；ok=false 时失败原因已写进 out */
 async function executeRewind(
   picked: Awaited<ReturnType<CheckpointStore["list"]>>[number],
-  scope: string,
+  scope: RewindScope,
   deps: RewindDeps,
   out: (line: string) => void
-): Promise<boolean> {
+): Promise<RewindExecution> {
   const checkpoints = deps.checkpoints;
-  if (checkpoints === undefined) return false;
+  if (checkpoints === undefined) return { ok: false };
   try {
     if (deps.settlePending) await deps.settlePending().catch(() => undefined);
-    if (scope === "a" || scope === "c") {
+    let restored: number | undefined;
+    let deleted: number | undefined;
+    let records: number | undefined;
+    if (scope === "all" || scope === "code") {
       const result = await checkpoints.restore(picked.ref);
+      restored = result.restored;
+      deleted = result.deleted;
       out(`⏪ 已恢复工作区：写回 ${result.restored} 个文件，删除 ${result.deleted} 个该时点之后新增的文件。`);
     }
-    if (scope === "a" || scope === "t") {
+    if (scope === "all" || scope === "chat") {
       await deps.sessionStore.truncateTo(picked.records);
+      records = picked.records;
       out(`⏪ 已恢复对话：会话历史截断到第 ${picked.seq} 号检查点的边界（${picked.records} 条记录），下轮生效。`);
     }
-    return true;
+    return {
+      ok: true,
+      ...(restored !== undefined ? { restored } : {}),
+      ...(deleted !== undefined ? { deleted } : {}),
+      ...(records !== undefined ? { records } : {}),
+    };
   } catch (error) {
     out(`❌ 回滚失败: ${error instanceof Error ? error.message : error}`);
-    return false;
+    return { ok: false };
   }
 }

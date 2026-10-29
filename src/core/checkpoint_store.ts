@@ -51,6 +51,8 @@ export class CheckpointStore {
   private readonly gitDir: string;
   private readonly maxCheckpoints: number;
   private repoReady = false;
+  /** 首次 git init 的在途 Promise：并发调用共享同一次初始化 */
+  private repoInit?: Promise<void> | undefined;
 
   constructor(options: {
     /** 影子仓库根目录（.git 建在它下面）；建议 <sessionDir>/checkpoints/<sessionId> */
@@ -119,6 +121,13 @@ export class CheckpointStore {
 
   private async ensureRepo(): Promise<void> {
     if (this.repoReady) return;
+    // 快照钩子与 /rewind / 面板列表可能并发首次进入：共享同一次 git init，
+    // 否则两个 init 会抢 .git/config 的锁（"File exists"）而让其中一个失败
+    this.repoInit ??= this.initRepo().finally(() => { this.repoInit = undefined; });
+    await this.repoInit;
+  }
+
+  private async initRepo(): Promise<void> {
     await fs.mkdir(path.dirname(this.gitDir), { recursive: true });
     await fs.mkdir(this.sandboxRoot, { recursive: true });
     // git init 幂等：已存在的仓库只是重新初始化提示，不影响对象
@@ -179,9 +188,13 @@ export class CheckpointStore {
     }
   }
 
-  /** 检查点列表，最新在前；会话从未拍过快照时返回空列表（影子仓库还没建，不算错误） */
+  /**
+   * 检查点列表，最新在前；会话从未拍过快照时返回空列表。
+   * 这里惰性初始化影子仓库：进程重启后 repoReady 是假的，但磁盘上的检查点还在——
+   * 不建仓库就永远列不出来（/rewind 与 Web 检查点面板都依赖这一条）。
+   */
   async list(): Promise<CheckpointInfo[]> {
-    if (!this.repoReady) return [];
+    await this.ensureRepo();
     const listed = await this.git(
       ["for-each-ref", "--format=%(refname)%00%(creatordate:iso-strict)%00%(subject)", REF_PREFIX]
     );

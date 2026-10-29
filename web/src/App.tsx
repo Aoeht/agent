@@ -8,6 +8,7 @@ import { Composer } from "./components/Composer";
 import { Welcome } from "./components/Welcome";
 import { ApprovalModal, InputModal } from "./components/Modals";
 import { JobsPanel } from "./components/JobsPanel";
+import { CheckpointsPanel } from "./components/CheckpointsPanel";
 import { useMediaQuery } from "./lib/useMediaQuery";
 
 function StatusChip({ status }: { status: RunStatus }) {
@@ -39,6 +40,8 @@ export default function App() {
   const [drawer, setDrawer] = useState<"sessions" | "panel" | null>(null);
   // 后台任务面板是独立覆盖层：全局（不属于某个会话），入口在页头
   const [jobsOpen, setJobsOpen] = useState(false);
+  // 检查点面板：会话级（入口只在选中会话时出现）
+  const [checkpointsOpen, setCheckpointsOpen] = useState(false);
   const runningJobs = state.jobs.filter((job) => job.status === "running").length;
 
   // 跨断点后抽屉入口随断点消失，残存的开启状态一并收起
@@ -85,6 +88,15 @@ export default function App() {
           <h2 className="truncate text-sm font-semibold">{current ? headerTitle : "新会话"}</h2>
           {current && <StatusChip status={current.status} />}
           <div className="ml-auto flex items-center gap-1">
+            {current && (
+              <button
+                onClick={() => setCheckpointsOpen(true)}
+                title="检查点（回滚工作区/对话到某轮开始之前）"
+                className={iconBtn}
+              >
+                ⏪
+              </button>
+            )}
             <button
               onClick={() => setJobsOpen(true)}
               title={runningJobs > 0 ? `后台任务（${runningJobs} 个运行中）` : "后台任务"}
@@ -148,6 +160,7 @@ export default function App() {
       <ApprovalModal />
       <InputModal />
       <JobsPanel open={jobsOpen} onClose={() => setJobsOpen(false)} />
+      <CheckpointsPanel open={checkpointsOpen} onClose={() => setCheckpointsOpen(false)} />
     </div>
   );
 }

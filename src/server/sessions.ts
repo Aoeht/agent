@@ -13,12 +13,13 @@ import type { AgentResult, ToolDefinition, ToolRuntime } from "../core/types";
 import type { UiBridge } from "./bridge";
 import { runSessionStore } from "./run_context";
 import type { ServerRuntime } from "./runtime";
-import type { ServerEvent, SessionConfigEvent, SessionDetailDTO, SessionSummaryDTO, StatusDTO, Citation, ThinkingEffort, MessageSendResponse } from "./protocol";
+import type { ServerEvent, SessionConfigEvent, SessionDetailDTO, SessionSummaryDTO, StatusDTO, Citation, ThinkingEffort, MessageSendResponse, CheckpointListDTO, RewindResponse, RewindScope } from "./protocol";
 import { RunOutcomeSchema } from "./protocol";
 import { TaskStore } from "../core/task_store";
 import { formatBudgetExtensionPrompt } from "../core/budget_prompt";
 import { handleSlashCommand, isCommandText, type RunStatsSummary } from "../core/command_router";
 import { CheckpointStore, createCheckpointSnapshotHook } from "../core/checkpoint_store";
+import { rewindToCheckpoint } from "../core/rewind_command";
 import { prepareUserImages, UserImageError, type PreparedUserImage } from "../core/user_images";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
@@ -155,6 +156,8 @@ export class SessionManager {
       entry.agent = undefined;
       entry.registry = undefined;
       entry.toolDefs = undefined;
+      // 检查点 store 绑定了旧沙箱根（work-tree），随 Agent 一起丢弃，下次按新根重建
+      entry.checkpoints = undefined;
       entry.queue = [];
     }
   }
@@ -312,6 +315,61 @@ export class SessionManager {
 
   tasks(sessionId: string) {
     return this.taskStoreFor(this.entry(sessionId)).list();
+  }
+
+  /**
+   * 检查点清单（检查点面板用）：与 /rewind 的列表同源。不要求 Agent 已组装——
+   * 影子仓库就在磁盘上，进程重启后续聊的会话也能列出来（CheckpointStore.list
+   * 会惰性重建仓库对象）。
+   */
+  async listCheckpoints(sessionId: string): Promise<CheckpointListDTO> {
+    const entry = this.entry(sessionId);
+    const checkpoints = this.checkpointsFor(entry, sessionId);
+    if (checkpoints === undefined) return { enabled: false, checkpoints: [] };
+    const infos = await checkpoints.list();
+    return {
+      enabled: true,
+      checkpoints: infos.map((info) => ({
+        seq: info.seq,
+        time: info.time.toISOString(),
+        input: info.input,
+        records: info.records,
+      })),
+    };
+  }
+
+  /**
+   * 回滚到指定检查点（检查点面板用）：与聊天里 /rewind <编号> 走同一段执行逻辑。
+   * 回合进行中拒绝（与命令通道同一把门）；回滚含对话时广播 history_rewound，
+   * 让同会话的其它标签页重拉历史，避免继续显示已被截断的消息。
+   */
+  async rewindCheckpoint(sessionId: string, seq: number, scope: RewindScope): Promise<RewindResponse> {
+    const entry = this.entry(sessionId);
+    if (entry.controller !== undefined || entry.queue.length > 0 || entry.configuring) {
+      throw new Error("回合进行中，结束后再回滚");
+    }
+    const checkpoints = this.checkpointsFor(entry, sessionId);
+    if (checkpoints === undefined) throw new Error("检查点未启用（AGENT_CHECKPOINTS=0），无法回滚");
+    const lines: string[] = [];
+    const outcome = await rewindToCheckpoint(seq, scope, {
+      checkpoints,
+      sessionStore: entry.store,
+      // 在途的长期摘要先落盘：否则它会在截断之后把被撤销轮次的摘要又写回去
+      settlePending: async () => { await entry.agent?.flushSummary(); },
+    }, (line) => { lines.push(line); });
+    if (!outcome.ok) throw new Error(lines.at(-1) ?? `检查点 #${seq} 回滚失败`);
+    const refreshHistory = scope !== "code";
+    if (refreshHistory) this.options.hub.publish(sessionId, { type: "history_rewound", seq, scope });
+    return {
+      ok: true,
+      seq,
+      scope,
+      ...(outcome.restored !== undefined ? { restored: outcome.restored } : {}),
+      ...(outcome.deleted !== undefined ? { deleted: outcome.deleted } : {}),
+      ...(outcome.records !== undefined ? { records: outcome.records } : {}),
+      lines,
+      ...(refreshHistory ? { refresh: "history" } : {}),
+    };
   }
 
   async status(): Promise<StatusDTO> {
@@ -493,6 +551,22 @@ export class SessionManager {
     return entry.agent?.taskStore ?? new TaskStore(path.join(entry.store.dir, "tasks", `${path.basename(entry.store.filePath, ".jsonl")}.sqlite`));
   }
 
+  /**
+   * 会话级检查点 store（懒建）：检查点面板 / /rewind 可能在 Agent 尚未组装时就要用。
+   * 绑定当前沙箱根作为 work-tree，所以 resetAgents（切换沙箱）时要丢弃重来。
+   */
+  private checkpointsFor(entry: SessionEntry, sessionId: string): CheckpointStore | undefined {
+    if (!this.options.runtime.config.checkpointsEnabled) return undefined;
+    if (entry.checkpoints === undefined) {
+      entry.checkpoints = new CheckpointStore({
+        shadowRoot: path.join(entry.store.dir, "checkpoints", sessionId),
+        sandboxRoot: this.options.runtime.sandboxRoot,
+        sessionRecordCount: () => entry.store.recordCount(),
+      });
+    }
+    return entry.checkpoints;
+  }
+
   private entry(sessionId: string): SessionEntry {
     let entry = this.entries.get(sessionId);
     if (!entry) {
@@ -593,14 +667,7 @@ export class SessionManager {
 
     // 回合级检查点（/rewind）：影子仓库随会话目录存放（.agent-sessions 已 gitignore），
     // 快照钩子与 CLI 共用同一工厂——历史 compact 与后台长期摘要落盘之后、本轮 user 消息落盘之前拍快照
-    const checkpoints = config.checkpointsEnabled
-      ? new CheckpointStore({
-          shadowRoot: path.join(entry.store.dir, "checkpoints", sessionId),
-          sandboxRoot,
-          sessionRecordCount: () => entry.store.recordCount(),
-        })
-      : undefined;
-    entry.checkpoints = checkpoints;
+    const checkpoints = this.checkpointsFor(entry, sessionId);
 
     const agent = new Agent({
       model: startup.model ?? config.model,

@@ -1,10 +1,13 @@
 // web/src/lib/transport.ts
 import type {
   ApprovalDecisionBody,
+  CheckpointListDTO,
   JobLogChunkDTO,
   JobSummaryDTO,
   MessageSendResponse,
   ModelProbeStatusResponse,
+  RewindResponse,
+  RewindScope,
   ServerEvent,
   SessionConfigEvent,
   SessionDetailDTO,
@@ -59,6 +62,10 @@ export interface Transport {
   readJobLog(jobId: string, stream: "stdout" | "stderr", after?: number): Promise<JobLogChunkDTO>;
   /** 终止仍在跑的后台任务（已结束的任务原样返回） */
   killJob(jobId: string): Promise<void>;
+  /** 回合级检查点清单（最新在前）；enabled=false 表示服务端关了 AGENT_CHECKPOINTS */
+  listCheckpoints(sessionId: string): Promise<CheckpointListDTO>;
+  /** 回滚到某个检查点；含对话时服务端会广播 history_rewound，本端按 refresh 重拉历史 */
+  rewindCheckpoint(sessionId: string, seq: number, scope: RewindScope): Promise<RewindResponse>;
   /** 订阅事件流。返回退订函数；连接状态变化经 onStatus 上报 */
   subscribe(
     sessionId: string,
