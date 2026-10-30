@@ -14,6 +14,9 @@ import type {
   SessionDetailDTO,
   SessionSummaryDTO,
   ThinkingEffort,
+  TraceChunkDTO,
+  TraceEventDTO,
+  TraceListDTO,
   UserImageUploadBody,
 } from "@protocol";
 import type { Transport } from "./transport";
@@ -630,6 +633,83 @@ export class MockTransport implements Transport {
         text: "# 反诈话术样本\n\n“您好，我是平台客服，您的账户存在异常……”\n\n（演示资源正文，真实后端会返回 server 给出的内容。）",
       }],
     };
+  }
+
+  /** 演示轨迹：一个两轮的 run，事件与 core/trace.ts 落盘同构（ts/type + 载荷） */
+  private traceFilesFor(sessionId: string): Array<{ file: string; events: TraceEventDTO[]; mtime: number }> {
+    const found = this.sessions.find((s) => s.summary.sessionId === sessionId);
+    const first = found?.messages.find((message) => message.role === "user")?.content ?? "演示问题";
+    const base = Date.now() - 30 * 60_000;
+    const at = (offsetMs: number): string => new Date(base + offsetMs).toISOString();
+    const stamp = new Date(base).toISOString().replace(/[:.]/g, "-");
+    return [
+      {
+        file: `${sessionId}-${stamp}.jsonl`,
+        mtime: base + 40_000,
+        events: [
+          { ts: at(0), type: "run_start", data: { userMessage: first, promptHash: "80705821b6f3" } },
+          { ts: at(1_200), type: "tool_start", data: { callId: "call-1", name: "rag_search", arguments: '{"query":"混合检索权重"}' } },
+          { ts: at(2_200), type: "tool_progress", data: { callId: "call-1", name: "rag_search", elapsedMs: 1_000 } },
+          { ts: at(3_400), type: "tool_progress", data: { callId: "call-1", name: "rag_search", elapsedMs: 2_200 } },
+          { ts: at(4_100), type: "tool_end", data: { callId: "call-1", name: "rag_search", durationMs: 2_900, ok: true } },
+          {
+            ts: at(4_300),
+            type: "step",
+            data: {
+              step: {
+                iteration: 1,
+                tokens: { promptTokens: 2_140, completionTokens: 186, totalTokens: 2_326 },
+                llmContent: null,
+                toolCalls: [{ id: "call-1", name: "rag_search", arguments: '{"query":"混合检索权重"}', resultPreview: "命中 5 条" }],
+              },
+            },
+          },
+          { ts: at(6_000), type: "compact", data: { action: "stub_tool_outputs", messages: 2, tokens: 1_240, detail: "旧工具输出替换为占位符" } },
+          { ts: at(6_800), type: "retry", data: { attempt: 1, delayMs: 800, reason: "503 上游繁忙" } },
+          {
+            ts: at(9_400),
+            type: "run_end",
+            data: {
+              success: true,
+              totalTokens: 9_820,
+              cachedPromptTokens: 1_024,
+              toolCallsCount: 1,
+              iterations: 2,
+              stopReason: "answer",
+              finalAnswer: "演示终答（真实轨迹里是模型给出的回答）",
+            },
+          },
+        ],
+      },
+    ];
+  }
+
+  async listTraces(sessionId: string): Promise<TraceListDTO> {
+    // 最新在前（与服务端列表一致）
+    return {
+      traces: this.traceFilesFor(sessionId)
+        .map((item) => {
+          const label = item.events[0]?.data["userMessage"];
+          return {
+            file: item.file,
+            sizeBytes: item.events.reduce((sum, event) => sum + JSON.stringify(event).length, 0),
+            modified: new Date(item.mtime).toISOString(),
+            ...(typeof label === "string" ? { label } : {}),
+          };
+        })
+        .reverse(),
+    };
+  }
+
+  async readTrace(sessionId: string, file: string, after?: number): Promise<TraceChunkDTO> {
+    const found = this.traceFilesFor(sessionId).find((item) => item.file === file);
+    if (found === undefined) throw new Error("轨迹文件不存在");
+    // 演示文件一次性给出：首拉全量，续拉无新事件
+    if (after !== undefined && after > 0) {
+      return { events: [], offset: after, size: after, reset: false };
+    }
+    const size = found.events.reduce((sum, event) => sum + JSON.stringify(event).length, 0);
+    return { events: found.events, offset: size, size, reset: false };
   }
 
   subscribe(

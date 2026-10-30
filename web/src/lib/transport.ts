@@ -15,6 +15,8 @@ import type {
   SessionDetailDTO,
   SessionSummaryDTO,
   ThinkingEffort,
+  TraceChunkDTO,
+  TraceListDTO,
   UserImageUploadBody,
 } from "@protocol";
 
@@ -72,6 +74,10 @@ export interface Transport {
   listMcpCatalog(): Promise<McpCatalogDTO>;
   /** 读一条资源给面板预览（文本超长截断，二进制只回字节数） */
   readMcpResource(serverId: string, uri: string): Promise<McpResourceReadDTO>;
+  /** 本会话的轨迹文件清单（🕘 面板；最新在前） */
+  listTraces(sessionId: string): Promise<TraceListDTO>;
+  /** 轨迹增量：不带 after 从文件开头读，带 after 按字节偏移续读（reset=true 时清空重来） */
+  readTrace(sessionId: string, file: string, after?: number): Promise<TraceChunkDTO>;
   /** 订阅事件流。返回退订函数；连接状态变化经 onStatus 上报 */
   subscribe(
     sessionId: string,

@@ -18,6 +18,8 @@
  *   GET    /sessions/:id/tasks        → TaskRecord[]（独立任务历史）
  *   GET    /sessions/:id/checkpoints  → CheckpointListDTO（回合级检查点，最新在前）
  *   POST   /sessions/:id/checkpoints/rewind body { seq, scope } → RewindResponse；回合中 409
+ *   GET    /sessions/:id/traces       → TraceListDTO（本会话的轨迹文件清单，最新在前）
+ *   GET    /sessions/:id/traces/:file?after= → TraceChunkDTO（按字节偏移续读，🕘 面板用）
  *   GET    /mcp/catalog               → McpCatalogDTO（资源 + 提示模板清单，🧩 面板用）
  *   GET    /mcp/resource?serverId=&uri= → McpResourceReadDTO（正文预览，超长截断）
  *   POST   /sessions/:id/messages     body { text, images? } → 202；忙时 409 { error }
@@ -408,8 +410,47 @@ export interface RewindResponse {
   refresh?: "history";
 }
 
-// ---------- MCP 目录（GET /mcp/catalog、GET /mcp/resource） ----------
+// ---------- 运行轨迹（GET /sessions/:id/traces） ----------
 
+/**
+ * 一个轨迹文件：TraceRecorder 每会话一份 <sessionId>-<时间>.jsonl，
+ * 跨服务器重启续写新文件，所以同一会话可能有多个。
+ */
+export interface TraceFileSummaryDTO {
+  file: string;
+  sizeBytes: number;
+  /** ISO 8601（文件修改时间） */
+  modified: string;
+  /** 文件里第一条 run_start 的用户消息（列表标题；老文件没有就省略） */
+  label?: string;
+}
+
+export interface TraceListDTO {
+  /** 最新在前 */
+  traces: TraceFileSummaryDTO[];
+}
+
+/** 一条轨迹事件：data 是原始载荷去掉 ts/type，超长字符串/数组已截断（truncated=true） */
+export interface TraceEventDTO {
+  /** ISO 8601；坏行缺字段时为空串 */
+  ts: string;
+  type: string;
+  data: Record<string, unknown>;
+  truncated?: boolean;
+}
+
+/**
+ * GET /sessions/:id/traces/:file?after= 的一帧：offset 是下一次请求的 after。
+ * reset=true 表示偏移失效（文件被替换/变短），events 已从文件开头重读，前端应清空重来。
+ */
+export interface TraceChunkDTO {
+  events: TraceEventDTO[];
+  offset: number;
+  size: number;
+  reset: boolean;
+}
+
+// ---------- MCP 目录（GET /mcp/catalog、GET /mcp/resource） ----------
 /** 面板列表用的一条资源摘要（不含正文；正文按需读，见 McpResourceReadDTO） */
 export interface McpResourceSummaryDTO {
   serverId: string;

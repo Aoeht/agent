@@ -26,6 +26,7 @@ import { AuthGate, assertUsableToken, bindRefusal, sandboxRefusal } from "./auth
 import { createServerRuntime, rebuildRuntimeWithSandboxRoot, type ServerRuntime } from "./runtime";
 import { EventHub, SessionManager } from "./sessions";
 import type { ServerEvent, JobSummaryDTO } from "./protocol";
+import { TraceViewError } from "./trace_viewer";
 import type { JobRecord } from "../core/job_store";
 import { UserImageError, MAX_REQUEST_IMAGE_BYTES } from "../core/user_images";
 
@@ -209,6 +210,27 @@ async function route(
           : message.includes("不存在") ? 404
             : message.includes("未启用") ? 400 : 500;
         return json({ error: message }, status);
+      }
+    }
+
+    // ---- 运行轨迹：🕘 面板列文件 / 按字节偏移续读 ----
+    const tracesMatch = /^\/sessions\/([^/]+)\/traces$/.exec(pathname);
+    if (tracesMatch && method === "GET") {
+      return json(await sessions.listTraces(decodeURIComponent(tracesMatch[1]!)));
+    }
+
+    const traceFileMatch = /^\/sessions\/([^/]+)\/traces\/([^/]+)$/.exec(pathname);
+    if (traceFileMatch && method === "GET") {
+      const rawAfter = Number.parseInt(url.searchParams.get("after") ?? "", 10);
+      try {
+        return json(await sessions.readTrace(
+          decodeURIComponent(traceFileMatch[1]!),
+          decodeURIComponent(traceFileMatch[2]!),
+          Number.isFinite(rawAfter) && rawAfter >= 0 ? rawAfter : undefined
+        ));
+      } catch (error) {
+        if (error instanceof TraceViewError) return json({ error: error.message }, error.status);
+        throw error;
       }
     }
 

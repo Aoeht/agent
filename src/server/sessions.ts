@@ -13,8 +13,9 @@ import type { AgentResult, ToolDefinition, ToolRuntime } from "../core/types";
 import type { UiBridge } from "./bridge";
 import { runSessionStore } from "./run_context";
 import type { ServerRuntime } from "./runtime";
-import type { ServerEvent, SessionConfigEvent, SessionDetailDTO, SessionSummaryDTO, StatusDTO, Citation, ThinkingEffort, MessageSendResponse, CheckpointListDTO, RewindResponse, RewindScope, McpCatalogDTO, McpResourceReadDTO } from "./protocol";
+import type { ServerEvent, SessionConfigEvent, SessionDetailDTO, SessionSummaryDTO, StatusDTO, Citation, ThinkingEffort, MessageSendResponse, CheckpointListDTO, RewindResponse, RewindScope, McpCatalogDTO, McpResourceReadDTO, TraceChunkDTO, TraceListDTO } from "./protocol";
 import { RunOutcomeSchema } from "./protocol";
+import { listSessionTraces, readTraceChunk } from "./trace_viewer";
 import { TaskStore } from "../core/task_store";
 import { formatBudgetExtensionPrompt } from "../core/budget_prompt";
 import { handleSlashCommand, isCommandText, type RunStatsSummary } from "../core/command_router";
@@ -376,6 +377,19 @@ export class SessionManager {
       lines,
       ...(refreshHistory ? { refresh: "history" } : {}),
     };
+  }
+
+  /**
+   * 本会话的轨迹文件清单（🕘 面板）：只认 <sessionId>-*.jsonl，最新在前。
+   * 不要求 Agent 已组装——trace 就在磁盘上，进程重启后仍可回看上一轮的轨迹。
+   */
+  async listTraces(sessionId: string): Promise<TraceListDTO> {
+    return { traces: await listSessionTraces(this.options.traceDir, sessionId) };
+  }
+
+  /** 轨迹增量读取（🕘 面板）：按字节偏移续拉，单条事件的超长字段由读侧截断 */
+  async readTrace(sessionId: string, file: string, after?: number): Promise<TraceChunkDTO> {
+    return readTraceChunk(this.options.traceDir, sessionId, file, after);
   }
 
   /**

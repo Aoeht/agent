@@ -10,6 +10,7 @@ import { ApprovalModal, InputModal } from "./components/Modals";
 import { JobsPanel } from "./components/JobsPanel";
 import { CheckpointsPanel } from "./components/CheckpointsPanel";
 import { McpPanel } from "./components/McpPanel";
+import { TracesPanel } from "./components/TracesPanel";
 import { useMediaQuery } from "./lib/useMediaQuery";
 
 function StatusChip({ status }: { status: RunStatus }) {
@@ -45,6 +46,8 @@ export default function App() {
   const [checkpointsOpen, setCheckpointsOpen] = useState(false);
   // MCP 目录面板：会话级（注入/载入都要发到当前会话的命令通道）
   const [mcpOpen, setMcpOpen] = useState(false);
+  // 运行轨迹面板：会话级（只读本会话的 .traces 文件）
+  const [tracesOpen, setTracesOpen] = useState(false);
   const runningJobs = state.jobs.filter((job) => job.status === "running").length;
 
   // 跨断点后抽屉入口随断点消失，残存的开启状态一并收起
@@ -107,6 +110,15 @@ export default function App() {
                 className={iconBtn}
               >
                 🧩
+              </button>
+            )}
+            {current && (
+              <button
+                onClick={() => setTracesOpen(true)}
+                title="运行轨迹（每轮决策、工具调用与压缩）"
+                className={iconBtn}
+              >
+                🕘
               </button>
             )}
             <button
@@ -174,6 +186,7 @@ export default function App() {
       <JobsPanel open={jobsOpen} onClose={() => setJobsOpen(false)} />
       <CheckpointsPanel open={checkpointsOpen} onClose={() => setCheckpointsOpen(false)} />
       <McpPanel open={mcpOpen} onClose={() => setMcpOpen(false)} />
+      <TracesPanel open={tracesOpen} onClose={() => setTracesOpen(false)} />
     </div>
   );
 }

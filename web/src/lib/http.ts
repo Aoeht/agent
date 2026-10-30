@@ -14,6 +14,8 @@ import type {
   SessionConfigEvent,
   SessionDetailDTO,
   SessionSummaryDTO,
+  TraceChunkDTO,
+  TraceListDTO,
   UserImageUploadBody,
 } from "@protocol";
 import type { SessionConfigInput, ToolStateDTO, Transport } from "./transport";
@@ -130,6 +132,17 @@ export class HttpTransport implements Transport {
   async readMcpResource(serverId: string, uri: string): Promise<McpResourceReadDTO> {
     const query = new URLSearchParams({ serverId, uri });
     return (await this.request(`/mcp/resource?${query.toString()}`)).json();
+  }
+
+  async listTraces(sessionId: string): Promise<TraceListDTO> {
+    return (await this.request(`/sessions/${encodeURIComponent(sessionId)}/traces`)).json();
+  }
+
+  async readTrace(sessionId: string, file: string, after?: number): Promise<TraceChunkDTO> {
+    const query = after === undefined ? "" : `?after=${after}`;
+    return (await this.request(
+      `/sessions/${encodeURIComponent(sessionId)}/traces/${encodeURIComponent(file)}${query}`
+    )).json();
   }
 
   subscribe(

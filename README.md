@@ -53,6 +53,8 @@ bun run src/server/main.ts          # 默认 http://127.0.0.1:8787
 
 页头 **🧩 MCP 目录** 浏览已挂载 MCP server 的资源和提示模板：选中资源看预览后"注入下一轮"（内容包在不可信围栏里只喂一轮），选模板填参数后"载入"。终端里等价命令是 `/resources [serverId]`、`/resource <serverId:name|uri>`、`/prompts`、`/prompt <serverId:name> [JSON]`。
 
+页头 **🕘 运行轨迹** 把 `.traces/<会话>-<时间>.jsonl` 变成可读时间轴：每个回合、每步决策、每次工具调用（含心跳）与压缩/重试都在上面，点事件展开原始 JSON。默认隐藏工具心跳，长回合进行中每 2s 自动续拉；超长字段已由服务端截断，完整内容仍在 `.traces/` 文件里。委派与团队的子 Agent 轨迹各自落盘在会话目录，不在这份时间轴里。
+
 **团队**——多个子 Agent 并发干活，再独立复核：
 
 ```bash

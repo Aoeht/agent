@@ -23,6 +23,8 @@ import type {
   SessionDetailDTO,
   SessionSummaryDTO,
   ThinkingEffort,
+  TraceChunkDTO,
+  TraceListDTO,
 } from "@protocol";
 import type { SessionConfigInput, Transport } from "../lib/transport";
 import type { LocalImageAttachment } from "../lib/attachments";
@@ -644,6 +646,10 @@ export interface Store {
     listMcpCatalog(): Promise<McpCatalogDTO>;
     /** 读一条 MCP 资源给面板预览 */
     readMcpResource(serverId: string, uri: string): Promise<McpResourceReadDTO>;
+    /** 本会话的轨迹文件清单（🕘 面板） */
+    listTraces(sessionId: string): Promise<TraceListDTO>;
+    /** 轨迹增量续读（面板自己持有事件缓冲，不进全局 store） */
+    readTrace(sessionId: string, file: string, after?: number): Promise<TraceChunkDTO>;
   };
 }
 
@@ -966,6 +972,12 @@ export function StoreProvider({
       },
       async readMcpResource(serverId, uri) {
         return resolvedTransport.readMcpResource(serverId, uri);
+      },
+      async listTraces(sessionId) {
+        return resolvedTransport.listTraces(sessionId);
+      },
+      async readTrace(sessionId, file, after) {
+        return resolvedTransport.readTrace(sessionId, file, after);
       },
     };
   }, [resolvedTransport]);
