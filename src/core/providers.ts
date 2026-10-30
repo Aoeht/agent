@@ -2,12 +2,18 @@ import OpenAI from "openai";
 import { existsSync, readFileSync, mkdirSync, writeFileSync, renameSync } from "node:fs";
 import path from "node:path";
 export interface ProviderInput { name: string; baseURL: string; apiKey: string; models: string[] }
-export interface ProviderInfo { id: string; name: string; baseURL: string; models: string[]; hasKey: boolean }
-type SavedProvider = ProviderInput & { id: string };
+export interface ProviderModel { id: string; enabled: boolean }
+export interface ProviderInfo { id: string; name: string; baseURL: string; models: ProviderModel[]; hasKey: boolean }
+type SavedProvider = { id: string; name: string; baseURL: string; apiKey: string; models: string[]; hidden?: string[] };
+/** 对外脱敏展示：密钥换成 hasKey，隐藏集合展开成每个模型的开关状态。 */
+function toInfo(p: SavedProvider): ProviderInfo {
+  const hidden = p.hidden ?? [];
+  return { id: p.id, name: p.name, baseURL: p.baseURL, models: p.models.map(id => ({ id, enabled: !hidden.includes(id) })), hasKey: !!p.apiKey };
+}
 export class ProviderStore {
   constructor(private file = path.resolve(".agent-data/providers.json")) {}
   private read(): SavedProvider[] { return existsSync(this.file) ? JSON.parse(readFileSync(this.file, "utf8")) : []; }
-  list(): ProviderInfo[] { return this.read().map(({ apiKey, ...p }) => ({ ...p, hasKey: !!apiKey })); }
+  list(): ProviderInfo[] { return this.read().map(toInfo); }
   private save(rows: SavedProvider[]) {
     mkdirSync(path.dirname(this.file), { recursive: true });
     writeFileSync(this.file + ".tmp", JSON.stringify(rows, null, 2), { mode: 0o600 });
@@ -19,12 +25,29 @@ export class ProviderStore {
     if (!["https:", "http:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error("API 地址须为 HTTP(S) 基础地址，不含账号、查询参数或锚点");
     if (!Array.isArray(input.models) || !input.models.length || input.models.some(m => typeof m !== "string" || !m.trim() || m.includes("::"))) throw new Error("请至少填写一个有效模型 ID");
     const rows = this.read();
-    const p = { id: `${input.name.trim().replace(/[^\p{L}\p{N}_-]/gu, "_")}-${crypto.randomUUID().slice(0, 8)}`, name: input.name.trim(), baseURL: url.toString().replace(/\/$/, ""), apiKey: input.apiKey.trim(), models: [...new Set(input.models.map(m => m.trim()))] };
+    const p: SavedProvider = { id: `${input.name.trim().replace(/[^\p{L}\p{N}_-]/gu, "_")}-${crypto.randomUUID().slice(0, 8)}`, name: input.name.trim(), baseURL: url.toString().replace(/\/$/, ""), apiKey: input.apiKey.trim(), models: [...new Set(input.models.map(m => m.trim()))] };
     rows.push(p); this.save(rows);
-    const { apiKey, ...info } = p; return { ...info, hasKey: true };
+    return toInfo(p);
   }
   remove(id: string) { this.save(this.read().filter(p => p.id !== id)); }
-  models(): string[] { return this.read().flatMap(p => p.models.map(m => `${p.id}::${m}`)); }
+  /** 只决定"哪些模型出现在下拉里"；resolve 不看开关，已选中的会话不会因隐藏而失效。 */
+  setEnabledModels(id: string, enabledModels: string[]): ProviderInfo {
+    if (!Array.isArray(enabledModels) || enabledModels.some(m => typeof m !== "string")) throw new Error("enabledModels 必须是模型 ID 数组");
+    const rows = this.read();
+    const p = rows.find(row => row.id === id);
+    if (!p) throw new Error("供应商不存在");
+    const enabled = new Set(enabledModels);
+    if ([...enabled].some(m => !p.models.includes(m))) throw new Error("要显示的模型不在该供应商的清单里");
+    p.hidden = p.models.filter(m => !enabled.has(m));
+    this.save(rows);
+    return toInfo(p);
+  }
+  models(): string[] {
+    return this.read().flatMap(p => {
+      const hidden = p.hidden ?? [];
+      return p.models.filter(m => !hidden.includes(m)).map(m => `${p.id}::${m}`);
+    });
+  }
   resolve(model: string) {
     const split = model.indexOf("::");
     if (split < 0) return undefined;

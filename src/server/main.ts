@@ -6,7 +6,7 @@ import { providers, type ProviderInput } from "../core/providers";
  * - REST + SSE 按协议文件 src/server/protocol.ts 的端点清单实现；
  * - 静态托管 web/dist（先 `cd web && bun run build`）；开发时前端跑 Vite dev server，
  *   由 vite.config.ts 的代理转发到本服务，两者都只监听 127.0.0.1；
- * - 模型选择清单：AGENT_UI_MODELS（逗号分隔）；缺省只给主模型 + 摘要模型；
+ * - 模型选择清单：主模型 + 摘要模型 + 用户添加的供应商模型 + AGENT_UI_MODELS（逗号分隔）；
  * - run_script 的宿主机后端是任意代码执行，**这个服务器 + 审批桥就是安全边界**：
  *   缺省只绑回环，未决审批超时自动拒绝。
  * - 要从外网访问（方案 A）：保持 AGENT_UI_HOST=127.0.0.1，用 Tailscale 或
@@ -17,7 +17,6 @@ import { providers, type ProviderInput } from "../core/providers";
  * - 绑非回环又没设口令 = 直接拒绝启动，不给你误配的机会。
  */
 import path from "node:path";
-import OpenAI from "openai";
 import { resolveSessionDir } from "../config";
 import { candidateModels, fetchZhipuAccountQuota, isLikelyChatModel, probeModels } from "../core/model_probe";
 import { createProbeCache } from "./model_probe_cache";
@@ -25,11 +24,10 @@ import { UiBridge } from "./bridge";
 import type { ModelProbeStatusResponse, ThinkingEffort } from "./protocol";
 import { THINKING_EFFORTS } from "../utils/thinking_effort";
 import { AuthGate, assertUsableToken, bindRefusal, sandboxRefusal } from "./auth";
-import { createServerRuntime, rebuildRuntimeWithSandboxRoot, type ServerRuntime } from "./runtime";
+import { attachJobNotifier, createServerRuntime, rebuildRuntimeWithSandboxRoot, toJobSummary, type ServerRuntime } from "./runtime";
 import { EventHub, SessionManager } from "./sessions";
-import type { ServerEvent, JobSummaryDTO } from "./protocol";
+import type { ServerEvent } from "./protocol";
 import { TraceViewError } from "./trace_viewer";
-import type { JobRecord } from "../core/job_store";
 import { UserImageError, MAX_REQUEST_IMAGE_BYTES } from "../core/user_images";
 
 const PORT = intEnv("AGENT_UI_PORT", 8787);
@@ -85,6 +83,7 @@ async function main(): Promise<void> {
   const bridge = new UiBridge(hub.publish, APPROVAL_TIMEOUT_MS);
   console.log(`⚙️  [UI] 审批超时: ${APPROVAL_TIMEOUT_MS}ms（超时自动拒绝）`);
   const runtime = await createServerRuntime({ bridge, disableRunScript: REMOTE_HARDENING });
+  attachJobNotifier(runtime.jobs, hub);
   const sandboxProblem = sandboxRefusal({ hardening: REMOTE_HARDENING, backend: runtime.sandbox.backend });
   if (sandboxProblem !== undefined) {
     await runtime.dispose();
@@ -334,15 +333,20 @@ async function route(
       providers.remove(decodeURIComponent(providerMatch[1]!));
       return json({ ok: true });
     }
+    // 模型显示开关：只改下拉可见性，不动已选中的会话
+    if (providerMatch && method === "PATCH") {
+      const body = await readJson(req);
+      try { return json(providers.setEnabledModels(decodeURIComponent(providerMatch[1]!), body.enabledModels as string[])); }
+      catch (error) { return json({ error: error instanceof Error ? error.message : "更新失败" }, 400); }
+    }
     // ---- 状态与设置 ----
     if (pathname === "/status" && method === "GET") {
       return json(await sessions.status());
     }
 
-    // 可选模型清单：live 查询 LLM 服务商的 /models（OpenAI 兼容端点），
-    // AGENT_UI_MODELS 的清单前置合并；查询失败兜底到主模型 + 摘要模型。缓存 5 分钟。
+    // 可选模型清单：主模型 + 摘要模型 + 用户添加的供应商模型 + AGENT_UI_MODELS。
     if (pathname === "/models" && method === "GET") {
-      return json(await resolveModels(runtime));
+      return json(resolveModels(runtime));
     }
 
     // 配置候选按需刷新，不扫描服务商全量模型；并发请求共享探测任务。
@@ -419,6 +423,8 @@ async function route(
           400
         );
       }
+      // 重建换了新的 JobStore 实例：通知钩子必须重新挂到新实例上
+      attachJobNotifier(runtime.jobs, hub);
       sessions.resetAgents();
       console.log(`📦 [UI] 沙箱目录已切换: ${runtime.sandboxRoot}`);
       return json({ sandboxRoot: runtime.sandboxRoot });
@@ -442,26 +448,8 @@ function json(data: unknown, status = 200): Response {
   });
 }
 
-/** 任务记录 → 线协议 DTO：只透出面板需要的字段（pid 等进程内细节不出网） */
-function toJobSummary(record: JobRecord): JobSummaryDTO {
-  return {
-    id: record.id,
-    script: record.script,
-    args: record.args,
-    backend: record.backend,
-    status: record.status,
-    ...(record.exitCode !== undefined ? { exitCode: record.exitCode } : {}),
-    startedAt: record.startedAt,
-    deadlineAt: record.deadlineAt,
-    ...(record.endedAt !== undefined ? { endedAt: record.endedAt } : {}),
-    ...(record.reconciled === true ? { reconciled: true } : {}),
-    ...(record.container !== undefined ? { container: record.container } : {}),
-  };
-}
-
 // ---------- 模型清单 ----------
 
-let modelsCache: { at: number; models: string[] } = { at: 0, models: [] };
 const loadProbeStatus = createProbeCache<ServerRuntime, ModelProbeStatusResponse>(async (runtime) => {
   const models = await probeModels({ models: [...candidateModels(runtime.config).filter(isLikelyChatModel), ...providers.models()], concurrency: 3, timeoutMs: 6_000 });
   const accountQuota = await fetchZhipuAccountQuota(process.env.OPENAI_BASE_URL?.trim() ?? "", process.env.OPENAI_API_KEY?.trim() ?? "");
@@ -472,39 +460,12 @@ function dedupeKeepOrder(models: string[]): string[] {
   return [...new Set(models.filter((model) => model !== ""))];
 }
 
-async function resolveModels(runtime: ServerRuntime): Promise<string[]> {
+function resolveModels(runtime: ServerRuntime): string[] {
   const configured = (process.env.AGENT_UI_MODELS ?? "")
     .split(",")
     .map((model) => model.trim())
     .filter(Boolean);
-  const current = dedupeKeepOrder([runtime.config.model, runtime.config.summaryModel, ...providers.models()]);
-
-  const now = Date.now();
-  if (now - modelsCache.at < 5 * 60_000) {
-    return dedupeKeepOrder([...current, ...configured, ...modelsCache.models]);
-  }
-
-  try {
-    // 与 Agent 相同的 OpenAI 兼容端点（OPENAI_BASE_URL/KEY）：live 拉服务商可用清单，
-    // 非对话类模型（图像/语音/OCR/实时音频等）在这里就剔除——对它们探测/选用都是徒劳
-    const client = new OpenAI({ maxRetries: 0, timeout: 5_000 });
-    const page = await client.models.list();
-    const ids: string[] = [];
-    for await (const model of page) {
-      if (isLikelyChatModel(model.id)) ids.push(model.id);
-    }
-    ids.sort((a, b) => a.localeCompare(b));
-    modelsCache = { at: now, models: ids };
-    return dedupeKeepOrder([...current, ...configured, ...ids]);
-  } catch (error) {
-    console.warn(
-      "[UI] 服务商模型清单查询失败，回退到配置模型:",
-      error instanceof Error ? error.message : error
-    );
-    // 失败也计入缓存：避免每次刷新都白等一次超时
-    modelsCache = { at: now, models: [] };
-    return dedupeKeepOrder([...current, ...configured]);
-  }
+  return dedupeKeepOrder([runtime.config.model, runtime.config.summaryModel, ...providers.models(), ...configured]);
 }
 
 async function readJson(req: Request): Promise<Record<string, unknown>> {

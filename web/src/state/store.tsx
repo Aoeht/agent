@@ -134,6 +134,8 @@ interface AppState {
   appSettings: { sandboxRoot?: string };
   /** 后台脚本任务（服务器全局，不属于某个会话；轮询刷新） */
   jobs: JobSummaryDTO[];
+  /** 刚结束的后台任务通知（job_finished 推送，跨会话；toast 展示后自行消失） */
+  jobNotices: JobSummaryDTO[];
 }
 
 // ---------- Action 与 reducer ----------
@@ -145,6 +147,8 @@ type Action =
   | { type: "settings_loaded"; sandboxRoot?: string }
   | { type: "sandbox_root_changed"; sandboxRoot: string }
   | { type: "jobs_loaded"; jobs: JobSummaryDTO[] }
+  | { type: "job_finished"; job: JobSummaryDTO }
+  | { type: "job_notice_dismissed"; id: string }
   | { type: "tools_loaded"; id: string; tools: Array<{ name: string; description: string }>; disabled: string[] }
   | { type: "session_created"; summary: SessionSummaryDTO }
   | { type: "session_opened"; detail: SessionDetailDTO }
@@ -267,6 +271,9 @@ export function applyEvent(s: SessionUIState, e: ServerEvent): SessionUIState {
       return { ...s, queue: e.items };
     case "tools_changed":
       // 无载荷信号：订阅回调里直接重拉 listTools，这里无需迁移状态
+      return s;
+    case "job_finished":
+      // 全局通知（不属于本会话的消息流）：reducer 的 job_finished 分支处理 toast 与任务列表
       return s;
     case "history_rewound":
       // 会话被回滚：历史由订阅回调重拉（这里不拼 items，避免与 history_reloaded 打架）
@@ -472,6 +479,15 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, appSettings: { ...state.appSettings, sandboxRoot: action.sandboxRoot } };
     case "jobs_loaded":
       return { ...state, jobs: action.jobs };
+    case "job_finished": {
+      const job = action.job;
+      // 列表就地更新（徽标/面板立刻反映），通知按 id 去重并只留最近 4 条
+      const jobs = [job, ...state.jobs.filter((x) => x.id !== job.id)].sort((a, b) => b.startedAt - a.startedAt);
+      const jobNotices = [job, ...state.jobNotices.filter((x) => x.id !== job.id)].slice(0, 4);
+      return { ...state, jobs, jobNotices };
+    }
+    case "job_notice_dismissed":
+      return { ...state, jobNotices: state.jobNotices.filter((x) => x.id !== action.id) };
     case "tools_loaded": {
       const s = state.byId[action.id];
       if (!s) return state;
@@ -621,6 +637,8 @@ export interface Store {
     listProviders(): Promise<ProviderInfo[]>;
     addProvider(input: ProviderInput): Promise<void>;
     removeProvider(id: string): Promise<void>;
+    /** 只改模型下拉的可见性；已隐藏的模型对已选用它的会话仍然有效 */
+    setProviderModels(id: string, enabledModels: string[]): Promise<void>;
     refreshModels(): Promise<void>;
     probeModels(): Promise<void>;
     selectSession(id: string): void;
@@ -642,6 +660,8 @@ export interface Store {
     refreshJobs(): Promise<void>;
     /** 终止一个仍在跑的后台任务 */
     killJob(id: string): Promise<void>;
+    /** 关掉一条后台完成通知（toast 的关闭按钮/自动消失都走这里） */
+    dismissJobNotice(id: string): void;
     /** 后台任务日志增量（面板自己持有文本状态，不进全局 store） */
     readJobLog(jobId: string, stream: "stdout" | "stderr", after?: number): Promise<import("@protocol").JobLogChunkDTO>;
     /** 检查点清单（面板打开/回滚后刷新；enabled=false 表示服务端关了 AGENT_CHECKPOINTS） */
@@ -681,6 +701,7 @@ export function StoreProvider({
     modelStatus: [],
     appSettings: {},
     jobs: [],
+    jobNotices: [],
   });
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -744,6 +765,11 @@ export function StoreProvider({
         void resolvedTransport.listTools(currentId).then((toolState) => {
           if (alive) dispatch({ type: "tools_loaded", id: currentId, ...toolState });
         }).catch(() => {});
+        return;
+      }
+      // 后台任务完成：服务器广播到所有会话，这里只更新全局通知/任务列表，不进消息流
+      if (event.type === "job_finished") {
+        dispatch({ type: "job_finished", job: event.job });
         return;
       }
       // 检查点回滚改写了会话文件（本端或其它标签页触发）：重拉历史，别继续显示已截断的消息
@@ -812,6 +838,7 @@ export function StoreProvider({
       listProviders: () => resolvedTransport.listProviders(),
       addProvider: (input) => resolvedTransport.addProvider(input),
       removeProvider: (id) => resolvedTransport.removeProvider(id),
+      setProviderModels: (id, enabledModels) => resolvedTransport.setProviderModels(id, enabledModels),
       async refreshModels() {
         dispatch({ type: "models_loaded", models: await resolvedTransport.listModels() });
         dispatch({ type: "model_status_loaded", status: [] });
@@ -919,6 +946,9 @@ export function StoreProvider({
         await resolvedTransport.killJob(id);
         const jobs = await resolvedTransport.listJobs();
         dispatch({ type: "jobs_loaded", jobs });
+      },
+      dismissJobNotice(id: string) {
+        dispatch({ type: "job_notice_dismissed", id });
       },
       async readJobLog(jobId, stream, after) {
         return resolvedTransport.readJobLog(jobId, stream, after);

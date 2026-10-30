@@ -67,6 +67,9 @@ export class HttpTransport implements Transport {
   async listProviders(): Promise<ProviderInfo[]> { return (await this.request("/providers")).json(); }
   async addProvider(input: ProviderInput): Promise<void> { await this.request("/providers", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) }); }
   async removeProvider(id: string): Promise<void> { await this.request("/providers/" + encodeURIComponent(id), { method: "DELETE" }); }
+  async setProviderModels(id: string, enabledModels: string[]): Promise<void> {
+    await this.request("/providers/" + encodeURIComponent(id), { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabledModels }) });
+  }
   async listModelStatus(): Promise<ModelProbeStatusResponse> {
     return (await this.request("/models/status", { method: "POST" })).json();
   }

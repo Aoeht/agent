@@ -129,6 +129,8 @@ export function registerSessionTools(
      * 任务状态全部经同目录 JSON 协调，进程内只跟踪自己 spawn 的子进程。
      */
     jobs?: JobStore;
+    /** 会话 id：写进后台任务记录，跨会话完成通知据此标注来源（CLI 无会话，缺省不传） */
+    sessionId?: string;
   }
 ): void {
   const sandboxRoot = options.sandboxRoot ?? MCP_SANDBOX_DIR;
@@ -199,6 +201,7 @@ export function registerSessionTools(
             ? { kind: "docker", image: options.sandbox.image, network: options.sandbox.network }
             : { kind: "host" },
         jobs,
+        ...(options.sessionId !== undefined ? { sessionId: options.sessionId } : {}),
       })
     );
     registry.register(createJobOutputTool(jobs));

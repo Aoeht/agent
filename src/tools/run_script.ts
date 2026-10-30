@@ -236,6 +236,8 @@ export function createRunScriptTool(options: {
   backend?: ScriptBackendOption;
   /** 后台任务仓（background:true 时必填）；由入口组装时注入，与 job_output 共用同一个目录 */
   jobs?: JobStore;
+  /** 发起任务的会话：写进任务记录，后台完成通知据此指向来源会话（CLI 等无会话场景缺省） */
+  sessionId?: string;
 }): ToolDefinition {
   const sandboxRoot = path.resolve(options.sandboxRoot);
   const backend: ScriptBackendOption = options.backend ?? { kind: "host" };
@@ -347,6 +349,7 @@ export function createRunScriptTool(options: {
             backend: "docker",
             pid: child.pid ?? -1,
             container: containerName,
+            ...(options.sessionId !== undefined ? { sessionId: options.sessionId } : {}),
             timeoutMs,
           });
           await jobs.save(record);
@@ -397,6 +400,7 @@ export function createRunScriptTool(options: {
           args,
           backend: "host",
           pid: child.pid ?? -1,
+          ...(options.sessionId !== undefined ? { sessionId: options.sessionId } : {}),
           timeoutMs,
         });
         await jobs.save(record);

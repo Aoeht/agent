@@ -430,6 +430,7 @@ export class MockTransport implements Transport {
   async listProviders(): Promise<ProviderInfo[]> { return []; }
   async addProvider(_input: ProviderInput): Promise<void> { throw new Error("演示模式不能保存供应商，请连接真实后端"); }
   async removeProvider(_id: string): Promise<void> { throw new Error("演示模式不能删除供应商"); }
+  async setProviderModels(_id: string, _enabledModels: string[]): Promise<void> { throw new Error("演示模式不能修改供应商"); }
   async listModelStatus(): Promise<ModelProbeStatusResponse> {
     // 演示数据：第二个模型模拟配额耗尽，让过滤与标注逻辑在 mock 下也能看到
     return {

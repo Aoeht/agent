@@ -1,5 +1,7 @@
 export interface ProviderInput { name: string; baseURL: string; apiKey: string; models: string[] }
-export interface ProviderInfo { id: string; name: string; baseURL: string; models: string[]; hasKey: boolean }
+/** 单个模型的列表可见性开关：关闭只影响下拉清单，不影响已选用的会话 */
+export interface ProviderModel { id: string; enabled: boolean }
+export interface ProviderInfo { id: string; name: string; baseURL: string; models: ProviderModel[]; hasKey: boolean }
 // web/src/lib/transport.ts
 import type {
   ApprovalDecisionBody,
@@ -49,12 +51,14 @@ export interface Transport {
   listSessions(): Promise<SessionSummaryDTO[]>;
   createSession(): Promise<SessionSummaryDTO>;
   openSession(sessionId: string): Promise<SessionDetailDTO>;
-  /** 可选模型清单（服务商实时清单 + env 前置合并） */
+  /** 可选模型清单（主模型 + 摘要模型 + 自加供应商模型 + AGENT_UI_MODELS） */
   listModels(): Promise<string[]>;
   /** 模型可用性探测（仅用户主动触发；清单里有 ≠ 能用） */
   listProviders(): Promise<ProviderInfo[]>;
   addProvider(input: ProviderInput): Promise<void>;
   removeProvider(id: string): Promise<void>;
+  /** 设置哪些模型出现在模型下拉里（其余隐藏，探测也跳过） */
+  setProviderModels(id: string, enabledModels: string[]): Promise<void>;
   listModelStatus(): Promise<ModelProbeStatusResponse>;
   /** 应用会话级配置；成功后服务器广播 session_config 事件 */
   applySessionConfig(sessionId: string, config: SessionConfigInput): Promise<SessionConfigEvent>;

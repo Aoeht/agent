@@ -98,6 +98,30 @@ export type RequestedSchemaField = {
 
 // ---------- 下行事件 ----------
 
+/**
+ * 一条后台任务记录的线上形态：结构对齐 core/job_store.ts 的 JobRecord（DTO 在协议层独立声明）。
+ * 状态在服务器**读取时**校正：到点回收标 timed_out；进程已消失又没收到 close 标 exited
+ * 并置 reconciled（真实退出码不可知，前端不要编一个）。
+ * 定义提前到这里：job_finished 事件要引用它。
+ */
+export const JobSummarySchema = z.object({
+  id: z.string(),
+  /** 工作区相对路径 */
+  script: z.string(),
+  args: z.array(z.string()),
+  backend: z.enum(["host", "docker"]),
+  status: z.enum(["running", "exited", "timed_out", "killed"]),
+  exitCode: z.number().int().optional(),
+  /** 发起任务的会话（后台完成通知用来标注来源、跳转会话） */
+  sessionId: z.string().optional(),
+  /** epoch 毫秒 */
+  startedAt: z.number(),
+  deadlineAt: z.number(),
+  endedAt: z.number().optional(),
+  reconciled: z.boolean().optional(),
+  container: z.string().optional(),
+});
+
 export const ServerEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("task_update"), task: TaskSchema }),
   /** SSE 连接建立后第一条：声明当前运行环境（右栏「环境」卡片的数据源） */
@@ -273,6 +297,11 @@ export const ServerEventSchema = z.discriminatedUnion("type", [
     seq: z.number().int().positive(),
     scope: z.enum(["code", "chat", "all"]),
   }),
+  /**
+   * 后台任务结束（成功/失败/超时/被杀）：**广播**给所有已连接的会话，
+   * 而不是只发给发起任务的会话——任务跑完时人可能正待在别的对话里。
+   */
+  z.object({ type: z.literal("job_finished"), job: JobSummarySchema }),
   z.object({ type: z.literal("error"), message: z.string() }),
 ]);
 
@@ -496,26 +525,8 @@ export interface McpResourceReadDTO {
 
 // ---------- 后台脚本任务（GET /jobs） ----------
 
-/**
- * 一条后台任务记录：结构对齐 core/job_store.ts 的 JobRecord（DTO 在协议层独立声明）。
- * 状态在服务器**读取时**校正：到点回收标 timed_out；进程已消失又没收到 close 标 exited
- * 并置 reconciled（真实退出码不可知，前端不要编一个）。
- */
-export interface JobSummaryDTO {
-  id: string;
-  /** 工作区相对路径 */
-  script: string;
-  args: string[];
-  backend: "host" | "docker";
-  status: "running" | "exited" | "timed_out" | "killed";
-  exitCode?: number;
-  /** epoch 毫秒 */
-  startedAt: number;
-  deadlineAt: number;
-  endedAt?: number;
-  reconciled?: boolean;
-  container?: string;
-}
+/** 后台任务记录（schema 定义在文件上方，job_finished 事件与 /jobs 共用） */
+export type JobSummaryDTO = z.infer<typeof JobSummarySchema>;
 
 /**
  * GET /jobs/:id/log 的一帧：按字节偏移续拉即 tail -f。

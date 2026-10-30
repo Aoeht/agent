@@ -7,7 +7,8 @@ import type { ScriptSandboxResolution } from "../tools/sandbox_docker";
 import type { MemoryStore } from "../core/memory_store";
 import type { MemoryRecall } from "../core/memory_recall";
 import type { MemoryWriter } from "../core/memory_writer";
-import type { JobStore } from "../core/job_store";
+import type { JobRecord, JobStore } from "../core/job_store";
+import type { JobSummaryDTO, ServerEvent } from "./protocol";
 import { createAgentStack } from "../bootstrap";
 import type { UiBridge } from "./bridge";
 
@@ -43,6 +44,34 @@ export interface ServerRuntime {
   untrustedContext?: string | undefined;
   /** 收口整栈（配置 watcher + 全部 MCP 连接）；关停与切沙箱回收旧栈用 */
   dispose: () => Promise<void>;
+}
+
+/** 任务记录 → 线协议 DTO：只透出面板需要的字段（pid 等进程内细节不出网） */
+export function toJobSummary(record: JobRecord): JobSummaryDTO {
+  return {
+    id: record.id,
+    script: record.script,
+    args: record.args,
+    backend: record.backend,
+    status: record.status,
+    ...(record.exitCode !== undefined ? { exitCode: record.exitCode } : {}),
+    startedAt: record.startedAt,
+    deadlineAt: record.deadlineAt,
+    ...(record.endedAt !== undefined ? { endedAt: record.endedAt } : {}),
+    ...(record.reconciled === true ? { reconciled: true } : {}),
+    ...(record.container !== undefined ? { container: record.container } : {}),
+    ...(record.sessionId !== undefined ? { sessionId: record.sessionId } : {}),
+  };
+}
+
+/**
+ * 后台任务结束 → 广播 job_finished（跨会话通知）：任务在 A 会话发起，
+ * 人正待在 B 会话时也能收到。切换沙箱根重建栈后要重新挂到新的 JobStore 上。
+ */
+export function attachJobNotifier(jobs: JobStore, hub: { publishAll: (event: ServerEvent) => void }): void {
+  jobs.onFinished = (record) => {
+    hub.publishAll({ type: "job_finished", job: toJobSummary(record) });
+  };
 }
 
 export async function createServerRuntime(options: {

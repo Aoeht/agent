@@ -9,6 +9,7 @@ import { Composer } from "./components/Composer";
 import { Welcome } from "./components/Welcome";
 import { ApprovalModal, InputModal } from "./components/Modals";
 import { JobsPanel } from "./components/JobsPanel";
+import { JobToasts } from "./components/JobToasts";
 import { CheckpointsPanel } from "./components/CheckpointsPanel";
 import { McpPanel } from "./components/McpPanel";
 import { TracesPanel } from "./components/TracesPanel";
@@ -184,6 +185,20 @@ export default function App() {
       {drawer !== null && (
         <div className="fixed inset-0 z-30 bg-ink-900/30" onClick={() => setDrawer(null)} aria-hidden="true" />
       )}
+
+      <JobToasts
+        notices={state.jobNotices}
+        sessionLabel={(id) => {
+          const found = state.sessions.find((summary) => summary.sessionId === id);
+          return found ? sessionTitle(found) : undefined;
+        }}
+        onDismiss={actions.dismissJobNotice}
+        onOpenJobs={() => setJobsOpen(true)}
+        onOpenSession={(id) => {
+          actions.selectSession(id);
+          setDrawer(null);
+        }}
+      />
 
       <ApprovalModal />
       <InputModal />

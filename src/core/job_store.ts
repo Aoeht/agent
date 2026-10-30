@@ -11,6 +11,9 @@
  *
  * kill 按进程树收口：host 后端连孙进程一起终止（见 src/utils/process_tree.ts），否则
  * "脚本 A 调外部工具"的场景会留下孤儿；docker 后端杀 docker CLI 之后必须补 docker rm -f 收容器。
+ *
+ * onFinished：任务落定为终态时回调一次（宿主拿去广播跨会话通知）。进程重启后按 pid 校正出来的
+ * 终态、以及关停时的 killAll 都**不**回调——那不是"刚刚发生"的事件。
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import fs, { type FileHandle } from "node:fs/promises";
@@ -31,6 +34,8 @@ export interface JobRecord {
   container?: string;
   status: JobStatus;
   exitCode?: number;
+  /** 发起任务的会话（后台完成通知据此说"哪个会话的任务"；CLI 等无会话场景缺省） */
+  sessionId?: string;
   startedAt: number;
   deadlineAt: number;
   endedAt?: number;
@@ -87,6 +92,7 @@ function isJobRecord(value: unknown): value is JobRecord {
     typeof rec.script === "string" &&
     Array.isArray(rec.args) &&
     (rec.backend === "host" || rec.backend === "docker") &&
+    (rec.sessionId === undefined || typeof rec.sessionId === "string") &&
     typeof rec.pid === "number" &&
     typeof rec.startedAt === "number" &&
     typeof rec.deadlineAt === "number" &&
@@ -132,6 +138,10 @@ function cutIncompleteUtf8(buf: Buffer): number {
 export class JobStore {
   /** 本进程登记过的子进程：close 只在这个进程活着时才收得到 */
   private readonly tracked = new Map<string, { child: ChildProcess; timer: NodeJS.Timeout }>();
+  /** 任务终态回调：宿主挂载（广播跨会话通知），同一任务只回调一次 */
+  onFinished?: (record: JobRecord) => void;
+  /** 已回调过的任务 id：kill 与 close 回填可能都走到终态，靠它去重 */
+  private readonly announced = new Set<string>();
 
   constructor(readonly dir: string) {}
 
@@ -165,6 +175,7 @@ export class JobStore {
     backend: "host" | "docker";
     pid: number;
     container?: string;
+    sessionId?: string;
     timeoutMs: number;
   }): JobRecord {
     const startedAt = Date.now();
@@ -175,6 +186,7 @@ export class JobStore {
       backend: input.backend,
       pid: input.pid,
       ...(input.container !== undefined ? { container: input.container } : {}),
+      ...(input.sessionId !== undefined ? { sessionId: input.sessionId } : {}),
       status: "running",
       startedAt,
       deadlineAt: startedAt + input.timeoutMs,
@@ -286,6 +298,7 @@ export class JobStore {
     const killed: JobRecord = { ...record, status: "killed", endedAt: Date.now() };
     await this.save(killed);
     await this.terminate(record);
+    this.announce(killed);
     return killed;
   }
 
@@ -309,10 +322,14 @@ export class JobStore {
         const exitCode =
           current.exitCode ??
           (current.status === "timed_out" ? EXIT_TIMED_OUT : code ?? 1);
-        await this.save({ ...current, endedAt: current.endedAt ?? Date.now(), exitCode });
+        const saved: JobRecord = { ...current, endedAt: current.endedAt ?? Date.now(), exitCode };
+        await this.save(saved);
+        this.announce(saved);
         return;
       }
-      await this.save({ ...current, status: "exited", endedAt: Date.now(), exitCode: code ?? 1 });
+      const exited: JobRecord = { ...current, status: "exited", endedAt: Date.now(), exitCode: code ?? 1 };
+      await this.save(exited);
+      this.announce(exited);
     };
     // 极短脚本可能在登记（写 JSON 是异步的）期间就退出，close 已经错过：
     // 先看退出码，别让这种任务永远停在 running
@@ -327,7 +344,9 @@ export class JobStore {
       void (async () => {
         const current = await this.read(record.id);
         if (current !== undefined && current.status === "running") {
-          await this.save({ ...current, status: "exited", exitCode: 127, endedAt: Date.now() });
+          const failed: JobRecord = { ...current, status: "exited", exitCode: 127, endedAt: Date.now() };
+          await this.save(failed);
+          this.announce(failed);
         }
         await fs
           .appendFile(this.paths(record.id).stderr, `\n[job] 启动失败：${error.message}\n`, "utf-8")
@@ -338,11 +357,18 @@ export class JobStore {
 
   /** 到点回收：杀掉仍在跑的任务并标 timed_out（幂等，重复调用只生效一次） */
   async expire(id: string): Promise<void> {
+    await this.expireRecord(id, true);
+  }
+
+  /** reconcile 的到点校正不给通知：那是"上次进程里留下的旧任务"，不是刚刚结束 */
+  private async expireRecord(id: string, announce: boolean): Promise<void> {
     const record = await this.read(id);
     if (record === undefined || record.status !== "running") return;
     // 退出码与状态先落定再终止：close 回填异步到达，轮询可能在它之前就读；顺序反了会被回填成 exited
-    await this.save({ ...record, status: "timed_out", endedAt: Date.now(), exitCode: EXIT_TIMED_OUT });
+    const expired: JobRecord = { ...record, status: "timed_out", endedAt: Date.now(), exitCode: EXIT_TIMED_OUT };
+    await this.save(expired);
     await this.terminate(record);
+    if (announce) this.announce(expired);
   }
 
   /** 关停时统一收口：把本目录下所有仍在跑的后台任务杀掉，不留孤儿 */
@@ -352,6 +378,8 @@ export class JobStore {
       if (record.status !== "running") continue;
       await this.save({ ...record, status: "killed", endedAt: Date.now() });
       await this.terminate(record);
+      // 关停收口不是"任务跑完了"：标记为已通知，压掉随后的 close 回填回调
+      this.announced.add(record.id);
       killed++;
     }
     return killed;
@@ -360,7 +388,7 @@ export class JobStore {
   private async reconcile(record: JobRecord): Promise<JobRecord> {
     if (record.status !== "running") return record;
     if (Date.now() >= record.deadlineAt) {
-      await this.expire(record.id);
+      await this.expireRecord(record.id, false);
       return (await this.read(record.id)) ?? record;
     }
     // 本进程没登记过它、pid 也不在：登记它的进程已经退出，真实退出码不可知
@@ -370,6 +398,17 @@ export class JobStore {
       return exited;
     }
     return record;
+  }
+
+  /** 终态回调（幂等）：回调异常不该影响任务记录本身，吞掉只记日志 */
+  private announce(record: JobRecord): void {
+    if (this.announced.has(record.id)) return;
+    this.announced.add(record.id);
+    try {
+      this.onFinished?.(record);
+    } catch (error) {
+      console.error(`[JobStore] onFinished 回调失败（${record.id}）:`, error);
+    }
   }
 
   private async terminate(record: JobRecord): Promise<void> {

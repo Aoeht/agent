@@ -58,6 +58,17 @@ export class EventHub {
     for (const listener of [...(set ?? [])]) listener(event);
   };
 
+  /**
+   * 广播到所有已订阅的会话（跨会话通知）：后台任务不属于任何会话，
+   * 人在 B 会话时也要能收到 A 会话起的任务完成消息。同一个 listener 只收一次。
+   */
+  publishAll = (event: ServerEvent): void => {
+    const listeners = new Set<(event: ServerEvent) => void>();
+    for (const set of this.listeners.values()) for (const listener of set) listeners.add(listener);
+    console.log(`[Hub] broadcast ${event.type} -> ${listeners.size} 个订阅者`);
+    for (const listener of listeners) listener(event);
+  };
+
   subscribe(sessionId: string, listener: (event: ServerEvent) => void): () => void {
     let set = this.listeners.get(sessionId);
     if (!set) {
@@ -730,6 +741,8 @@ export class SessionManager {
       memoryStore,
       // 全服共用一个任务仓实例：/jobs 面板与各会话看到的 tracked 状态一致
       jobs,
+      // 后台任务记下来源会话：完成通知（job_finished）据此展示"哪个会话的任务"
+      sessionId,
       // 委派子代理的轨迹落在本会话目录下，随会话一起可查
       delegateTraceDir: path.join(entry.store.dir, "delegates"),
       // 团队运行的 events.jsonl/result.json 同样落在本会话目录下
