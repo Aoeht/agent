@@ -36,8 +36,9 @@ test.skipIf(process.env.RUN_BROWSER_TESTS !== "1")("供应商模型开关：隐�
     await page.getByRole("button", { name: /glm-5\.2/ }).click();
     await page.getByText("模型与参数", { exact: true }).waitFor();
     const hidden = await page.locator("select").first().locator("option").allTextContents();
-    expect(hidden).toContain("demo-1::alpha");
-    expect(hidden).not.toContain("demo-1::beta");
+    expect(hidden).toContain("alpha");
+    expect(hidden).not.toContain("beta");
+    expect(hidden.some(option => option.includes("::"))).toBe(false);
 
     // 全部显示后恢复
     await page.getByRole("button", { name: /glm-5\.2/ }).click();
@@ -49,7 +50,8 @@ test.skipIf(process.env.RUN_BROWSER_TESTS !== "1")("供应商模型开关：隐�
     await page.getByRole("button", { name: /glm-5\.2/ }).click();
     await page.getByText("模型与参数", { exact: true }).waitFor();
     const restored = await page.locator("select").first().locator("option").allTextContents();
-    expect(restored).toContain("demo-1::beta");
+    expect(restored).toContain("beta");
+    expect(restored.some(option => option.includes("::"))).toBe(false);
     expect(errors).toEqual([]);
   } finally { await browser.close(); server.stop(true); }
 }, 30_000);

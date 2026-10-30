@@ -2,7 +2,7 @@
 // 运行: bun test ./tests/model_options.test.ts
 // 纯函数测试：web/src/lib/modelOptions.ts 的下拉过滤逻辑（bun 直接跑 TS，无 DOM）
 import { test, expect, describe } from "bun:test";
-import { firstAvailableModel, visibleModelOptions } from "../web/src/lib/modelOptions";
+import { firstAvailableModel, modelDisplayName, visibleModelOptions } from "../web/src/lib/modelOptions";
 import type { ModelProbeStatus } from "../src/server/protocol";
 
 const probe = (model: string, kind: ModelProbeStatus["kind"], ok: boolean): ModelProbeStatus => ({ model, ok, kind });
@@ -46,5 +46,13 @@ describe("firstAvailableModel", () => {
 
   test("全都没有探测数据时取第一个", () => {
     expect(firstAvailableModel(["a", "b"], undefined)).toBe("a");
+  });
+});
+
+describe("modelDisplayName", () => {
+  test("自加供应商的模型只露模型名，配置值里的供应商前缀不显示", () => {
+    expect(modelDisplayName("UI_测试-e24aa334::ui-alpha")).toBe("ui-alpha");
+    expect(modelDisplayName("glm-5.2")).toBe("glm-5.2");
+    expect(modelDisplayName("kimi/kimi-k3")).toBe("kimi/kimi-k3");
   });
 });

@@ -5,6 +5,7 @@ import { PlanPanel } from "./PlanPanel";
 import { SandboxModal } from "./Modals";
 import { STOP_REASON_LABELS } from "../../../src/core/run_outcome";
 import { TASK_STATE_LABELS } from "../../../src/core/task_types";
+import { modelDisplayName } from "../lib/modelOptions";
 
 /** 工具开关面板：折叠框，勾选 = 启用；下一轮迭代立即生效 */
 function ToolToggles({ session }: { session: SessionUIState | null }) {
@@ -172,12 +173,12 @@ function Env({ session, sandboxRoot, onChangeSandbox }: { session: SessionUIStat
     <div className="space-y-2 text-sm">
       <div className="flex items-baseline justify-between gap-2">
         <span className="text-ink-400">模型</span>
-        <span className="font-mono text-xs">{session?.model ?? meta.model}</span>
+        <span className="font-mono text-xs">{modelDisplayName(session?.model ?? meta.model)}</span>
       </div>
       {meta.summaryModel && (
         <div className="flex items-baseline justify-between gap-2">
           <span className="text-ink-400">摘要模型</span>
-          <span className="font-mono text-xs">{meta.summaryModel}</span>
+          <span className="font-mono text-xs">{modelDisplayName(meta.summaryModel)}</span>
         </div>
       )}
       {(session?.temperature !== undefined || meta.temperature !== undefined) && (

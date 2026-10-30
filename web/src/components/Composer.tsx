@@ -10,7 +10,7 @@ import {
   MAX_USER_IMAGE_BYTES,
   type LocalImageAttachment,
 } from "../lib/attachments";
-import { firstAvailableModel, visibleModelOptions } from "../lib/modelOptions";
+import { firstAvailableModel, modelDisplayName, visibleModelOptions } from "../lib/modelOptions";
 import { useMediaQuery } from "../lib/useMediaQuery";
 
 export interface ComposerConfig {
@@ -46,10 +46,11 @@ const CONTEXT_WINDOW_TIERS: ReadonlyArray<{ label: string; value: number }> = [
 
 /** 探测结果的展示标记：ok 不加前缀（默认即正常），失败档位给前缀与 tooltip 说明 */
 function modelOptionLabel(model: string, probe: ModelProbeStatus | undefined): string {
-  if (!probe || probe.ok) return model;
-  if (probe.kind === "quota") return `⛔ ${model}（配额耗尽）`;
-  if (probe.kind === "unavailable") return `⚠️ ${model}（不可用）`;
-  return `⚠️ ${model}（探测异常）`;
+  const name = modelDisplayName(model);
+  if (!probe || probe.ok) return name;
+  if (probe.kind === "quota") return `⛔ ${name}（配额耗尽）`;
+  if (probe.kind === "unavailable") return `⚠️ ${name}（不可用）`;
+  return `⚠️ ${name}（探测异常）`;
 }
 
 /** 可用模型的配额后缀（响应头限流字段，服务商返回才有） */
@@ -537,7 +538,7 @@ export function Composer({
             title="模型与参数"
             className="max-w-32 shrink-0 truncate rounded-full bg-cream-200 px-3 py-2 text-xs font-medium text-ink-600 transition hover:bg-cream-300 disabled:opacity-40"
           >
-            ⚙ {(config.model ?? models[0] ?? "模型").split("/").pop()}
+            ⚙ {modelDisplayName(config.model ?? models[0] ?? "模型").split("/").pop()}
           </button>
           <textarea
             ref={textareaRef}

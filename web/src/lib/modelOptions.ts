@@ -7,6 +7,13 @@ export function statusByModel(status: ModelProbeStatus[] | undefined): Map<strin
   return new Map((status ?? []).map((probe) => [probe.model, probe]));
 }
 
+/** 展示用短名：自加供应商的模型在值里记作 `<供应商id>::<模型>`，界面上只露模型名。
+ *  只动文字，option 的 value 仍是完整 id（请求路由靠它解析供应商）。 */
+export function modelDisplayName(model: string): string {
+  const split = model.lastIndexOf("::");
+  return split >= 0 ? model.slice(split + 2) : model;
+}
+
 /** 下拉列表：剔除探测确凿不可用的（配额耗尽/模型不存在）；error 是不确定结果
  * （429 限流、网络抖动——多半是我们自己全量探测打出来的），保留只标 ⚠️。
  * 当前生效模型是探测失败的死模型时保留在列表尾（带 ⛔ 标注），否则 select 会空白显示 */
