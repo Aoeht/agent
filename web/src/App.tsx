@@ -1,3 +1,4 @@
+import { ProvidersPanel } from "./components/ProvidersPanel";
 // web/src/App.tsx
 import { useEffect, useState } from "react";
 import { useStore, type RunStatus } from "./state/store";
@@ -41,6 +42,7 @@ export default function App() {
   const hasPanel = useMediaQuery("(min-width: 1280px)");
   const [drawer, setDrawer] = useState<"sessions" | "panel" | null>(null);
   // 后台任务面板是独立覆盖层：全局（不属于某个会话），入口在页头
+  const [providersOpen, setProvidersOpen] = useState(false);
   const [jobsOpen, setJobsOpen] = useState(false);
   // 检查点面板：会话级（入口只在选中会话时出现）
   const [checkpointsOpen, setCheckpointsOpen] = useState(false);
@@ -68,6 +70,7 @@ export default function App() {
 
   return (
     <div className="flex h-full">
+      {providersOpen && <ProvidersPanel onClose={() => setProvidersOpen(false)} />}
       <Sidebar
         sessions={state.sessions}
         currentId={state.currentId}
@@ -94,6 +97,7 @@ export default function App() {
           <h2 className="truncate text-sm font-semibold">{current ? headerTitle : "新会话"}</h2>
           {current && <StatusChip status={current.status} />}
           <div className="ml-auto flex items-center gap-1">
+            <button className={iconBtn} onClick={() => setProvidersOpen(true)} title="添加供应商与手动探测">模型供应商</button>
             {current && (
               <button
                 onClick={() => setCheckpointsOpen(true)}

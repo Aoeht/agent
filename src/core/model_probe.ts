@@ -1,3 +1,4 @@
+import { createModelClient } from "./providers";
 // src/core/model_probe.ts
 import OpenAI from "openai";
 
@@ -5,7 +6,7 @@ import OpenAI from "openai";
  * 模型可用性探测：服务商 /models 清单里"有"不等于"能用"——免费配额按模型计
  * （glm-5.2 配额耗尽时清单照列，对话到一半才 403）。这里对候选模型真发一条
  * 微型补全（max_tokens=8，几十 token 级）做分类：可用 / 配额耗尽 / 模型不可用 / 其它异常。
- * 每次对话开始探测一次（CLI 启动横幅；Web 走 GET /models/status，服务端缓存 60s）。
+ * 仅用户主动触发（Web 走 POST /models/status，并发请求共享同一轮探测）。
  *
  * 剩余配额是 best-effort：各家没有统一接口——OpenAI 风格限流响应头有就解析
  * （DashScope 兼容端点实测不带任何限流头，阿里云只让去控制台看）；智谱直连
@@ -38,7 +39,7 @@ export interface ModelProbeOptions {
 /** 并发池探测所有候选模型：单模型失败不影响其它模型的结果 */
 export async function probeModels(options: ModelProbeOptions): Promise<ModelProbeResult[]> {
   const models = [...new Set(options.models.map((model) => model.trim()).filter(Boolean))];
-  const client = options.client ?? new OpenAI({ maxRetries: 0 });
+  const client = options.client ?? createModelClient({ maxRetries: 0 });
   const timeoutMs = options.timeoutMs ?? 8_000;
   const concurrency = Math.max(1, options.concurrency ?? 12);
   const results: ModelProbeResult[] = new Array(models.length);
@@ -106,15 +107,20 @@ export function quotaFromHeaders(headers: Headers): string | undefined {
   return parts.length > 0 ? parts.join("，") : undefined;
 }
 
-/** 错误分类：403/配额字样 → quota；404/模型不存在/产品未开通 → unavailable；其余 → error。
+/** 错误分类：明确额度错误 → quota；权限错误 → unavailable；404/模型不存在/产品未开通 → unavailable；其余 → error。
  * 注意 DashScope 用 400 表达"产品未激活"（不是限流）——这是确凿不可用，不能留在列表里 */
 export function classifyProbeError(error: unknown): { kind: ModelProbeKind; detail: string } {
   const status = (error as { status?: unknown } | null)?.status;
   const message = error instanceof Error ? error.message : String(error);
   const detail = message.slice(0, 160);
-  if (status === 403 || /quota|配额|Access to model denied/i.test(message)) return { kind: "quota", detail };
+  const value = error as { code?: unknown; error?: { code?: unknown } } | null;
+  const code = String(value?.error?.code ?? value?.code ?? "").toLowerCase();
+  if (/^(allocationquota\.freetieronly|insufficient_quota|quota_exceeded)$/.test(code)) return { kind: "quota", detail };
+  if (/throttl|rate.?limit|ratequota/.test(code)) return { kind: "error", detail };
+  if (/accessdenied|permission|unauthorized|arrearage|invalid_api_key|model_not_found/.test(code)) return { kind: "unavailable", detail };
+  if (/free quota exhausted|insufficient_quota|quota (?:exceeded|exhausted)|配额(?:已)?(?:耗尽|用完|不足)/i.test(message)) return { kind: "quota", detail };
   if (
-    status === 404 ||
+    status === 401 || status === 403 || status === 404 ||
     /does not exist|not found|不存在|无权|not activated|未开通|not open|not subscribe/i.test(message)
   ) {
     return { kind: "unavailable", detail };

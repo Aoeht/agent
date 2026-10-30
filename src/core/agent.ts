@@ -1,3 +1,4 @@
+import { createModelClient } from "./providers";
 // src/core/agent.ts
 import path from "node:path";
 import OpenAI from "openai";
@@ -398,7 +399,7 @@ export class Agent {
     this.taskStore = config.taskStore ?? new TaskStore(config.sessionStore
       ? path.join(config.sessionStore.dir, "tasks", `${path.basename(config.sessionStore.filePath, ".jsonl")}.sqlite`) : undefined);
     // 优先使用外部注入的 client；自建时 maxRetries: 0 —— 关掉 SDK 内置重试，统一由 complete() 重试
-    this.client = config.client ?? new OpenAI({ maxRetries: 0 });
+    this.client = config.client ?? createModelClient({ maxRetries: 0 });
     this.tools = config.tools ?? new ToolRegistry();
     this.toolProgressIntervalMs = config.toolProgressIntervalMs ?? TOOL_PROGRESS_INTERVAL_MS;
     this.toolConcurrencyLimit = Math.max(1, config.toolConcurrencyLimit ?? TOOL_CONCURRENCY_LIMIT);

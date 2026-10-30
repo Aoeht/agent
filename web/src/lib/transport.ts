@@ -1,3 +1,5 @@
+export interface ProviderInput { name: string; baseURL: string; apiKey: string; models: string[] }
+export interface ProviderInfo { id: string; name: string; baseURL: string; models: string[]; hasKey: boolean }
 // web/src/lib/transport.ts
 import type {
   ApprovalDecisionBody,
@@ -49,7 +51,10 @@ export interface Transport {
   openSession(sessionId: string): Promise<SessionDetailDTO>;
   /** 可选模型清单（服务商实时清单 + env 前置合并） */
   listModels(): Promise<string[]>;
-  /** 模型可用性探测（对话开始时拉取；清单里有 ≠ 能用，配额按模型计） */
+  /** 模型可用性探测（仅用户主动触发；清单里有 ≠ 能用） */
+  listProviders(): Promise<ProviderInfo[]>;
+  addProvider(input: ProviderInput): Promise<void>;
+  removeProvider(id: string): Promise<void>;
   listModelStatus(): Promise<ModelProbeStatusResponse>;
   /** 应用会话级配置；成功后服务器广播 session_config 事件 */
   applySessionConfig(sessionId: string, config: SessionConfigInput): Promise<SessionConfigEvent>;

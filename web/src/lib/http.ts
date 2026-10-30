@@ -1,3 +1,4 @@
+import type { ProviderInfo, ProviderInput } from "./transport";
 // web/src/lib/http.ts
 import type {
   ApprovalDecisionBody,
@@ -63,8 +64,11 @@ export class HttpTransport implements Transport {
     return (await this.request("/models")).json();
   }
 
+  async listProviders(): Promise<ProviderInfo[]> { return (await this.request("/providers")).json(); }
+  async addProvider(input: ProviderInput): Promise<void> { await this.request("/providers", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) }); }
+  async removeProvider(id: string): Promise<void> { await this.request("/providers/" + encodeURIComponent(id), { method: "DELETE" }); }
   async listModelStatus(): Promise<ModelProbeStatusResponse> {
-    return (await this.request("/models/status")).json();
+    return (await this.request("/models/status", { method: "POST" })).json();
   }
 
   async applySessionConfig(sessionId: string, config: SessionConfigInput): Promise<SessionConfigEvent> {

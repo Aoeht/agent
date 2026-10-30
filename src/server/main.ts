@@ -1,3 +1,4 @@
+import { providers, type ProviderInput } from "../core/providers";
 // src/server/main.ts
 /**
  * Web UI 服务器入口：`bun run src/server/main.ts`
@@ -18,7 +19,8 @@
 import path from "node:path";
 import OpenAI from "openai";
 import { resolveSessionDir } from "../config";
-import { fetchZhipuAccountQuota, isLikelyChatModel, probeModels } from "../core/model_probe";
+import { candidateModels, fetchZhipuAccountQuota, isLikelyChatModel, probeModels } from "../core/model_probe";
+import { createProbeCache } from "./model_probe_cache";
 import { UiBridge } from "./bridge";
 import type { ModelProbeStatusResponse, ThinkingEffort } from "./protocol";
 import { THINKING_EFFORTS } from "../utils/thinking_effort";
@@ -322,6 +324,16 @@ async function route(
       return new Response(null, { status: 204 });
     }
 
+    if (pathname === "/providers" && method === "GET") return json(providers.list());
+    if (pathname === "/providers" && method === "POST") {
+      try { return json(providers.add(await readJson(req) as unknown as ProviderInput)); }
+      catch (error) { return json({ error: error instanceof Error ? error.message : "保存失败" }, 400); }
+    }
+    const providerMatch = /^\/providers\/([^/]+)$/.exec(pathname);
+    if (providerMatch && method === "DELETE") {
+      providers.remove(decodeURIComponent(providerMatch[1]!));
+      return json({ ok: true });
+    }
     // ---- 状态与设置 ----
     if (pathname === "/status" && method === "GET") {
       return json(await sessions.status());
@@ -333,25 +345,9 @@ async function route(
       return json(await resolveModels(runtime));
     }
 
-    // 模型可用性探测：清单里有 ≠ 能用（免费配额按模型计）。探测 /models 的**全量**对话类
-    // 清单（不只配置候选——下拉列表里不该出现没开通/没配额的模型），没配额/不可用的
-    // 由前端从下拉列表剔除。缓存 60s（run 间的高频刷新靠它兜住，不逐 run 全量打探测）。
-    // 智谱直连时附账户余额。
-    if (pathname === "/models/status" && method === "GET") {
-      const now = Date.now();
-      if (now - probeCache.at < 60_000) return json(probeCache.payload);
-      const sweep = (await resolveModels(runtime)).filter(isLikelyChatModel);
-      const models = await probeModels({ models: sweep, concurrency: 12, timeoutMs: 6_000 });
-      const accountQuota = await fetchZhipuAccountQuota(
-        process.env.OPENAI_BASE_URL?.trim() ?? "",
-        process.env.OPENAI_API_KEY?.trim() ?? ""
-      );
-      const payload: ModelProbeStatusResponse = {
-        models,
-        ...(accountQuota !== undefined ? { accountQuota } : {}),
-      };
-      probeCache = { at: Date.now(), payload };
-      return json(payload);
+    // 配置候选按需刷新，不扫描服务商全量模型；并发请求共享探测任务。
+    if (pathname === "/models/status" && method === "POST") {
+      return json(await loadProbeStatus(runtime));
     }
 
     // 会话级配置（模型/摘要模型/上下文窗口/温度/迭代上限/思考程度）
@@ -466,8 +462,11 @@ function toJobSummary(record: JobRecord): JobSummaryDTO {
 // ---------- 模型清单 ----------
 
 let modelsCache: { at: number; models: string[] } = { at: 0, models: [] };
-/** 模型可用性探测缓存：60s 内的对话开始共享一次探测结果（微型补全 × N 模型，省着点配额） */
-let probeCache: { at: number; payload: ModelProbeStatusResponse } = { at: 0, payload: { models: [] } };
+const loadProbeStatus = createProbeCache<ServerRuntime, ModelProbeStatusResponse>(async (runtime) => {
+  const models = await probeModels({ models: [...candidateModels(runtime.config).filter(isLikelyChatModel), ...providers.models()], concurrency: 3, timeoutMs: 6_000 });
+  const accountQuota = await fetchZhipuAccountQuota(process.env.OPENAI_BASE_URL?.trim() ?? "", process.env.OPENAI_API_KEY?.trim() ?? "");
+  return { models, ...(accountQuota !== undefined ? { accountQuota } : {}) };
+}, 0);
 
 function dedupeKeepOrder(models: string[]): string[] {
   return [...new Set(models.filter((model) => model !== ""))];
@@ -478,7 +477,7 @@ async function resolveModels(runtime: ServerRuntime): Promise<string[]> {
     .split(",")
     .map((model) => model.trim())
     .filter(Boolean);
-  const current = dedupeKeepOrder([runtime.config.model, runtime.config.summaryModel]);
+  const current = dedupeKeepOrder([runtime.config.model, runtime.config.summaryModel, ...providers.models()]);
 
   const now = Date.now();
   if (now - modelsCache.at < 5 * 60_000) {

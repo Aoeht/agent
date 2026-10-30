@@ -75,7 +75,7 @@ export function Composer({
   running: boolean;
   disabled: boolean;
   models: string[];
-  /** 模型可用性探测结果（对话开始时拉取）：探测失败的模型直接从下拉列表剔除 */
+  /** 模型可用性探测结果（用户主动触发）：探测失败的模型直接从下拉列表剔除 */
   modelStatus?: ModelProbeStatus[];
   /** 账户级配额/余额（服务商支持时才有） */
   accountQuota?: string;

@@ -175,7 +175,7 @@ describe("fetchZhipuAccountQuota", () => {
 describe("classifyProbeError", () => {
   test("中文配额提示、无 status 错误、普通异常各归其类", () => {
     expect(classifyProbeError(new Error("Free quota exhausted, 请充值")).kind).toBe("quota");
-    expect(classifyProbeError(Object.assign(new Error("无权访问"), { status: 403 })).kind).toBe("quota");
+    expect(classifyProbeError(Object.assign(new Error("无权访问"), { status: 403 })).kind).toBe("unavailable");
     expect(classifyProbeError(new Error("model does not exist")).kind).toBe("unavailable");
     expect(classifyProbeError(new Error("socket hang up")).kind).toBe("error");
   });

@@ -1,3 +1,4 @@
+import { createModelClient } from "./providers";
 // src/core/memory_writer.ts
 import path from "node:path";
 import OpenAI from "openai";
@@ -179,7 +180,7 @@ export class MemoryWriter {
     signal?: AbortSignal | undefined,
     summaryModelOverride?: string | undefined
   ): Promise<{ content: string; tokens: number }> {
-    this.client ??= new OpenAI({ maxRetries: 1, timeout: 60_000 });
+    this.client ??= createModelClient({ maxRetries: 1, timeout: 60_000 });
     const client = this.client;
     const messages = [
       { role: "system" as const, content: MEMORY_EXTRACT_PROMPT },

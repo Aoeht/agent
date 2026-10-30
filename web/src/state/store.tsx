@@ -1,3 +1,4 @@
+import type { ProviderInfo, ProviderInput } from "../lib/transport";
 // web/src/state/store.tsx
 import {
   createContext,
@@ -125,7 +126,7 @@ interface AppState {
   byId: Record<string, SessionUIState>;
   /** 可选模型清单（GET /models，启动时拉一次） */
   models: string[];
-  /** 模型可用性探测（GET /models/status）：对话开始时刷新，探测失败的模型从下拉列表剔除 */
+  /** 模型可用性探测（POST /models/status）：仅用户主动触发，明确不可用的模型从下拉列表剔除 */
   modelStatus: ModelProbeStatus[];
   /** 账户级配额/余额（服务商支持时才有，如智谱 trial_balance） */
   modelAccountQuota?: string;
@@ -617,6 +618,11 @@ export interface Store {
   state: AppState;
   current: SessionUIState | null;
   actions: {
+    listProviders(): Promise<ProviderInfo[]>;
+    addProvider(input: ProviderInput): Promise<void>;
+    removeProvider(id: string): Promise<void>;
+    refreshModels(): Promise<void>;
+    probeModels(): Promise<void>;
     selectSession(id: string): void;
     /** 回到欢迎界面（不选中任何会话；不创建空会话） */
     goWelcome(): void;
@@ -691,19 +697,6 @@ export function StoreProvider({
       if (!alive) return;
       dispatch({ type: "models_loaded", models });
     });
-    void resolvedTransport
-      .listModelStatus()
-      .then((result) => {
-        if (!alive) return;
-        dispatch({
-          type: "model_status_loaded",
-          status: result.models,
-          ...(result.accountQuota !== undefined ? { accountQuota: result.accountQuota } : {}),
-        });
-      })
-      .catch(() => {
-        // 探测端点不可用（老版本后端）不拦 UI：下拉框只是没有可用性过滤与标注
-      });
     void resolvedTransport.getSettings().then((settings) => {
       if (!alive) return;
       dispatch({ type: "settings_loaded", sandboxRoot: settings.sandboxRoot });
@@ -742,34 +735,9 @@ export function StoreProvider({
     void resolvedTransport.openSession(currentId).then((detail) => {
       if (alive) dispatch({ type: "session_opened", detail });
     });
-    // 每次对话开始刷新模型可用性（服务端 60s 缓存，切换会话的重复拉取几乎零成本）
-    void resolvedTransport
-      .listModelStatus()
-      .then((result) => {
-        if (alive) dispatch({
-          type: "model_status_loaded",
-          status: result.models,
-          ...(result.accountQuota !== undefined ? { accountQuota: result.accountQuota } : {}),
-        });
-      })
-      .catch(() => {});
     void resolvedTransport.listTools(currentId).then((toolState) => {
       if (alive) dispatch({ type: "tools_loaded", id: currentId, ...toolState });
     });
-    // 每次 run 结束重新检查模型可用性与额度：run 中途配额耗尽的模型，下一轮从列表里消失
-    const refreshModelStatus = () => {
-      void resolvedTransport
-        .listModelStatus()
-        .then((result) => {
-          if (!alive) return;
-          dispatch({
-            type: "model_status_loaded",
-            status: result.models,
-            ...(result.accountQuota !== undefined ? { accountQuota: result.accountQuota } : {}),
-          });
-        })
-        .catch(() => {});
-    };
     const unsubscribe = resolvedTransport.subscribe(currentId, (event) => {
       // MCP 热载入等引起的工具集变化：重拉本会话的工具开关面板数据
       if (event.type === "tools_changed") {
@@ -778,7 +746,6 @@ export function StoreProvider({
         }).catch(() => {});
         return;
       }
-      if (event.type === "run_end") refreshModelStatus();
       // 检查点回滚改写了会话文件（本端或其它标签页触发）：重拉历史，别继续显示已截断的消息
       if (event.type === "history_rewound") {
         void resolvedTransport.openSession(currentId).then((detail) => {
@@ -842,6 +809,17 @@ export function StoreProvider({
       }
     };
     return {
+      listProviders: () => resolvedTransport.listProviders(),
+      addProvider: (input) => resolvedTransport.addProvider(input),
+      removeProvider: (id) => resolvedTransport.removeProvider(id),
+      async refreshModels() {
+        dispatch({ type: "models_loaded", models: await resolvedTransport.listModels() });
+        dispatch({ type: "model_status_loaded", status: [] });
+      },
+      async probeModels() {
+        const result = await resolvedTransport.listModelStatus();
+        dispatch({ type: "model_status_loaded", status: result.models, ...(result.accountQuota !== undefined ? { accountQuota: result.accountQuota } : {}) });
+      },
       selectSession(id: string) {
         dispatch({ type: "select", id });
       },
