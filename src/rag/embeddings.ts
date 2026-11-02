@@ -3,13 +3,15 @@
  * 语义检索的 embedding 客户端：走 OpenAI 兼容 /embeddings 接口，默认复用模型服务的地址与 Key。
  *
  * 环境变量（均可选；EMBEDDING_MODEL 是语义检索的总开关，不配则 rag_search 保持纯 BM25）：
- *   EMBEDDING_MODEL      向量模型名（如 DashScope qwen3.7-text-embedding-flash、智谱 embedding-3），配了才启用语义通道
- *   EMBEDDING_BASE_URL   向量服务地址（以 /v1 结尾），缺省用 OPENAI_BASE_URL
- *   EMBEDDING_API_KEY    向量服务 Key，缺省用 OPENAI_API_KEY
+ *   EMBEDDING_MODEL      向量模型名（如 DashScope qwen3.7-text-embedding-flash、智谱 embedding-3），配了才启用语义通道；
+ *                        可写成 <供应商ID>::<模型>（供应商ID 见 Web 供应商面板）直接复用该供应商的地址与 Key
+ *   EMBEDDING_BASE_URL   向量服务地址（以 /v1 结尾），缺省按"前缀供应商 → 主模型供应商 → OPENAI_BASE_URL"依次回退
+ *   EMBEDDING_API_KEY    向量服务 Key，缺省同上回退到 OPENAI_API_KEY
  *   EMBEDDING_DIMENSIONS 输出维度（qwen/embedding-3 均支持 256~1024+），缺省用模型默认；调小可显著省缓存体积
  *   EMBEDDING_BATCH      单请求最大条数，缺省 20（DashScope 上限 20/25，OpenAI 官方可到 2048，可调大省请求数）
  */
 import OpenAI from "openai";
+import { resolveAuxEndpoint } from "../core/providers";
 
 export interface EmbeddingClient {
   /** 模型名参与向量缓存的 key：换模型旧向量自动失效，不需要手动清理 */
@@ -48,15 +50,26 @@ export class OpenAICompatibleEmbeddings implements EmbeddingClient {
   }
 }
 
+export interface EmbeddingEnvOptions {
+  /** 主模型（可带 <供应商ID>:: 前缀）：辅助通道没配专用地址/Key 时复用其供应商 */
+  mainModel?: string | undefined;
+}
+
 /** 从环境变量构造客户端；EMBEDDING_MODEL 未配返回 undefined，配了但缺地址/Key 直接抛错（配置错误应当面暴露） */
-export function createEmbeddingClientFromEnv(): EmbeddingClient | undefined {
+export function createEmbeddingClientFromEnv(options: EmbeddingEnvOptions = {}): EmbeddingClient | undefined {
   const model = process.env.EMBEDDING_MODEL?.trim();
   if (!model) return undefined;
-  const baseURL = process.env.EMBEDDING_BASE_URL?.trim() || process.env.OPENAI_BASE_URL?.trim();
-  const apiKey = process.env.EMBEDDING_API_KEY?.trim() || process.env.OPENAI_API_KEY?.trim();
+  const endpoint = resolveAuxEndpoint({
+    model,
+    mainModel: options.mainModel ?? process.env.AGENT_MODEL?.trim(),
+    baseURL: process.env.EMBEDDING_BASE_URL?.trim(),
+    apiKey: process.env.EMBEDDING_API_KEY?.trim(),
+  });
+  const { baseURL, apiKey } = endpoint;
   if (!baseURL || !apiKey) {
     throw new Error(
-      "已配置 EMBEDDING_MODEL 但缺少向量服务地址/Key：请补 EMBEDDING_BASE_URL 与 EMBEDDING_API_KEY，或依赖 OPENAI_BASE_URL/OPENAI_API_KEY"
+      "已配置 EMBEDDING_MODEL 但缺少向量服务地址/Key：请补 EMBEDDING_BASE_URL 与 EMBEDDING_API_KEY，" +
+        "或把模型写成 <供应商ID>::<模型>，或依赖主模型供应商 / OPENAI_*"
     );
   }
   const raw = process.env.EMBEDDING_DIMENSIONS?.trim();
@@ -66,7 +79,7 @@ export function createEmbeddingClientFromEnv(): EmbeddingClient | undefined {
   const client = new OpenAI({ baseURL, apiKey, maxRetries: 1, timeout: 60_000 });
   return new OpenAICompatibleEmbeddings(
     client,
-    model,
+    endpoint.model,
     dimensions !== undefined && Number.isFinite(dimensions) ? dimensions : undefined,
     batchSize !== undefined && Number.isFinite(batchSize) && batchSize > 0 ? batchSize : undefined
   );

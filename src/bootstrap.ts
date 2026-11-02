@@ -147,11 +147,15 @@ export function registerSessionTools(
   registry.register(createSearchWebTool());
   // 检索增强：改写器缺省用摘要模型（本地命中不足才真正调用），重排器仅在配置 RERANK_MODEL 时启用；
   // 检索 trace 缺省开启（RAG_TRACE=0 关闭），逐行追加到 .rag-cache/traces/rag-search.jsonl
-  const ragRewriter = createQueryRewriterFromEnv({ model: options.config?.summaryModel ?? options.config?.model });
+  const ragRewriter = createQueryRewriterFromEnv({
+    model: options.config?.summaryModel ?? options.config?.model,
+    mainModel: options.config?.model,
+  });
   registry.register(
     createRagSearchTool({
+      mainModel: options.config?.model,
       rewriter: ragRewriter ?? null,
-      reranker: createRerankerFromEnv() ?? null,
+      reranker: createRerankerFromEnv({ mainModel: options.config?.model }) ?? null,
       traceSink: resolveRagTraceSinkFromEnv(),
     })
   );
@@ -273,7 +277,7 @@ export async function createAgentStack(options: AgentStackOptions = {}): Promise
   // 配置错误（缺地址/Key）当面告警并降级，不阻塞启动
   let recallEmbeddings: EmbeddingClient | undefined;
   try {
-    recallEmbeddings = createEmbeddingClientFromEnv();
+    recallEmbeddings = createEmbeddingClientFromEnv({ mainModel: config.model });
   } catch (error) {
     console.warn(`⚠️ ${prefix}跨会话情景检索降级为关键词: ${error instanceof Error ? error.message : error}`);
   }

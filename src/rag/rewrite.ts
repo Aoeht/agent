@@ -7,10 +7,12 @@
  *
  * 环境变量（均可选）：
  *   AGENT_RAG_REWRITE=0        关闭改写（缺省开启，但需要知道模型名才会真正构造）
- *   AGENT_RAG_REWRITE_MODEL    改写用的模型，缺省用调用方传入的 summaryModel/主模型
- *   REWRITE_BASE_URL / REWRITE_API_KEY  专用地址与 Key，缺省复用 OPENAI_BASE_URL / OPENAI_API_KEY
+ *   AGENT_RAG_REWRITE_MODEL    改写用的模型，缺省用调用方传入的 summaryModel/主模型；
+ *                              可写成 <供应商ID>::<模型> 直接复用该供应商的地址与 Key
+ *   REWRITE_BASE_URL / REWRITE_API_KEY  专用地址与 Key，缺省按"前缀供应商 → 主模型供应商 → OPENAI_*"回退
  */
 import OpenAI from "openai";
+import { resolveAuxEndpoint } from "../core/providers";
 
 export interface QueryRewriter {
   readonly model: string;
@@ -97,6 +99,8 @@ export function createTimeoutSignal(
 export interface RewriterFromEnvOptions {
   /** 调用方已知的模型名（如 summaryModel / 主模型）；AGENT_RAG_REWRITE_MODEL 优先 */
   model?: string | undefined;
+  /** 主模型（可带 <供应商ID>:: 前缀）：没配专用地址/Key 时复用其供应商 */
+  mainModel?: string | undefined;
 }
 
 /**
@@ -108,12 +112,20 @@ export function createQueryRewriterFromEnv(options: RewriterFromEnvOptions = {})
   if (flag === "0" || flag === "false" || flag === "off") return undefined;
   const model = process.env.AGENT_RAG_REWRITE_MODEL?.trim() || options.model?.trim();
   if (!model) return undefined;
-  const baseURL = process.env.REWRITE_BASE_URL?.trim() || process.env.OPENAI_BASE_URL?.trim();
-  const apiKey = process.env.REWRITE_API_KEY?.trim() || process.env.OPENAI_API_KEY?.trim();
-  if (!baseURL || !apiKey) {
+  const endpoint = resolveAuxEndpoint({
+    model,
+    mainModel: options.mainModel ?? process.env.AGENT_MODEL?.trim(),
+    baseURL: process.env.REWRITE_BASE_URL?.trim(),
+    apiKey: process.env.REWRITE_API_KEY?.trim(),
+  });
+  if (!endpoint.baseURL || !endpoint.apiKey) {
     throw new Error(
-      "已启用查询改写但缺少模型服务地址/Key：请补 REWRITE_BASE_URL 与 REWRITE_API_KEY，或依赖 OPENAI_BASE_URL/OPENAI_API_KEY"
+      "已启用查询改写但缺少模型服务地址/Key：请补 REWRITE_BASE_URL 与 REWRITE_API_KEY，" +
+        "或把模型写成 <供应商ID>::<模型>，或依赖主模型供应商 / OPENAI_*"
     );
   }
-  return new LlmQueryRewriter(new OpenAI({ baseURL, apiKey, maxRetries: 1, timeout: 30_000 }), model);
+  return new LlmQueryRewriter(
+    new OpenAI({ baseURL: endpoint.baseURL, apiKey: endpoint.apiKey, maxRetries: 1, timeout: 30_000 }),
+    endpoint.model
+  );
 }

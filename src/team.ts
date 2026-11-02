@@ -2,8 +2,8 @@ import fs from "node:fs/promises";
 import { appendFileSync } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import OpenAI from "openai";
 import { createAgentStack } from "./bootstrap";
+import { createModelClient } from "./core/providers";
 import { TeamCoordinator, TeamReport, type TeamEvent } from "./core/team_coordinator";
 import { createTeamChildFactory, loadTeamOptions, TEAM_CAPABILITIES } from "./team_runtime";
 import type { ChildRecord } from "./core/team_scheduler";
@@ -44,7 +44,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   try {
     // Read-only workers never require an interactive approval channel. MCP ask policies remain denied.
     stack = await createAgentStack({ disableRunScript: true });
-    const client = new OpenAI({ maxRetries: 0 });
+    const client = createModelClient({ maxRetries: 0 });
     const onEvent = (event: TeamEvent) => {
       appendFileSync(path.join(runDirectory, "events.jsonl"), JSON.stringify({ at: new Date().toISOString(), ...event }) + "\n");
       if (event.type === "team_plan") console.log(`计划：${event.plan.tasks.length} 个子任务，并发 ${options.concurrency}`);

@@ -4,13 +4,15 @@
  * BM25 与向量都是“查询和文档各自编码后比相似度”，重排模型是查询+文档一起过一遍，能压掉词面命中但语义跑偏的块。
  *
  * 环境变量（均可选；RERANK_MODEL 是重排的总开关，不配则 rag_search 保持原排序）：
- *   RERANK_MODEL     重排模型名（DashScope：qwen3.7-text-rerank / qwen3-rerank）
- *   RERANK_BASE_URL  重排接口地址；缺省按 OPENAI_BASE_URL 推断：DashScope 域名走原生 rerank 路径，
- *                    其它服务商按 OpenAI 兼容的 {base}/rerank 调用
- *   RERANK_API_KEY   重排服务 Key，缺省用 OPENAI_API_KEY
+ *   RERANK_MODEL     重排模型名（DashScope：qwen3.7-text-rerank / qwen3-rerank）；
+ *                    可写成 <供应商ID>::<模型> 直接复用该供应商的地址与 Key
+ *   RERANK_BASE_URL  重排接口地址；缺省按"前缀供应商 → 主模型供应商 → OPENAI_BASE_URL"推断：
+ *                    DashScope 域名走原生 rerank 路径，其它服务商按 OpenAI 兼容的 {base}/rerank 调用
+ *   RERANK_API_KEY   重排服务 Key，缺省同上回退到 OPENAI_API_KEY
  *
  * 请求体形状按地址判定：DashScope 原生用 input/parameters 包一层，其余用扁平的 query/documents。
  */
+import { resolveAuxEndpoint } from "../core/providers";
 import { createTimeoutSignal } from "./rewrite";
 
 export interface Reranker {
@@ -96,29 +98,39 @@ export function resolveRerankEndpoint(baseURL: string): { url: string; style: Re
   return { url: `${baseURL.replace(/\/+$/, "")}/rerank`, style: "generic" };
 }
 
+export interface RerankEnvOptions {
+  /** 主模型（可带 <供应商ID>:: 前缀）：没配专用地址/Key 时复用其供应商 */
+  mainModel?: string | undefined;
+}
+
 /**
  * 从环境变量构造重排器；RERANK_MODEL 未配返回 undefined（不重排）。
  * 配了模型却缺地址/Key 直接抛错，与 embedding 客户端保持同一口径。
  */
-export function createRerankerFromEnv(): Reranker | undefined {
+export function createRerankerFromEnv(options: RerankEnvOptions = {}): Reranker | undefined {
   const model = process.env.RERANK_MODEL?.trim();
   if (!model) return undefined;
-  const apiKey = process.env.RERANK_API_KEY?.trim() || process.env.OPENAI_API_KEY?.trim();
-  if (!apiKey) {
-    throw new Error("已配置 RERANK_MODEL 但缺少 Key：请补 RERANK_API_KEY，或依赖 OPENAI_API_KEY");
-  }
   const explicit = process.env.RERANK_BASE_URL?.trim();
+  const endpoint = resolveAuxEndpoint({
+    model,
+    mainModel: options.mainModel ?? process.env.AGENT_MODEL?.trim(),
+    baseURL: explicit,
+    apiKey: process.env.RERANK_API_KEY?.trim(),
+  });
+  const { apiKey } = endpoint;
+  if (!apiKey) {
+    throw new Error("已配置 RERANK_MODEL 但缺少 Key：请补 RERANK_API_KEY，或把模型写成 <供应商ID>::<模型>，或依赖 OPENAI_API_KEY");
+  }
   if (explicit) {
     // 显式地址：已经是完整端点（DashScope 原生路径或 .../rerank）就直接用，否则按通用形状补 /rerank
     const isDashScopePath = explicit.includes(DASHSCOPE_RERANK_PATH);
     const isFullEndpoint = isDashScopePath || /\/rerank\/?$/i.test(explicit);
     const url = isFullEndpoint ? explicit : `${explicit.replace(/\/+$/, "")}/rerank`;
-    return new HttpReranker(url, apiKey, model, isDashScopePath ? "dashscope" : "generic");
+    return new HttpReranker(url, apiKey, endpoint.model, isDashScopePath ? "dashscope" : "generic");
   }
-  const baseURL = process.env.OPENAI_BASE_URL?.trim();
-  if (!baseURL) {
-    throw new Error("已配置 RERANK_MODEL 但缺少地址：请补 RERANK_BASE_URL，或依赖 OPENAI_BASE_URL");
+  if (!endpoint.baseURL) {
+    throw new Error("已配置 RERANK_MODEL 但缺少地址：请补 RERANK_BASE_URL，或把模型写成 <供应商ID>::<模型>，或依赖 OPENAI_BASE_URL");
   }
-  const { url, style } = resolveRerankEndpoint(baseURL);
-  return new HttpReranker(url, apiKey, model, style);
+  const { url, style } = resolveRerankEndpoint(endpoint.baseURL);
+  return new HttpReranker(url, apiKey, endpoint.model, style);
 }

@@ -39,6 +39,8 @@ export interface RagSearchOptions {
   trustWeights?: { internal?: number; web?: number };
   /** 语义检索客户端；缺省读环境变量（EMBEDDING_MODEL 配了才启用），显式传 `null` 可强制纯词法 */
   embeddings?: EmbeddingClient | null;
+  /** 主模型（可带 <供应商ID>:: 前缀）：EMBEDDING_MODEL 没配专用地址/Key 时复用其供应商 */
+  mainModel?: string | undefined;
   /** 语义通道召回参数：进入融合的向量候选数与相似度下限 */
   vector?: { topK?: number; minSimilarity?: number };
   /**
@@ -106,7 +108,9 @@ export function createRagSearchTool(options: RagSearchOptions = {}): ToolDefinit
   // 配了但缺地址/Key 会在工具创建时抛错，而不是等到每次检索才失败。
   // 显式传 null 可强制关闭（测试或临时排查用）。
   const embeddings =
-    options.embeddings === undefined ? (createEmbeddingClientFromEnv() ?? undefined) : (options.embeddings ?? undefined);
+    options.embeddings === undefined
+      ? (createEmbeddingClientFromEnv({ mainModel: options.mainModel }) ?? undefined)
+      : (options.embeddings ?? undefined);
   const vectorTopK = options.vector?.topK ?? 24;
   const minSimilarity = options.vector?.minSimilarity ?? 0.35;
   const rewriter = options.rewriter ?? undefined;

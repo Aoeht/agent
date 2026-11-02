@@ -16,8 +16,9 @@ import fs from "node:fs/promises";
 import { appendFileSync } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import OpenAI from "openai";
+import type OpenAI from "openai";
 import { z } from "zod";
+import { createModelClient } from "../core/providers";
 import { defineTool } from "../core/types";
 import type { ToolRegistry } from "../core/registry";
 import type { ChildFactory, ChildRecord } from "../core/team_scheduler";
@@ -109,7 +110,7 @@ export function createTeamTaskTool(options: TeamTaskToolOptions) {
       const runId = randomUUID();
       const runDirectory = path.join(teamsDir, runId);
       await fs.mkdir(runDirectory, { recursive: true });
-      const client = options.client ?? new OpenAI({ maxRetries: 0 });
+      const client = options.client ?? createModelClient({ maxRetries: 0 });
       const reviewModel = options.reviewModel ?? process.env.AGENT_TEAM_REVIEW_MODEL?.trim() ?? undefined;
       const stack: TeamChildStack = {
         registry: options.sourceRegistry,

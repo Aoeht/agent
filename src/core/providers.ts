@@ -80,6 +80,31 @@ export class ProviderStore {
   }
 }
 export const providers = new ProviderStore();
+
+/** "<providerId>::<model>" → 供应商端点与真实模型名；不是前缀形式返回 undefined */
+function resolvePrefixed(model: string, store: ProviderStore): { baseURL: string; apiKey: string; model: string } | undefined {
+  if (!model.includes("::")) return undefined;
+  const found = store.resolve(model);
+  return found ? { baseURL: found.baseURL, apiKey: found.apiKey, model: found.model } : undefined;
+}
+
+/**
+ * 辅助通道（embedding / 重排 / 查询改写）的端点解析，优先级：
+ * 显式变量 > 模型名里的 <providerId>:: 前缀 > 主模型所属供应商 > OPENAI_BASE_URL/OPENAI_API_KEY。
+ * 返回的 model 已剥离前缀，可直接放进请求体。
+ */
+export function resolveAuxEndpoint(
+  options: { model: string; mainModel?: string | undefined; baseURL?: string | undefined; apiKey?: string | undefined },
+  store: ProviderStore = providers
+): { model: string; baseURL: string | undefined; apiKey: string | undefined } {
+  const own = resolvePrefixed(options.model, store);
+  const main = options.mainModel ? resolvePrefixed(options.mainModel, store) : undefined;
+  return {
+    model: own?.model ?? options.model,
+    baseURL: options.baseURL?.trim() || own?.baseURL || main?.baseURL || process.env.OPENAI_BASE_URL?.trim() || undefined,
+    apiKey: options.apiKey?.trim() || own?.apiKey || main?.apiKey || process.env.OPENAI_API_KEY?.trim() || undefined,
+  };
+}
 /** 同一客户端按每次请求的模型路由，摘要和流式请求同样适用。 */
 export function createModelClient(options: { maxRetries?: number; timeout?: number } = {}, store = providers, fetcher: typeof fetch = fetch): OpenAI {
   return new OpenAI({ ...options, apiKey: process.env.OPENAI_API_KEY || "unconfigured", fetch: async (input, init) => {

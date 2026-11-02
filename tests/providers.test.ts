@@ -2,7 +2,7 @@ import { test, expect } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { ProviderStore, createModelClient, providersFile } from "../src/core/providers";
+import { ProviderStore, createModelClient, providersFile, resolveAuxEndpoint } from "../src/core/providers";
 
 test("供应商持久化、脱敏、同名模型隔离及请求路由", async () => {
   const dir = mkdtempSync(path.join(tmpdir(), "provider-test-"));
@@ -28,6 +28,37 @@ test("供应商持久化、脱敏、同名模型隔离及请求路由", async ()
     expect(store.resolve("default-model")).toBeUndefined();
     expect(() => store.add({ name: "bad", baseURL: "file:///tmp", apiKey: "k", models: ["m"] })).toThrow();
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("辅助通道端点：模型前缀 > 主供应商兜底 > OPENAI_*", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "provider-aux-"));
+  const prevBase = process.env.OPENAI_BASE_URL;
+  const prevKey = process.env.OPENAI_API_KEY;
+  try {
+    const store = new ProviderStore(path.join(dir, "providers.json"));
+    const main = store.add({ name: "main", baseURL: "https://main.example/v1", apiKey: "main-key", models: ["chat"] });
+    const aux = store.add({ name: "aux", baseURL: "https://aux.example/v1", apiKey: "aux-key", models: ["embed"] });
+    process.env.OPENAI_BASE_URL = "https://env.example/v1";
+    process.env.OPENAI_API_KEY = "env-key";
+
+    // 辅助模型自带前缀：用它的供应商，并把前缀从请求模型名里剥掉
+    expect(resolveAuxEndpoint({ model: `${aux.id}::embed`, mainModel: `${main.id}::chat` }, store))
+      .toEqual({ model: "embed", baseURL: "https://aux.example/v1", apiKey: "aux-key" });
+    // 没前缀：复用主模型供应商的地址/Key，辅助模型名保持原样
+    expect(resolveAuxEndpoint({ model: "embedding-x", mainModel: `${main.id}::chat` }, store))
+      .toEqual({ model: "embedding-x", baseURL: "https://main.example/v1", apiKey: "main-key" });
+    // 专用变量优先于前缀与主供应商
+    expect(resolveAuxEndpoint({ model: `${aux.id}::embed`, baseURL: "https://explicit/v1", apiKey: "explicit-key" }, store))
+      .toEqual({ model: "embed", baseURL: "https://explicit/v1", apiKey: "explicit-key" });
+    // 都没有才回退 OPENAI_*
+    expect(resolveAuxEndpoint({ model: "embedding-x", mainModel: "plain-model" }, store))
+      .toEqual({ model: "embedding-x", baseURL: "https://env.example/v1", apiKey: "env-key" });
+    expect(() => resolveAuxEndpoint({ model: "gone::embed" }, store)).toThrow("已删除");
+  } finally {
+    if (prevBase === undefined) delete process.env.OPENAI_BASE_URL; else process.env.OPENAI_BASE_URL = prevBase;
+    if (prevKey === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = prevKey;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("模型显示开关：只从清单剔除，已选用模型仍可路由", () => {
