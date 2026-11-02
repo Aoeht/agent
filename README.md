@@ -75,6 +75,8 @@ bun run team "分析工作区代码并复核结论"
 | `run_script` | 在沙箱内执行脚本（`background:true` 可后台跑长任务） | docker 可选 |
 | `job_output` | 查看后台任务状态与日志尾部 | 配合后台 `run_script` |
 | `git_tree` | 只读查看仓库结构 | — |
+| `bili_collect` | 读视频快照做诈骗证据预处理（窗口/命中评论/链接） | 本地有快照 |
+| `bili_pull` | 从采集服务器拉取视频快照到本地数据集 | `BILI_HUB_URL`（+`BILI_HUB_TOKEN`） |
 | `read_image` | 读图交给多模态模型 | — |
 | `memory` | 跨会话记忆读写 | — |
 | `load_skill` | 按需加载技能正文 | 装了技能才有 |
@@ -120,6 +122,8 @@ REPL 与 Web 共用同一套斜杠命令：`/help` `/model` `/prompts` `/prompt`
 | `AGENT_DELEGATE` / `AGENT_TEAM_TOOL` | `on` / `on` | 主对话内子代理：`delegate_task` 与重 DAG `team_task`，可分别关闭 |
 | `AGENT_UI_PORT` / `AGENT_UI_TOKEN` | `8787` / — | Web 服务器端口与访问口令 |
 | `EMBEDDING_BASE_URL` / `EMBEDDING_API_KEY` / `EMBEDDING_MODEL` | — | 向量检索；不配则只用关键词召回 |
+| `BILI_HUB_URL` / `BILI_HUB_TOKEN` | — / — | 采集服务器地址与可选 Bearer 口令，`bili_pull` 用 |
+| `BILI_DATASET_DIR` | `dataset` | 视频快照目录，`bili_pull` 写入、`bili_collect` 读取 |
 
 MCP 服务器 = 内置默认（`src/mcp/config.ts`）⊕ 项目根 `.mcp.json`（`AGENT_MCP_CONFIG` 可改路径），改文件无需重启。
 
