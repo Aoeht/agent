@@ -57,7 +57,7 @@ bun run src/server/main.ts          # 默认 http://127.0.0.1:8787
 
 页头 **🕘 运行轨迹** 把 `.traces/<会话>-<时间>.jsonl` 变成可读时间轴：每个回合、每步决策、每次工具调用（含心跳）与压缩/重试都在上面，点事件展开原始 JSON。默认隐藏工具心跳，长回合进行中每 2s 自动续拉；超长字段已由服务端截断，完整内容仍在 `.traces/` 文件里。委派与团队的子 Agent 轨迹各自落盘在会话目录，不在这份时间轴里。
 
-页头 **模型供应商** 添加任意 OpenAI 兼容的聊天 API（名称、baseURL、API Key、模型 ID），保存后模型立刻进模型下拉列表（内部记作 `<供应商id>::<模型>`，请求按模型路由到对应端点与密钥）。每个模型后面有显示开关：关掉只把它从下拉和"手动探测"清单里剔除，已选用该模型的会话照常工作。密钥只写进服务器本地 `.agent-data/providers.json`（0600）。
+页头 **模型供应商** 添加任意 OpenAI 兼容的聊天 API（名称、baseURL、API Key、模型 ID），保存后模型立刻进模型下拉列表（内部记作 `<供应商id>::<模型>`，请求按模型路由到对应端点与密钥）。每个模型后面有显示开关：关掉只把它从下拉和"手动探测"清单里剔除，已选用该模型的会话照常工作。密钥只写进服务器本地 `providers.json`（0600），位置由 `AGENT_DATA_DIR` 决定、缺省锚在仓库根的 `.agent-data/`——不跟启动目录变化，从别处起服务读的也是同一份；起服务时日志会打印实际路径与条数（`📦 [UI] 供应商配置: …`），文件被手改坏（含记事本存的 UTF-8 BOM）时报错点名路径，模型下拉退回配置项继续可用。
 
 **团队**——多个子 Agent 并发干活，再独立复核：
 
@@ -116,6 +116,7 @@ REPL 与 Web 共用同一套斜杠命令：`/help` `/model` `/prompts` `/prompt`
 | `AGENT_MEMORY_DIR` | `.agent-memory` | 跨会话记忆目录 |
 | `AGENT_TRACE_DIR` | `.traces` | 运行轨迹目录 |
 | `AGENT_JOB_DIR` | `.agent-data/jobs` | 后台脚本任务目录（任务 JSON + stdout/stderr 日志） |
+| `AGENT_DATA_DIR` | 仓库根 `.agent-data` | 模型供应商配置目录（`providers.json`），锚在代码目录、不随启动目录变化 |
 | `AGENT_DELEGATE` / `AGENT_TEAM_TOOL` | `on` / `on` | 主对话内子代理：`delegate_task` 与重 DAG `team_task`，可分别关闭 |
 | `AGENT_UI_PORT` / `AGENT_UI_TOKEN` | `8787` / — | Web 服务器端口与访问口令 |
 | `EMBEDDING_BASE_URL` / `EMBEDDING_API_KEY` / `EMBEDDING_MODEL` | — | 向量检索；不配则只用关键词召回 |

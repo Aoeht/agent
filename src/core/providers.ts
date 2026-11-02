@@ -5,14 +5,36 @@ export interface ProviderInput { name: string; baseURL: string; apiKey: string; 
 export interface ProviderModel { id: string; enabled: boolean }
 export interface ProviderInfo { id: string; name: string; baseURL: string; models: ProviderModel[]; hasKey: boolean }
 type SavedProvider = { id: string; name: string; baseURL: string; apiKey: string; models: string[]; hidden?: string[] };
+/** 供应商配置的位置：AGENT_DATA_DIR 可改，缺省锚在代码目录上层的 .agent-data。
+ *  不能跟 process.cwd() 走 —— 从别的目录（web/、%TEMP%）起服务时清单会写去别处，
+ *  换回仓库根重启就表现为"手动添加的模型没保存"。 */
+export function providersFile(): string {
+  return path.join(process.env.AGENT_DATA_DIR?.trim() || path.resolve(import.meta.dir, "..", "..", ".agent-data"), "providers.json");
+}
 /** 对外脱敏展示：密钥换成 hasKey，隐藏集合展开成每个模型的开关状态。 */
 function toInfo(p: SavedProvider): ProviderInfo {
   const hidden = p.hidden ?? [];
   return { id: p.id, name: p.name, baseURL: p.baseURL, models: p.models.map(id => ({ id, enabled: !hidden.includes(id) })), hasKey: !!p.apiKey };
 }
 export class ProviderStore {
-  constructor(private file = path.resolve(".agent-data/providers.json")) {}
-  private read(): SavedProvider[] { return existsSync(this.file) ? JSON.parse(readFileSync(this.file, "utf8")) : []; }
+  readonly file: string;
+  constructor(file = providersFile()) { this.file = file; }
+  /** 读盘：Windows 记事本"另存为 UTF-8"会塞 BOM，先剥掉；坏文件报错点名路径，
+   *  否则 /providers 和 /models 一起 500，界面上只剩"模型列表凭空变空"。 */
+  private read(): SavedProvider[] {
+    if (!existsSync(this.file)) return [];
+    let rows: unknown;
+    try { rows = JSON.parse(readFileSync(this.file, "utf8").replace(/^\uFEFF/, "")); }
+    catch (error) { throw new Error(`${this.file} 不是合法 JSON：${error instanceof Error ? error.message : String(error)}。修好或删掉该文件再重启服务。`); }
+    if (!Array.isArray(rows)) throw new Error(`${this.file} 顶层必须是供应商数组。`);
+    return rows as SavedProvider[];
+  }
+  /** 启动自检用：读不动也不抛，配置坏不该拦住整个服务起停。 */
+  describe(): string {
+    if (!existsSync(this.file)) return `${this.file}（还没有添加供应商）`;
+    try { return `${this.file}（${this.read().length} 个）`; }
+    catch (error) { return `${this.file} 读取失败：${error instanceof Error ? error.message : String(error)}`; }
+  }
   list(): ProviderInfo[] { return this.read().map(toInfo); }
   private save(rows: SavedProvider[]) {
     mkdirSync(path.dirname(this.file), { recursive: true });

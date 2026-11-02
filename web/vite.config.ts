@@ -25,6 +25,7 @@ export default defineConfig({
       "/inputs": backend,
       "/status": backend,
       "/models": backend,
+      "/providers": backend,
       "/settings": backend,
     },
   },

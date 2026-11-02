@@ -111,6 +111,8 @@ async function main(): Promise<void> {
   });
   console.log(`🌐 [UI] 工作台已就绪: http://${HOST}:${server.port}/`);
   console.log(`📂 [UI] 会话目录: ${SESSION_DIR}`);
+  // 供应商清单读写分离最容易出的错是"存哪儿了"，每次启动把它明说出来
+  console.log(`📦 [UI] 供应商配置: ${providers.describe()}`);
 
   process.on("SIGINT", () => {
     console.log("\n⏹️  [UI] 收到中断信号，正在关停...");
@@ -450,8 +452,19 @@ function json(data: unknown, status = 200): Response {
 
 // ---------- 模型清单 ----------
 
+/** 供应商文件坏掉（手改 JSON、记事本存成带 BOM）不该把模型下拉一起打死：
+ *  退回配置项，错误进日志；面板里读 /providers 会拿到带文件路径的原文报错。 */
+function addedModels(): string[] {
+  try {
+    return providers.models();
+  } catch (error) {
+    console.warn(`⚠️ [UI] 供应商清单读不出来，模型下拉只用配置项：${error instanceof Error ? error.message : String(error)}`);
+    return [];
+  }
+}
+
 const loadProbeStatus = createProbeCache<ServerRuntime, ModelProbeStatusResponse>(async (runtime) => {
-  const models = await probeModels({ models: [...candidateModels(runtime.config).filter(isLikelyChatModel), ...providers.models()], concurrency: 3, timeoutMs: 6_000 });
+  const models = await probeModels({ models: [...candidateModels(runtime.config).filter(isLikelyChatModel), ...addedModels()], concurrency: 3, timeoutMs: 6_000 });
   const accountQuota = await fetchZhipuAccountQuota(process.env.OPENAI_BASE_URL?.trim() ?? "", process.env.OPENAI_API_KEY?.trim() ?? "");
   return { models, ...(accountQuota !== undefined ? { accountQuota } : {}) };
 }, 0);
@@ -465,7 +478,7 @@ function resolveModels(runtime: ServerRuntime): string[] {
     .split(",")
     .map((model) => model.trim())
     .filter(Boolean);
-  return dedupeKeepOrder([runtime.config.model, runtime.config.summaryModel, ...providers.models(), ...configured]);
+  return dedupeKeepOrder([runtime.config.model, runtime.config.summaryModel, ...addedModels(), ...configured]);
 }
 
 async function readJson(req: Request): Promise<Record<string, unknown>> {
