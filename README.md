@@ -96,6 +96,8 @@ bun run eval:memory                # 记忆召回检索变体对照（零调用�
 bun run eval:scanner --self-check  # 诈骗扫描评测自检（零调用）
 ```
 
+长期记忆支持候选召回后的关系判定（重复 / 补充 / 更新 / 冲突），明确更新以原子提交保留新旧版本，未确认冲突不注入有效记忆。可通过 `memory action=conflicts` 查看待确认提案，确认后用 `resolve` 处理；详见 [长期记忆演进](benchmarks/memory_recall/evolution.md)。
+
 REPL 与 Web 共用同一套斜杠命令：`/help` `/model` `/prompts` `/prompt` `/rewind` `/task*` `/tokens`。
 
 ## 配置

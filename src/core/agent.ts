@@ -1783,13 +1783,15 @@ export class Agent {
         summaryModel: this.summaryModel,
         signal,
       });
-      if (report.added > 0 || report.superseded > 0) {
+      if (report.added > 0 || report.superseded > 0 || report.conflicts > 0 || report.deferred > 0) {
         this.events.emit("compact", {
           action: "memory_write",
           tokens: report.tokens,
           detail:
             `跨会话记忆更新：新增 ${report.added} 条，取代 ${report.superseded} 条` +
-            (report.skipped ? `，与已有记忆重复跳过 ${report.skipped} 条` : ""),
+            (report.skipped ? `，与已有记忆重复跳过 ${report.skipped} 条` : "") +
+            (report.conflicts ? `，待确认冲突 ${report.conflicts} 条（memory action=conflicts 查看）` : "") +
+            (report.deferred ? `，判定失败或版本变化未写入 ${report.deferred} 条` : ""),
         });
       }
       return report.tokens;

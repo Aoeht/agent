@@ -20,11 +20,11 @@ export function createMemoryTool(store: MemoryStore) {
       "action=search 配合 query 在全部有效记忆中按中英文关键词搜索，按相关度排序，不依赖嵌入模型。" +
       "read/search 可用 type 筛选；默认每页 20 条，最多 50 条，按返回的 nextOffset 继续（null 表示结束），total 是筛选后的总数。" +
       "写入时用一句完整、自包含的事实陈述，不要写“参见之前”这类依赖上下文的话；" +
-      "信息变化时先 forget 旧条目再 add 新条目（旧条目保留痕迹，不静默覆盖）。",
+      "信息变化时用 replace 原子替换旧条目并保留版本；conflicts 查看待确认矛盾，resolve 仅在用户明确确认后接受或拒绝提案。",
     schema: z.object({
       action: z
-        .enum(["read", "search", "add", "forget", "update"])
-        .describe("read=按写入顺序分页查看；search=按关键词相关度分页搜索；add=新增一条；forget=作废一条（信息不再成立）；update=修改一条的正文"),
+        .enum(["read", "search", "add", "forget", "update", "replace", "conflicts", "resolve"])
+        .describe("read/search=读取有效事实；add=新增；forget=作废；update=文字修订；replace=事实更新并保留旧版本；conflicts=待确认冲突；resolve=用户确认后处理冲突"),
       type: z
         .enum(["user", "feedback", "project", "reference"])
         .optional()
@@ -34,9 +34,25 @@ export function createMemoryTool(store: MemoryStore) {
       limit: z.number().int().min(1).max(MAX_MEMORY_PAGE_SIZE).optional().describe(`read/search 每页条数，默认 ${DEFAULT_MEMORY_PAGE_SIZE}，最多 ${MAX_MEMORY_PAGE_SIZE}`),
       text: z.string().trim().min(1).optional().describe("add/update 时必填：记忆正文，一句自包含的事实"),
       id: z.string().trim().min(1).optional().describe("forget/update 时必填：记忆条目 id（索引 [ ] 里的 m-… 编号）"),
+      scope: z.string().trim().min(1).max(120).optional().describe("add 时可选：明确的项目/主体标识；不要猜测范围"),
+      resolution: z.enum(["accepted", "rejected"]).optional().describe("resolve 时必填，用户明确确认接受或拒绝"),
     }),
     needsReconciliation: false, // 只写自有记忆仓，幂等且不影响外部世界
     execute: async (args) => {
+      if (args.action === "conflicts") {
+        const entries = await store.conflicts();
+        return { status: "ok" as const, entries, total: entries.length };
+      }
+      if (args.action === "resolve") {
+        if (!args.id || !args.resolution) throw new Error("resolve 需要 id 和 resolution");
+        return { status: "ok" as const, entry: await store.resolveConflict(args.id, args.resolution) };
+      }
+      if (args.action === "replace") {
+        if (!args.id || !args.text) throw new Error("replace 需要 id 与 text");
+        const old = (await store.active()).find(entry => entry.id === args.id);
+        if (!old) throw new Error("旧记忆不存在或已作废");
+        return store.applyFact({ type: old.type, text: args.text, ...(old.scope ? { scope: old.scope } : {}) }, "update", old);
+      }
       if (args.action === "read") {
         const page = await store.readPage(args);
         return {
@@ -53,7 +69,7 @@ export function createMemoryTool(store: MemoryStore) {
         if (!args.type || !args.text) {
           throw new Error("add 需要 type 与 text 两个字段");
         }
-        const entry = await store.add({ type: args.type, text: args.text });
+        const entry = await store.add({ type: args.type, text: args.text, ...(args.scope ? { scope: args.scope } : {}) });
         if (!entry) {
           return { status: "duplicate" as const, message: "同类型同文本的生效记忆已存在，未重复记录" };
         }

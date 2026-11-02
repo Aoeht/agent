@@ -48,12 +48,32 @@ export interface MemoryEntry {
   supersededAt?: string;
   /** 主张该条记忆的会话，便于溯源与审计 */
   sourceSessionId?: string;
+  /** 显式项目/主体范围；缺省为旧版未分域记忆，不自动猜测范围。 */
+  scope?: string;
+  /** 事实生效时间（只在来源明确提供时填写）；createdAt 是记录时间。 */
+  validFrom?: string;
+  supersedesId?: string;
+  supersededBy?: string;
+  /** 未确认冲突不进入 active/search/注入。保留判定时的旧版本用于乐观校验。 */
+  conflictWith?: MemoryEntry;
+  resolution?: "accepted" | "rejected";
+  resolvedAt?: string;
 }
 
 export interface MemoryAddInput {
   type: MemoryType;
   text: string;
   sourceSessionId?: string;
+  scope?: string;
+  validFrom?: string;
+}
+
+export type MemoryRelation = "add" | "duplicate" | "update" | "conflict";
+export function isActiveMemory(entry: MemoryEntry): boolean {
+  return entry.supersededAt === undefined && (entry.conflictWith === undefined || entry.resolution === "accepted");
+}
+export function sameMemoryScope(a: MemoryAddInput, b: MemoryAddInput): boolean {
+  return a.type === b.type && (a.scope ?? "") === (b.scope ?? "");
 }
 
 export const DEFAULT_MEMORY_PAGE_SIZE = 20;
@@ -116,7 +136,7 @@ export class MemoryStore {
   private readonly recordsPath: string;
   private readonly indexPath: string;
   // 进程内写链：add/forget/update 都是「读-改-写」，用 promise 链在进程内串行化，
-  // 防止同进程并发写互相覆盖；跨进程（CLI 与 Web 同时开）按单用户场景尽力而为
+  // 写链保护实例内顺序，独占文件锁保护多个实例和 CLI/Web 跨进程写入。
   private writeChain: Promise<unknown> = Promise.resolve();
 
   constructor(options: MemoryStoreOptions) {
@@ -132,7 +152,7 @@ export class MemoryStore {
 
   /** 未被取代的生效记忆 */
   async active(): Promise<MemoryEntry[]> {
-    return (await this.readRecords()).filter((record) => record.supersededAt === undefined);
+    return (await this.readRecords()).filter(isActiveMemory);
   }
 
   /** 按写入顺序分页读取全部有效记忆，不受注入索引的 200 条上限影响。 */
@@ -163,7 +183,7 @@ export class MemoryStore {
       if (trimmed === "") return undefined;
       const text = trimmed.length > MAX_TEXT_CHARS ? `${trimmed.slice(0, MAX_TEXT_CHARS)}…` : trimmed;
       const records = await this.readRecords();
-      if (records.some((r) => r.supersededAt === undefined && r.type === input.type && r.text === text)) {
+      if (records.some((r) => isActiveMemory(r) && sameMemoryScope(r, input) && r.text === text && r.validFrom === input.validFrom)) {
         return undefined;
       }
       const entry: MemoryEntry = {
@@ -172,10 +192,81 @@ export class MemoryStore {
         text,
         createdAt: new Date().toISOString(),
         ...(input.sourceSessionId !== undefined ? { sourceSessionId: input.sourceSessionId } : {}),
+        ...(input.scope !== undefined ? { scope: input.scope } : {}),
+        ...(input.validFrom !== undefined ? { validFrom: input.validFrom } : {}),
       };
       await fs.mkdir(this.dir, { recursive: true });
-      await fs.appendFile(this.recordsPath, `${JSON.stringify(entry)}\n`, "utf-8");
+      await this.rewriteRecords([...records, entry]);
       await this.persistIndex([...records, entry]);
+      return entry;
+    });
+  }
+
+  /** 一个权威文件提交同时写入新版本、作废旧版本；LLM 调用不持锁。 */
+  async applyFact(input: MemoryAddInput, relation: MemoryRelation, expected?: MemoryEntry): Promise<{
+    status: "added" | "duplicate" | "updated" | "conflict" | "stale";
+    entry?: MemoryEntry;
+  }> {
+    return this.serialize(async () => {
+      if (!isMemoryType(input.type) || !input.text.trim() || input.text.length > MAX_TEXT_CHARS) {
+        throw new Error("事实需要合法类型和不超过 500 字的正文");
+      }
+      if (!["add", "duplicate", "update", "conflict"].includes(relation)) throw new Error("无效的记忆关系");
+      const records = await this.readRecords();
+      const target = expected && records.find(r => r.id === expected.id);
+      if (relation !== "add" && (!target || !isActiveMemory(target) ||
+          JSON.stringify(target) !== JSON.stringify(expected) || !sameMemoryScope(target, input))) {
+        return { status: "stale" };
+      }
+      if (relation === "duplicate") return { status: "duplicate" };
+      // Exact duplicate detection includes pending proposals, so retries are idempotent.
+      const duplicate = records.find(r => r.supersededAt === undefined && r.resolution !== "rejected" &&
+        sameMemoryScope(r, input) && r.text === input.text.trim() && r.validFrom === input.validFrom);
+      if (duplicate) return { status: "duplicate" };
+      const now = new Date().toISOString();
+      const entry: MemoryEntry = {
+        ...input, text: input.text.trim(), id: `m-${Date.now().toString(36)}-${randomBytes(6).toString("hex")}`,
+        createdAt: now,
+      };
+      if (relation === "conflict") entry.conflictWith = structuredClone(target!);
+      if (relation === "update") {
+        target!.supersededAt = now;
+        target!.supersededBy = entry.id;
+        entry.supersedesId = target!.id;
+      }
+      records.push(entry);
+      await this.rewriteRecords(records);
+      await this.persistIndex(records);
+      return { status: relation === "update" ? "updated" : relation === "conflict" ? "conflict" : "added", entry };
+    });
+  }
+
+  async conflicts(): Promise<MemoryEntry[]> {
+    return (await this.readRecords()).filter(r => r.conflictWith && !r.resolution && !r.supersededAt);
+  }
+
+  /** 接受冲突前重新检查旧版本，拒绝时仅关闭提案；绝不覆盖已变化的事实。 */
+  async resolveConflict(id: string, resolution: "accepted" | "rejected"): Promise<MemoryEntry> {
+    return this.serialize(async () => {
+      if (resolution !== "accepted" && resolution !== "rejected") throw new Error("无效的冲突处理方式");
+      const records = await this.readRecords();
+      const entry = records.find(r => r.id === id && r.conflictWith && !r.resolution && !r.supersededAt);
+      if (!entry) throw new Error("待确认冲突不存在或已处理");
+      const now = new Date().toISOString();
+      if (resolution === "accepted") {
+        const target = records.find(r => r.id === entry.conflictWith!.id);
+        if (!target || !isActiveMemory(target) || JSON.stringify(target) !== JSON.stringify(entry.conflictWith)) {
+          throw new Error("旧记忆已经变化，请重新核对，不能自动覆盖");
+        }
+        target.supersededAt = now;
+        target.supersededBy = entry.id;
+        entry.supersedesId = target.id;
+      }
+      entry.resolution = resolution;
+      entry.resolvedAt = now;
+      if (resolution === "rejected") entry.supersededAt = now;
+      await this.rewriteRecords(records);
+      await this.persistIndex(records);
       return entry;
     });
   }
@@ -184,7 +275,7 @@ export class MemoryStore {
   async forget(id: string): Promise<boolean> {
     return this.serialize(async () => {
       const records = await this.readRecords();
-      const target = records.find((r) => r.id === id && r.supersededAt === undefined);
+      const target = records.find((r) => r.id === id && isActiveMemory(r));
       if (!target) return false;
       target.supersededAt = new Date().toISOString();
       await this.rewriteRecords(records);
@@ -199,7 +290,7 @@ export class MemoryStore {
       const trimmed = text.trim();
       if (trimmed === "") return undefined;
       const records = await this.readRecords();
-      const target = records.find((r) => r.id === id && r.supersededAt === undefined);
+      const target = records.find((r) => r.id === id && isActiveMemory(r));
       if (!target) return undefined;
       target.text = trimmed.length > MAX_TEXT_CHARS ? `${trimmed.slice(0, MAX_TEXT_CHARS)}…` : trimmed;
       target.updatedAt = new Date().toISOString();
@@ -211,7 +302,7 @@ export class MemoryStore {
 
   /** 渲染注入用的索引文本：按类型分节、一行一条带 id（模型据此 forget/update）。空记忆返回空串 */
   renderIndex(entries: MemoryEntry[]): string {
-    const active = entries.filter((entry) => entry.supersededAt === undefined);
+    const active = entries.filter(isActiveMemory);
     if (active.length === 0) return "";
     const shown = active.slice(0, MAX_INDEX_ENTRIES);
     const sections = MEMORY_TYPES.map((type) => {
@@ -219,7 +310,7 @@ export class MemoryStore {
       if (of.length === 0) return undefined;
       const lines = of.map((entry) => {
         const date = entry.createdAt.slice(0, 10);
-        return `- [${entry.id} · ${date}] ${entry.text}`;
+        return `- [${entry.id} · ${date}${entry.scope ? ` · 范围:${entry.scope}` : ""}${entry.validFrom ? ` · 生效:${entry.validFrom}` : ""}] ${entry.text}`;
       });
       return `## ${type}（${MEMORY_TYPE_LABELS[type]}）\n${lines.join("\n")}`;
     }).filter((section) => section !== undefined);
@@ -237,7 +328,23 @@ export class MemoryStore {
 
   /** 进程内写链：前一次写失败不阻塞后续写（吞掉前任的 rejection） */
   private serialize<T>(task: () => Promise<T>): Promise<T> {
-    const next = this.writeChain.then(task, task);
+    const locked = async () => {
+      await fs.mkdir(this.dir, { recursive: true });
+      const lockPath = path.join(this.dir, "memory.write.lock");
+      const deadline = Date.now() + 5000;
+      let lock;
+      for (;;) {
+        try { lock = await fs.open(lockPath, "wx"); break; }
+        catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+          if (Date.now() >= deadline) throw new Error(`记忆写锁被占用：${lockPath}；若进程已退出，确认无写入后清理锁文件`);
+          await new Promise(resolve => setTimeout(resolve, 20));
+        }
+      }
+      try { await lock.writeFile(String(process.pid)); return await task(); }
+      finally { await lock.close(); await fs.rm(lockPath, { force: true }); }
+    };
+    const next = this.writeChain.then(locked, locked);
     this.writeChain = next.catch(() => undefined);
     return next;
   }
@@ -283,7 +390,10 @@ export class MemoryStore {
       await fs.rm(this.indexPath, { force: true }).catch(() => undefined);
       return;
     }
-    await this.atomicWrite(this.indexPath, `${body}\n`, { sync: false });
+    // MEMORY.md is a derived view; an index failure must not report a committed mutation as failed.
+    await this.atomicWrite(this.indexPath, `${body}\n`, { sync: false }).catch(error => {
+      console.warn(`[Memory] 索引视图写入失败，权威记录已保存：${String(error)}`);
+    });
   }
 
   /** tmp + fsync + rename 的原子替换；Windows 上目标被读时 rename 短暂 EPERM/EBUSY，退避重试 */

@@ -14,12 +14,13 @@ async function tmpDir(prefix: string): Promise<string> {
 }
 
 /** 假 LLM 客户端：固定返回 content，不联网 */
-function fakeClient(content: string): OpenAI {
+function fakeClient(content: string, relation?: "add" | "duplicate" | "update" | "conflict"): OpenAI {
   return {
     chat: {
       completions: {
-        create: async () => ({
-          choices: [{ message: { content } }],
+        create: async (request: { messages: Array<{ content: string }> }) => ({
+          choices: [{ message: { content: relation && request.messages[0]!.content.includes("关系判定器")
+            ? JSON.stringify({ relation, targetId: JSON.parse(request.messages[1]!.content).candidates[0]?.id }) : content } }],
           usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
         }),
       },
@@ -71,18 +72,19 @@ describe("MemoryWriter", () => {
     expect((await fenced.writeFromRun("x")).added).toBe(1);
   });
 
-  test("与已有记忆语义重复的事实被跳过（embedding 阈值查重）", async () => {
+  test("相似候选经关系判定为重复才跳过，并累计两次调用成本", async () => {
     const store = new MemoryStore({ dir: await tmpDir("agent-memory-") });
     await store.add({ type: "user", text: "用户偏好 bun 管理依赖" });
     const writer = new MemoryWriter({
       store,
-      client: fakeClient(ARRAY_OF([{ type: "user", text: "用户使用 bun 作为包管理器" }])),
+      client: fakeClient(ARRAY_OF([{ type: "user", text: "用户使用 bun 作为包管理器" }]), "duplicate"),
       model: "fake",
       embeddings: fakeEmbeddings,
     });
     const report = await writer.writeFromRun("x");
     expect(report.added).toBe(0);
     expect(report.skipped).toBe(1);
+    expect(report.tokens).toBe(30);
     expect((await store.active()).length).toBe(1);
   });
 
@@ -92,7 +94,7 @@ describe("MemoryWriter", () => {
     const writer = new MemoryWriter({
       store,
       client: fakeClient(
-        ARRAY_OF([{ type: "user", text: "用户改用 bun 跑测试", supersedes: "用户用 docker 跑测试" }])
+        ARRAY_OF([{ type: "user", text: "用户改用 bun 跑测试", supersedes: "用户用 docker 跑测试" }]), "update"
       ),
       model: "fake",
       embeddings: fakeEmbeddings,
@@ -109,19 +111,19 @@ describe("MemoryWriter", () => {
     expect(active[0]!.text).toBe("用户改用 bun 跑测试");
   });
 
-  test("语义命中但 LLM 未声明 supersedes：只跳过不自动取代（宁漏勿错）", async () => {
+  test("语义相似但属性不同：包管理与测试方式作为互补事实保留", async () => {
     const store = new MemoryStore({ dir: await tmpDir("agent-memory-") });
     await store.add({ type: "user", text: "用户偏好 bun 管理依赖" });
     const writer = new MemoryWriter({
       store,
-      client: fakeClient(ARRAY_OF([{ type: "user", text: "用户改用 bun 跑测试" }])),
+      client: fakeClient(ARRAY_OF([{ type: "user", text: "用户改用 bun 跑测试" }]), "add"),
       model: "fake",
       embeddings: fakeEmbeddings,
     });
     const report = await writer.writeFromRun("x");
-    expect(report.skipped).toBe(1);
+    expect(report.skipped).toBe(0);
     expect(report.superseded).toBe(0);
-    expect((await store.active()).length).toBe(1);
+    expect((await store.active()).length).toBe(2);
   });
 
   test("输出不是 JSON 数组时抛错（调用方转 memory_failed 事件）", async () => {
