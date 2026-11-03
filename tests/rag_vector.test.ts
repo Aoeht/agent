@@ -10,6 +10,8 @@ import OpenAI from "openai";
 import type { EmbeddingClient } from "../src/rag/embeddings";
 import { createEmbeddingClientFromEnv, OpenAICompatibleEmbeddings } from "../src/rag/embeddings";
 import { createVectorCache } from "../src/rag/store_factory";
+import { indexDocuments } from "../src/rag/index_documents";
+import { ingestPaths } from "../src/rag/ingest";
 import { KnowledgeStore } from "../src/rag/knowledge_store";
 import { VectorCache, cosineTopK } from "../src/rag/vector_store";
 import { createRagSearchTool } from "../src/tools/rag_search";
@@ -105,9 +107,10 @@ function fakeWeb(results: TavilyResponse["results"]) {
   );
 }
 
-async function seedStore(dir: string, docs: { source: string; content: string }[]): Promise<void> {
+async function seedStore(dir: string, docs: { source: string; content: string }[], embeddings: EmbeddingClient | null = makeFakeEmbeddings()): Promise<void> {
   const store = new KnowledgeStore({ filePath: path.join(dir, "knowledge.json") });
-  await store.upsert(docs.map((doc) => ({ ...doc, trust: "web" as const })));
+  const saved = await store.upsert(docs.map((doc) => ({ ...doc, trust: "web" as const })));
+  await indexDocuments(saved, { embeddings, cacheDir: dir });
 }
 
 function testCosineTopK(): void {
@@ -198,6 +201,59 @@ async function testCacheConfigurationChanges(): Promise<void> {
     "批大小和地址末尾斜杠不影响编码缓存");
 }
 
+async function testIngestVectorLifecycle(): Promise<void> {
+  const dir = dirFor("ingest-lifecycle");
+  await fs.mkdir(dir, { recursive: true });
+  const file = path.join(dir, "rules.md");
+  await fs.writeFile(file, EN_SCAM_DOC);
+  const store = new KnowledgeStore({ filePath: path.join(dir, "knowledge.json") });
+  const embeddings = makeFakeEmbeddings();
+  const tool = createRagSearchTool({ store, cacheDir: dir, embeddings, webSearch: fakeWeb([]) });
+  await tool.execute({ query: QUERY, top_k: 1 });
+  embeddings.calls.length = 0;
+  const options = { store, embeddings, cacheDir: dir, rootDir: dir };
+  await ingestPaths([file], { ...options, dryRun: true });
+  check(embeddings.calls.length === 0 && (await store.list()).length === 0, "dry-run 不写正文、不调用 embedding");
+  await ingestPaths([file], options);
+  check(JSON.stringify(embeddings.calls) === JSON.stringify([[EN_SCAM_DOC]]), "本地文件入库时生成文档向量", embeddings.calls);
+  const before = await fs.readFile(path.join(dir, "vectors.json"), "utf8");
+  embeddings.calls.length = 0;
+  const found = (await tool.execute({ query: QUERY, top_k: 1 })) as RagOutput;
+  check(found.results[0]?.similarity === 1 && JSON.stringify(embeddings.calls) === JSON.stringify([[QUERY]]),
+    "已启动的查询实例可读到另一缓存实例预建的向量，只编码查询", found);
+  check(await fs.readFile(path.join(dir, "vectors.json"), "utf8") === before, "查询不改写文档向量文件");
+  embeddings.calls.length = 0;
+  await ingestPaths([file], options);
+  check(embeddings.calls.length === 0, "重复导入未变文档复用向量");
+  await fs.writeFile(file, `${EN_SCAM_DOC} Never share your screen.`);
+  let failed = false;
+  try {
+    await ingestPaths([file], { ...options, embeddings: makeFailingEmbeddings() });
+  } catch { failed = true; }
+  check(failed && (await store.list())[0]?.chunks[0]?.text.includes("Never share") === true,
+    "向量化失败明确报错但保留已入库正文");
+  const missing = (await tool.execute({ query: QUERY, top_k: 1 })) as RagOutput;
+  check(missing.vector_search_error?.includes("rag:embed") === true && embeddings.calls.every(batch => batch.length === 1 && batch[0] === QUERY),
+    "缺失文档向量只提示补建，查询不现场补算", missing);
+  embeddings.calls.length = 0;
+  await ingestPaths([file], options);
+  check(embeddings.calls.length === 1 && embeddings.calls[0]?.[0]?.includes("Never share") === true,
+    "失败后重复入库补齐缺失向量", embeddings.calls);
+  const recovered = (await tool.execute({ query: QUERY, top_k: 1 })) as RagOutput;
+  check(recovered.results.length === 1 && recovered.vector_search_error === undefined,
+    "补建后原查询实例恢复语义召回", recovered);
+}
+
+async function testWebIndexFailure(): Promise<void> {
+  const dir = dirFor("web-index-failure");
+  const out = (await createRagSearchTool({
+    cacheDir: dir, embeddings: makeFailingEmbeddings(),
+    webSearch: fakeWeb([{ title: "case", url: "https://web.example/case", content: EN_SCAM_DOC }]),
+  }).execute({ query: QUERY, top_k: 1, use_cache: false })) as RagOutput;
+  check(out.results[0]?.origin === "web" && out.vector_search_error?.includes("rag:embed") === true,
+    "网页向量化失败仍返回已入库结果并提供补建提示", out);
+}
+
 async function testSemanticRerankCandidateOrder(): Promise<void> {
   const dir = dirFor("semantic-rerank");
   // 先按实际 chunk id 排好，再把最相关内容赋给最大 id；确保错误的 id 排序无法碰巧通过。
@@ -210,6 +266,7 @@ async function testSemanticRerankCandidateOrder(): Promise<void> {
     embed: async inputs => inputs.map(text => text === "weak" ? [0.6, 0.8] : text === "medium" ? [0.8, 0.6] : [1, 0]),
   };
   const rerankInputs: string[][] = [];
+  await indexDocuments(await store.list(), { embeddings, cacheDir: dir });
   const tool = createRagSearchTool({
     cacheDir: dir, embeddings, webSearch: fakeWeb([]), rerankCandidates: 2,
     reranker: { model: "fake-rerank", rerank: async (_query, docs) => {
@@ -222,6 +279,26 @@ async function testSemanticRerankCandidateOrder(): Promise<void> {
     "纯语义候选按相似度排名截断后送入重排，而非按 chunk id", rerankInputs);
   check(out.results[0]?.source === sources[2] && out.results[0]?.similarity === 1,
     "最相关的纯向量候选保留在最终结果首位", out.results);
+}
+
+async function testIndexBatchRetry(): Promise<void> {
+  const dir = dirFor("batch-retry");
+  const cache = new VectorCache({ filePath: path.join(dir, "vectors.json"), model: "batch" });
+  const texts = Array.from({ length: 33 }, (_, i) => `chunk-${i}`);
+  let batches = 0;
+  try {
+    await cache.ensure(texts, async batch => {
+      if (++batches === 2) throw new Error("second batch failed");
+      return batch.map(() => [1, 0]);
+    });
+  } catch { /* 重试应复用已落盘的第一批 */ }
+  const retry = new VectorCache({ filePath: path.join(dir, "vectors.json"), model: "batch" });
+  const requested: string[] = [];
+  await retry.ensure(texts, async batch => { requested.push(...batch); return batch.map(() => [1, 0]); });
+  check(JSON.stringify(requested) === JSON.stringify([texts[32]]), "批量入库中断后只补算未完成的批次", requested);
+  await Promise.all(["extra-a", "extra-b"].map(text => retry.ensure([text], async batch => batch.map(() => [1, 0]))));
+  check((await new VectorCache({ filePath: path.join(dir, "vectors.json"), model: "batch" }).get([...texts, "extra-a", "extra-b"])).size === 35,
+    "同实例并发写入串行落盘，完整保留所有文档向量");
 }
 
 /** 词法零命中的英文文档被语义通道捞回来，且不再触发联网兜底 */
@@ -271,7 +348,7 @@ async function testHybridFusion(): Promise<void> {
   check(!hybrid.results.some((r) => r.source === "https://fusion.example/cook"), "双通道都零命中的文档不占名额", sources);
 
   const lexicalDir = dirFor("fusion-lexical");
-  await seedStore(lexicalDir, docs);
+  await seedStore(lexicalDir, docs, null);
   const lexicalOnly = (await createRagSearchTool({
     cacheDir: lexicalDir,
     webSearch: fakeWeb([]),
@@ -338,7 +415,7 @@ async function testCircuitBreakerCooldownRecovery(): Promise<void> {
   check(third.vector_search_error === undefined, "恢复后不再带错误字段", third.vector_search_error);
 }
 
-/** 向量缓存跨实例/跨查询复用：冷启动批量向量化一次，之后只补增量 */
+/** 文档向量在入库阶段生成，查询只编码问题，不写文档缓存。 */
 async function testVectorCacheReuse(): Promise<void> {
   const dir = dirFor("reuse");
   await seedStore(dir, [
@@ -348,17 +425,17 @@ async function testVectorCacheReuse(): Promise<void> {
   const embeddingsA = makeFakeEmbeddings();
   const toolA = createRagSearchTool({ cacheDir: dir, webSearch: fakeWeb([]), embeddings: embeddingsA });
   await toolA.execute({ query: QUERY, top_k: 1 });
-  check(embeddingsA.calls.length === 1, "冷启动一次批量向量化查询+全部块", embeddingsA.calls);
+  check(JSON.stringify(embeddingsA.calls) === JSON.stringify([[QUERY]]), "冷启动只编码查询，文档向量从入库缓存读取", embeddingsA.calls);
   await toolA.execute({ query: QUERY, top_k: 1 });
-  check(embeddingsA.calls.length === 1, "同查询重复检索零新增调用", embeddingsA.calls);
+  check(JSON.stringify(embeddingsA.calls) === JSON.stringify([[QUERY], [QUERY]]), "重复检索仍只编码查询", embeddingsA.calls);
 
   const embeddingsB = makeFakeEmbeddings();
   const toolB = createRagSearchTool({ cacheDir: dir, webSearch: fakeWeb([]), embeddings: embeddingsB });
   await toolB.execute({ query: QUERY, top_k: 1 });
-  check(embeddingsB.calls.length === 0, "新实例复用盘上向量缓存，零调用", embeddingsB.calls);
+  check(JSON.stringify(embeddingsB.calls) === JSON.stringify([[QUERY]]), "新实例复用文档向量，仅编码查询", embeddingsB.calls);
   await toolB.execute({ query: "红烧肉怎么做", top_k: 1 });
   check(
-    embeddingsB.calls.length === 1 && JSON.stringify(embeddingsB.calls[0]) === JSON.stringify(["红烧肉怎么做"]),
+    embeddingsB.calls.length === 2 && JSON.stringify(embeddingsB.calls[1]) === JSON.stringify(["红烧肉怎么做"]),
     "语料已缓存时新查询只补查询本身",
     embeddingsB.calls
   );
@@ -375,7 +452,7 @@ async function testUseCacheFalseSkipsSemantic(): Promise<void> {
     top_k: 1,
     use_cache: false,
   })) as RagOutput;
-  check(embeddings.calls.length === 0, "use_cache=false 跳过语义通道，零 embedding 调用", embeddings.calls);
+  check(JSON.stringify(embeddings.calls) === JSON.stringify([[EN_SCAM_DOC]]), "use_cache=false 只向量化新入库网页，不编码查询和已有文档", embeddings.calls);
   check(out.results[0]!.origin === "web", "结果来自联网补充", out.results);
 }
 
@@ -426,7 +503,7 @@ async function testEnvWiring(): Promise<void> {
   try {
     deleteEnv();
     const offDir = dirFor("env-off");
-    await seedStore(offDir, [{ source: "https://env.example/scam", content: SCAM_DOC }]);
+    await seedStore(offDir, [{ source: "https://env.example/scam", content: SCAM_DOC }], null);
     await createRagSearchTool({ cacheDir: offDir, webSearch: fakeWeb([]) }).execute({ query: QUERY, top_k: 1 });
     check(!(await exists(path.join(offDir, "vectors.json"))), "未配 EMBEDDING_MODEL 时不启用语义通道、不写向量文件", offDir);
 
@@ -450,6 +527,7 @@ async function testEnvWiring(): Promise<void> {
     process.env.EMBEDDING_BASE_URL = `http://127.0.0.1:${server.port}/v1`;
     process.env.EMBEDDING_API_KEY = "stub-key";
     try {
+      await indexDocuments(await new KnowledgeStore({ filePath: path.join(onDir, "knowledge.json") }).list(), { cacheDir: onDir });
       const out = (await createRagSearchTool({ cacheDir: onDir, webSearch: fakeWeb([]) }).execute({
         query: QUERY,
         top_k: 1,
@@ -487,6 +565,9 @@ async function main(): Promise<void> {
     testCosineTopK();
     await testVectorCache();
     await testCacheConfigurationChanges();
+    await testIngestVectorLifecycle();
+    await testWebIndexFailure();
+    await testIndexBatchRetry();
     await testSemanticRerankCandidateOrder();
     await testSemanticRescue();
     await testHybridFusion();

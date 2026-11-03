@@ -60,7 +60,7 @@ export function createKnowledgeStore(options: KnowledgeStoreRuntimeOptions = {})
   });
 }
 
-/** 两个后端都有同一 ensure() 契约，rag_search 只依赖这个形状 */
+/** 两个后端均提供 get() 只读和 ensure() 入库补建。 */
 export type VectorCacheLike = VectorCache | PgVectorCache;
 
 export function createVectorCache(embeddings: EmbeddingClient, cacheDir?: string): VectorCacheLike {
@@ -70,5 +70,6 @@ export function createVectorCache(embeddings: EmbeddingClient, cacheDir?: string
   if (connectionString) {
     return new PgVectorCache({ connectionString, schema: pgSchemaFromEnv(), model });
   }
-  return new VectorCache({ filePath: path.join(cacheDir ?? DEFAULT_CACHE_DIR, "vectors.json"), model });
+  // 文档向量是预建索引，不能按查询缓存的容量淘汰；语料规模由知识库限制。
+  return new VectorCache({ filePath: path.join(cacheDir ?? DEFAULT_CACHE_DIR, "vectors.json"), model, maxEntries: Infinity });
 }

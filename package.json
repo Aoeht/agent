@@ -16,6 +16,7 @@
     "fmt": "bun fmt src/",
     "skill:add": "bunx skills add",
     "rag:ingest": "bun run src/rag/ingest.ts",
+    "rag:embed": "bun run src/rag/index_documents.ts",
     "rag:cases": "bun run src/rag/ingest_cases.ts",
     "rag:prune": "bun run src/rag/prune_corpus.ts",
     "rag:bench": "bun run src/rag/bench_index.ts",

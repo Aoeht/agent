@@ -6,6 +6,7 @@ import { EmbeddingClient, createEmbeddingClientFromEnv } from "../rag/embeddings
 import { KnowledgeDoc, KnowledgeStoreApi, TrustLevel, normalizeSource } from "../rag/knowledge_store";
 import { tokenize } from "../rag/tokenizer";
 import { cosineTopK } from "../rag/vector_store";
+import { indexDocuments } from "../rag/index_documents";
 import { createKnowledgeStore, createVectorCache, VectorCacheLike } from "../rag/store_factory";
 import { Reranker } from "../rag/rerank";
 import { QueryRewriter } from "../rag/rewrite";
@@ -222,9 +223,8 @@ export function createRagSearchTool(options: RagSearchOptions = {}): ToolDefinit
   }
 
   /**
-   * 语义通道：查询与全部新鲜块一起向量化（缺的由缓存批量补），余弦召回 top N 进融合。
-   * 新入库的块暂时没有向量，下一次检索时 ensure 会自动补齐 —— 写入路径（ingestWeb / rag:ingest）
-   * 因此不需要感知向量的存在。失败时熔断退回纯词法，并在本次结果里带上错误说明。
+   * 语义通道只编码查询，文档向量由入库或 rag:embed 预建。
+   * 缺失文档仍可词法召回，并提示补建；查询时不承担整批文档的编码工作。
    */
   async function searchSemantic(
     query: string,
@@ -236,8 +236,8 @@ export function createRagSearchTool(options: RagSearchOptions = {}): ToolDefinit
     const freshTexts = new Map<string, string>();
     for (const [id, { doc, text }] of chunks) if (store.isFresh(doc)) freshTexts.set(id, text);
     try {
-      const embedded = await vectors.ensure([query, ...freshTexts.values()], (batch) => embeddings.embed(batch, signal));
-      const queryVector = embedded.get(query);
+      const [queryVector] = await embeddings.embed([query], signal);
+      const embedded = await vectors.get([...freshTexts.values()]);
       if (!queryVector) return { hits: [] };
       const items = new Map<string, number[]>();
       for (const [id, text] of freshTexts) {
@@ -250,7 +250,8 @@ export function createRagSearchTool(options: RagSearchOptions = {}): ToolDefinit
           ? [{ doc: entry.doc, chunkId: hit.id, text: entry.text, score: 0, coverage: 0, origin: "cache" as const, similarity: hit.similarity }]
           : [];
       });
-      return { hits };
+      const missing = [...freshTexts.values()].filter(text => !embedded.has(text)).length;
+      return { hits, ...(missing > 0 ? { error: `${missing} 个文档块缺少向量，请运行 bun run rag:embed 补建；本次仍使用已建向量和词法检索` } : {}) };
     } catch (error) {
       if (signal?.aborted) throw error;
       vectorDisabledUntil = now() + VECTOR_RETRY_COOLDOWN_MS;
@@ -259,7 +260,7 @@ export function createRagSearchTool(options: RagSearchOptions = {}): ToolDefinit
   }
 
   // 写路径：联网取回 → 入库 → 为每篇新文档挑出与查询最贴近的块；跨语言对不上词时按 Tavily 分退回首块
-  async function ingestWeb(query: string, need: number, signal?: AbortSignal): Promise<Candidate[]> {
+  async function ingestWeb(query: string, need: number, vectorErrors: string[], signal?: AbortSignal): Promise<Candidate[]> {
     const response = await webSearch({
       query,
       maxResults: need,
@@ -275,6 +276,15 @@ export function createRagSearchTool(options: RagSearchOptions = {}): ToolDefinit
         trust: "web" as const,
       }))
     );
+
+    if (embeddings && vectors) {
+      try {
+        await indexDocuments(saved, { embeddings, vectorCache: vectors, ...(signal ? { signal } : {}) });
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        vectorErrors.push(`网页已入库但向量生成失败，请运行 bun run rag:embed 重试：${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
 
     // 同一 URL 可能出现在多条结果里，取最高分
     const scoresBySource = new Map<string, number>();
@@ -463,7 +473,7 @@ export function createRagSearchTool(options: RagSearchOptions = {}): ToolDefinit
       if (selected.length < params.top_k) {
         mark = performance.now();
         try {
-          const fetched = await ingestWeb(await ensureRewrite(), params.top_k - selected.length, runtime?.signal);
+          const fetched = await ingestWeb(await ensureRewrite(), params.top_k - selected.length, semanticErrors, runtime?.signal);
           stageMs.web = elapsed(mark);
           traceCounts.web_fetched = fetched.length;
           remember(fetched);

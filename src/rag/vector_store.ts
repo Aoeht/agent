@@ -3,12 +3,12 @@
  * 向量缓存 + 暴力余弦检索。语料上限是 maxDocs(500) 篇、数千个块，这个量级直接算点积即可
  * （千级向量毫秒级），不需要引入 ANN 索引；缓存的意义只是避免每次检索重复调 embedding 接口。
  *
- * 持久化是"尽力而为"的 sidecar 文件（.rag-cache/vectors.json）：写入走 tmp+rename 原子替换，
- * 不加跨进程锁，两进程同时写可能互相覆盖丢几条 —— 后果只是多一次 embedding 调用，不影响检索正确性，
- * 所以不值得为此复制 knowledge_store 那套锁。
+ * 持久化到 sidecar 文件（.rag-cache/vectors.json），写入走 tmp+rename 原子替换。
+ * ponytail: JSON 后端限单个入库进程；多进程并发导入用 PostgreSQL，避免文件覆盖导致向量缺失。
  */
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
+import path from "node:path";
 
 interface VectorFileV1 {
   version: 1;
@@ -67,27 +67,41 @@ export interface VectorCacheOptions {
 
 export class VectorCache {
   private readonly entries = new Map<string, number[]>();
-  private loaded = false;
+  private signature: string | undefined;
   private dims: number | undefined;
   private readonly maxEntries: number;
+  private writeChain: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly options: VectorCacheOptions) {
     this.maxEntries = options.maxEntries ?? 8_000;
   }
 
-  /**
-   * 返回每个文本对应的向量：命中的直接给，缺的按批调 embed 补齐并落盘。
-   * 调用方通常传 [查询, ...全部块文本] —— 查询与块共用一张缓存，相同查询第二次起零调用。
-   */
-  async ensure(texts: string[], embed: (batch: string[]) => Promise<number[][]>): Promise<Map<string, number[]>> {
+  /** 只读已生成的向量；外部入库更新文件后，长驻查询进程也能读到。 */
+  async get(texts: string[]): Promise<Map<string, number[]>> {
+    await this.writeChain;
+    return this.read(texts);
+  }
+
+  private async read(texts: string[]): Promise<Map<string, number[]>> {
     await this.load();
     const result = new Map<string, number[]>();
-    const missing: string[] = [];
     for (const text of new Set(texts)) {
       const cached = this.entries.get(vectorKey(this.options.model, text));
       if (cached && (this.dims === undefined || cached.length === this.dims)) result.set(text, cached);
-      else missing.push(text);
     }
+    return result;
+  }
+
+  /** 已有向量复用，缺失向量分批生成并持久化；同实例写入串行。 */
+  async ensure(texts: string[], embed: (batch: string[]) => Promise<number[][]>): Promise<Map<string, number[]>> {
+    const pending = this.writeChain.then(() => this.ensureBatch(texts, embed));
+    this.writeChain = pending.catch(() => undefined);
+    return pending;
+  }
+
+  private async ensureBatch(texts: string[], embed: (batch: string[]) => Promise<number[][]>): Promise<Map<string, number[]>> {
+    const result = await this.read(texts);
+    const missing = [...new Set(texts)].filter(text => !result.has(text));
     if (missing.length === 0) return result;
 
     for (let i = 0; i < missing.length; i += EMBED_BATCH) {
@@ -101,33 +115,43 @@ export class VectorCache {
         this.entries.set(vectorKey(this.options.model, text), vector);
         result.set(text, vector);
       });
+      // 每批落盘：后续批失败时，重试可复用已经完成的批次。
+      await this.persist();
     }
-    await this.persist();
     return result;
   }
 
   private async load(): Promise<void> {
-    if (this.loaded) return;
-    this.loaded = true;
     let raw: string;
     try {
+      const stat = await fs.stat(this.options.filePath);
+      const signature = `${stat.mtimeMs}:${stat.size}`;
+      if (signature === this.signature) return;
       raw = await fs.readFile(this.options.filePath, "utf-8");
+      this.signature = signature;
     } catch {
-      return; // 不存在/不可读一律按空缓存处理
+      this.signature = undefined;
+      this.entries.clear();
+      this.dims = undefined;
+      return; // 不存在/不可读按空缓存处理，查询端会报告缺失向量
     }
     try {
       const parsed = JSON.parse(raw) as VectorFileV1;
+      this.entries.clear();
+      this.dims = undefined;
       if (parsed.version !== 1 || parsed.model !== this.options.model) return; // 换模型 = 全量失效
       this.dims = parsed.dims;
       for (const [key, vector] of Object.entries(parsed.entries ?? {})) {
         if (Array.isArray(vector) && vector.length > 0) this.entries.set(key, vector);
       }
     } catch {
+      this.entries.clear();
+      this.dims = undefined;
       // 坏文件按空缓存处理，下次 ensure 会重算并覆盖
     }
   }
 
-  /** 失败只意味着下次多调几次接口，本次内存里的向量依然有效，所以整体吞错 */
+  /** 入库只有持久化成功才算完成；失败交给调用方报告并重试。 */
   private async persist(): Promise<void> {
     while (this.entries.size > this.maxEntries) {
       const oldest = this.entries.keys().next().value;
@@ -146,6 +170,7 @@ export class VectorCache {
     };
     const tmp = `${this.options.filePath}.${process.pid}.tmp`;
     try {
+      await fs.mkdir(path.dirname(this.options.filePath), { recursive: true });
       await fs.writeFile(tmp, JSON.stringify(payload), "utf-8");
       // Windows 上目标文件正被其它进程读取时 rename 可能短暂 EPERM/EBUSY，退避重试
       for (let attempt = 0; ; attempt++) {
@@ -158,8 +183,12 @@ export class VectorCache {
           await new Promise((resolve) => setTimeout(resolve, 20 * (attempt + 1)));
         }
       }
-    } catch {
+    } catch (error) {
       await fs.rm(tmp, { force: true }).catch(() => undefined);
+      this.signature = undefined;
+      this.entries.clear();
+      this.dims = undefined;
+      throw error;
     }
   }
 }

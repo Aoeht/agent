@@ -19,6 +19,7 @@ import { EmbeddingClient, createEmbeddingClientFromEnv } from "../src/rag/embedd
 import { createRerankerFromEnv } from "../src/rag/rerank";
 import { createQueryRewriterFromEnv } from "../src/rag/rewrite";
 import { VectorCache } from "../src/rag/vector_store";
+import { indexDocuments } from "../src/rag/index_documents";
 import { createKnowledgeStore, createVectorCache } from "../src/rag/store_factory";
 import type { KnowledgeStoreApi } from "../src/rag/knowledge_store";
 import type { QueryRewriter } from "../src/rag/rewrite";
@@ -194,6 +195,10 @@ async function buildContext(variant: VariantConfig, mode: "self-check" | "live",
   if (mode === "self-check") {
     const store = await createFixtureStore(rootDir);
     const embeddings = makeFakeEmbeddings();
+    await indexDocuments(await store.list(), {
+      embeddings,
+      vectorCache: new VectorCache({ filePath: path.join(rootDir, "vectors.json"), model: embeddings.model }),
+    });
     return {
       store,
       embeddings,

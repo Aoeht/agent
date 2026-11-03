@@ -9,6 +9,7 @@ import { KnowledgeStore } from "../src/rag/knowledge_store";
 import { PgKnowledgeStore, PgVectorCache, closePgPools } from "../src/rag/pg_store";
 import { createRagSearchTool } from "../src/tools/rag_search";
 import { createVectorCache } from "../src/rag/store_factory";
+import { indexDocuments } from "../src/rag/index_documents";
 import type { TavilyResponse, TavilySearchRequest } from "../src/tools/tavily_client";
 
 let failures = 0;
@@ -307,6 +308,8 @@ async function testRagSearchEndToEnd(): Promise<void> {
   await store.upsert([{ source: "https://pg.example/en", content: EN_SCAM_DOC, trust: "web" }]);
   const embeddings = makeFakeEmbeddings();
   const vectorCache = new PgVectorCache({ connectionString: url!, schema: SCHEMA, model: "fake-embedding" });
+  await indexDocuments(await store.list(), { embeddings, vectorCache });
+  embeddings.calls.length = 0;
   const tool = createRagSearchTool({ store, vectorCache, webSearch: fakeWeb([]), embeddings });
   const out = (await tool.execute({ query: QUERY, top_k: 1 })) as RagOutput;
   check(
@@ -314,6 +317,7 @@ async function testRagSearchEndToEnd(): Promise<void> {
     "PG 后端上词法零命中时语义通道召回",
     out.results
   );
+  check(JSON.stringify(embeddings.calls) === JSON.stringify([[QUERY]]), "PG 检索只编码查询，不补算文档", embeddings.calls);
 }
 
 /** 用例间清空共享 schema：各用例的断言都假设库里只有自己写入的文档，不隔离会互相污染 */

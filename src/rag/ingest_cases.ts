@@ -14,6 +14,7 @@
  * 幂等：source 是文档主键的一部分，已入库的 URL 直接跳过，可反复补跑。
  */
 import { createKnowledgeStore } from "./store_factory";
+import { indexDocuments } from "./index_documents";
 import { closePgPools } from "./pg_store";
 import { fraudHits } from "./fraud_terms";
 import { tavilySearch } from "../tools/tavily_client";
@@ -130,6 +131,7 @@ async function flush(): Promise<void> {
   if (pending.length === 0) return;
   const batch = pending.splice(0, pending.length);
   const saved = await store.upsert(batch.map((item) => ({ ...item, trust: "web" as const })));
+  await indexDocuments(saved);
   ingested += saved.length;
   for (const doc of saved) console.log(`  + ${String(doc.chunks.length).padStart(2)} 片 ${doc.source.slice(0, 96)}`);
 }

@@ -4,6 +4,7 @@ import path from "node:path";
 import { KnowledgeStoreApi } from "./knowledge_store";
 import { createKnowledgeStore } from "./store_factory";
 import { closePgPools } from "./pg_store";
+import { indexDocuments, type IndexDocumentsOptions } from "./index_documents";
 
 /** 支持的内部资料类型：纯文本与 Markdown（不含 .json，那是缓存自身格式） */
 export const SUPPORTED_EXTENSIONS = [".md", ".markdown", ".txt"];
@@ -131,7 +132,7 @@ export async function collectSections(inputs: string[], options: CollectOptions 
   return { sections, issues };
 }
 
-export interface IngestOptions {
+export interface IngestOptions extends IndexDocumentsOptions {
   store: KnowledgeStoreApi;
   rootDir?: string;
   /** 只统计不写盘 */
@@ -200,7 +201,7 @@ export async function ingestPaths(inputs: string[], options: IngestOptions): Pro
 
   let removed: IngestReport["removed"] = [];
   if (!dryRun && sections.length > 0) {
-    await store.upsert(
+    const saved = await store.upsert(
       sections.map((section) => ({
         source: section.source,
         title: section.title,
@@ -208,6 +209,7 @@ export async function ingestPaths(inputs: string[], options: IngestOptions): Pro
         trust: "internal" as const,
       }))
     );
+    await indexDocuments(saved, options);
   }
 
   if (sync) {

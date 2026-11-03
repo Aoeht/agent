@@ -481,7 +481,7 @@ export class PgVectorCache {
     this.memory.set(key, vector);
   }
 
-  async ensure(texts: string[], embed: (batch: string[]) => Promise<number[][]>): Promise<Map<string, number[]>> {
+  async get(texts: string[]): Promise<Map<string, number[]>> {
     await ensureSchema(this.pool, this.schema);
     const unique = [...new Set(texts)];
     const textByKey = new Map(unique.map((text) => [vectorKey(this.options.model, text), text] as const));
@@ -509,7 +509,12 @@ export class PgVectorCache {
       }
     }
 
-    const missing = unique.filter((text) => !result.has(text));
+    return result;
+  }
+
+  async ensure(texts: string[], embed: (batch: string[]) => Promise<number[][]>): Promise<Map<string, number[]>> {
+    const result = await this.get(texts);
+    const missing = [...new Set(texts)].filter((text) => !result.has(text));
     if (missing.length === 0) return result;
 
     for (let i = 0; i < missing.length; i += VECTOR_INSERT_BATCH) {
@@ -523,7 +528,6 @@ export class PgVectorCache {
         if (!Array.isArray(vector) || vector.length === 0) return;
         result.set(text, vector);
         const key = vectorKey(this.options.model, text);
-        this.remember(key, vector);
         keys.push(key);
         dims.push(vector.length);
         embeddings.push(vector);
@@ -537,10 +541,11 @@ export class PgVectorCache {
          ON CONFLICT (key) DO NOTHING`,
         [keys, keys.map(() => this.options.model), dims, embeddingLiterals, new Date(this.now())]
       );
+      keys.forEach((key, i) => this.remember(key, embeddings[i]!));
     }
     // 顺手清长尾：换模型后旧 key 不会再被读到，靠这条淘汰
     await this.pool
-      .query(`DELETE FROM ${this.t}.vectors WHERE updated_at < $1`, [new Date(this.now() - VECTOR_RETENTION_MS)])
+      .query(`DELETE FROM ${this.t}.vectors WHERE updated_at < $1 AND model <> $2`, [new Date(this.now() - VECTOR_RETENTION_MS), this.options.model])
       .catch(() => undefined);
     return result;
   }

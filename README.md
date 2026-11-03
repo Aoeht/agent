@@ -93,10 +93,13 @@ bun test                           # 全量测试
 cd web && bun run typecheck        # 前端类型检查（独立 tsconfig）
 
 bun run rag:ingest --sync <路径>   # 导入知识库语料
+bun run rag:embed                 # 为存量语料或新 embedding 配置补建文档向量
 bun run trace:report               # 聚合 .traces/：缓存命中、成本分布、工具错误率
 bun run eval:memory                # 记忆召回检索变体对照（零调用）
 bun run eval:scanner --self-check  # 诈骗扫描评测自检（零调用）
 ```
+
+配置 embedding 后，本地文件、案例采集和联网结果在入库时生成文档向量；检索只编码查询。升级已有知识库或更换 embedding 配置后，先运行 `bun run rag:embed` 补齐向量。缺失向量不会在查询时自动补算，仍可通过关键词召回。入库向量化失败会保留正文，重跑导入或补建命令即可恢复。JSON 后端使用单个入库进程，多进程并发导入请选择 PostgreSQL。
 
 长期记忆支持候选召回后的关系判定（重复 / 补充 / 更新 / 冲突），明确更新以原子提交保留新旧版本，未确认冲突不注入有效记忆。可通过 `memory action=conflicts` 查看待确认提案，确认后用 `resolve` 处理；详见 [长期记忆演进](benchmarks/memory_recall/evolution.md)。
 
