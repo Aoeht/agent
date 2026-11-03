@@ -174,7 +174,7 @@ export class MemoryWriter {
     if (!this.embeddings) return [...ids].map(id => active.find(entry => entry.id === id)!).slice(0, 8);
     this.dedupCache ??= new VectorCache({
       filePath: path.join(this.cacheDir, "write-vectors.json"),
-      model: this.embeddings.model,
+      model: this.embeddings.cacheIdentity ?? this.embeddings.model,
       maxEntries: DEDUP_CACHE_MAX_ENTRIES,
     });
     try {

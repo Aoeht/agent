@@ -20,7 +20,7 @@ interface VectorFileV1 {
 
 const sha1 = (text: string) => createHash("sha1").update(text).digest("hex");
 
-/** 缓存 key = 模型名 + 块文本：文本变（重切/内容更新）自动换 key，旧条目落盘时按容量淘汰 */
+/** 缓存 key = 编码配置标识（兼容旧模型名）+ 块文本；配置/文本变更自动换 key。 */
 export const vectorKey = (model: string, text: string): string => sha1(`${model}\u0000${text}`);
 
 export interface CosineHit {

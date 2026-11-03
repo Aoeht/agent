@@ -157,6 +157,9 @@ async function testRerankReorders() {
   check(after.results[0]?.title === "平台规则", "重排后语义更贴的块排第一", after.results.map((r) => r.title));
   check(after.rerank_model === "fake-rerank", "结果上报重排模型", after.rerank_model);
   check(typeof after.results[0]?.rerank_score === "number", "每条结果带 rerank_score", after.results[0]);
+  const best = (await reranked.execute({ query, top_k: 1 })) as RagOutput;
+  check(best.results.length === 1 && best.results[0]?.title === "平台规则", "top_k=1 仍对候选池重排后取最佳结果", best.results);
+  check(best.results[0]?.rerank_score === 0.95, "top_k=1 返回实际重排分", best.results[0]);
 }
 
 async function testRerankFailureKeepsOrder() {

@@ -11,11 +11,14 @@
  *   EMBEDDING_BATCH      单请求最大条数，缺省 20（DashScope 上限 20/25，OpenAI 官方可到 2048，可调大省请求数）
  */
 import OpenAI from "openai";
+import { createHash } from "node:crypto";
 import { resolveAuxEndpoint } from "../core/providers";
 
 export interface EmbeddingClient {
   /** 模型名参与向量缓存的 key：换模型旧向量自动失效，不需要手动清理 */
   readonly model: string;
+  /** 缓存命名空间：包含服务地址、模型和编码配置；自定义客户端可省略并沿用模型名。 */
+  readonly cacheIdentity?: string;
   /** 输出顺序与输入一一对应；单请求条数上限由实现内部分批，调用方无需关心 */
   embed(inputs: string[], signal?: AbortSignal): Promise<number[][]>;
 }
@@ -30,6 +33,12 @@ export class OpenAICompatibleEmbeddings implements EmbeddingClient {
     private readonly dimensions?: number,
     private readonly batchSize: number = OpenAICompatibleEmbeddings.DEFAULT_BATCH
   ) {}
+
+  get cacheIdentity(): string {
+    return createHash("sha256")
+      .update(JSON.stringify([this.model, this.client.baseURL.replace(/\/+$/, ""), this.dimensions ?? null]))
+      .digest("hex");
+  }
 
   async embed(inputs: string[], signal?: AbortSignal): Promise<number[][]> {
     const vectors: number[][] = [];

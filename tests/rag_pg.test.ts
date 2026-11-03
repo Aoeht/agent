@@ -8,6 +8,7 @@ import type { EmbeddingClient } from "../src/rag/embeddings";
 import { KnowledgeStore } from "../src/rag/knowledge_store";
 import { PgKnowledgeStore, PgVectorCache, closePgPools } from "../src/rag/pg_store";
 import { createRagSearchTool } from "../src/tools/rag_search";
+import { createVectorCache } from "../src/rag/store_factory";
 import type { TavilyResponse, TavilySearchRequest } from "../src/tools/tavily_client";
 
 let failures = 0;
@@ -247,6 +248,35 @@ async function testVectorMemoryLayer(): Promise<void> {
   check(again.get(texts[0]!)!.length === TOPICS.length, "内存层返回的向量可用");
 }
 
+async function testVectorConfigurationIsolation(): Promise<void> {
+  const previousUrl = process.env.RAG_PG_URL;
+  const previousSchema = process.env.RAG_PG_SCHEMA;
+  process.env.RAG_PG_URL = url!;
+  process.env.RAG_PG_SCHEMA = SCHEMA;
+  try {
+    let calls = 0;
+    const embeddings = (dimensions: number): EmbeddingClient => ({
+      model: "same-model", cacheIdentity: `same-model-dims-${dimensions}`,
+      embed: async batch => { calls++; return batch.map(() => Array(dimensions).fill(1)); },
+    });
+    const small = embeddings(2);
+    const large = embeddings(3);
+    const texts = ["document", "query"];
+    await createVectorCache(small).ensure(texts, small.embed);
+    const result = await createVectorCache(large).ensure(texts, large.embed);
+    check(calls === 2 && [...result.values()].every(v => v.length === 3), "PG 同模型变更维度后不复用旧缓存", result);
+    await createVectorCache(large).ensure(texts, large.embed);
+    check(calls === 2, "PG 新配置跨实例复用缓存");
+    const old = await createVectorCache(small).ensure(texts, small.embed);
+    check(calls === 2 && [...old.values()].every(v => v.length === 2), "PG 两种维度的缓存可独立共存", old);
+  } finally {
+    if (previousUrl === undefined) delete process.env.RAG_PG_URL;
+    else process.env.RAG_PG_URL = previousUrl;
+    if (previousSchema === undefined) delete process.env.RAG_PG_SCHEMA;
+    else process.env.RAG_PG_SCHEMA = previousSchema;
+  }
+}
+
 /** JSON → PG 原样搬运：id / contentHash / chunk id 全保留，fingerprint 不漂移 */
 async function testImportDocsFromJson(): Promise<void> {
   await fs.mkdir(ROOT, { recursive: true });
@@ -322,6 +352,7 @@ async function main(): Promise<void> {
     testCrossInstanceVisibility,
     testGetRevisionProbe,
     testVectorCacheReuse,
+    testVectorConfigurationIsolation,
     testVectorMemoryLayer,
     testImportDocsFromJson,
     testRagSearchEndToEnd,

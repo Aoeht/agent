@@ -65,8 +65,10 @@ export type VectorCacheLike = VectorCache | PgVectorCache;
 
 export function createVectorCache(embeddings: EmbeddingClient, cacheDir?: string): VectorCacheLike {
   const connectionString = pgUrlFromEnv();
+  // JSON 和 PG 共用命名空间，切换维度/服务后不会复用旧向量。
+  const model = embeddings.cacheIdentity ?? embeddings.model;
   if (connectionString) {
-    return new PgVectorCache({ connectionString, schema: pgSchemaFromEnv(), model: embeddings.model });
+    return new PgVectorCache({ connectionString, schema: pgSchemaFromEnv(), model });
   }
-  return new VectorCache({ filePath: path.join(cacheDir ?? DEFAULT_CACHE_DIR, "vectors.json"), model: embeddings.model });
+  return new VectorCache({ filePath: path.join(cacheDir ?? DEFAULT_CACHE_DIR, "vectors.json"), model });
 }

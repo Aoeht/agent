@@ -6,8 +6,10 @@ delete process.env.EMBEDDING_MODEL;
 delete process.env.RAG_PG_URL;
 import fs from "node:fs/promises";
 import path from "node:path";
+import OpenAI from "openai";
 import type { EmbeddingClient } from "../src/rag/embeddings";
-import { createEmbeddingClientFromEnv } from "../src/rag/embeddings";
+import { createEmbeddingClientFromEnv, OpenAICompatibleEmbeddings } from "../src/rag/embeddings";
+import { createVectorCache } from "../src/rag/store_factory";
 import { KnowledgeStore } from "../src/rag/knowledge_store";
 import { VectorCache, cosineTopK } from "../src/rag/vector_store";
 import { createRagSearchTool } from "../src/tools/rag_search";
@@ -164,6 +166,62 @@ async function testVectorCache(): Promise<void> {
     "超出 maxEntries 时最早写入的条目被淘汰，其余仍在盘上",
     seen[seen.length - 1]
   );
+}
+
+async function testCacheConfigurationChanges(): Promise<void> {
+  const dir = dirFor("cache-config");
+  await fs.mkdir(dir, { recursive: true });
+  const client = (dimensions?: number, baseURL = "http://embedding.example/v1", batchSize = 20) =>
+    new OpenAICompatibleEmbeddings(new OpenAI({ apiKey: "test", baseURL }), "same-model", dimensions, batchSize);
+  const texts = ["document", "query"];
+  // 旧版本只有模型名的缓存，也必须失效。
+  await new VectorCache({ filePath: path.join(dir, "vectors.json"), model: "same-model" })
+    .ensure(texts, async batch => batch.map(() => [1, 0]));
+  let calls = 0;
+  const embed = async (batch: string[], dims: number) => {
+    calls++;
+    return batch.map(() => [1, ...Array(dims - 1).fill(0)]);
+  };
+  await createVectorCache(client(2), dir).ensure(texts, batch => embed(batch, 2));
+  check(calls === 1, "升级后不复用没有配置标识的旧缓存");
+  await createVectorCache(client(2), dir).ensure(texts, batch => embed(batch, 2));
+  check(calls === 1, "相同配置跨实例复用向量缓存");
+  const changed = await createVectorCache(client(3), dir).ensure([...texts, "new query"], batch => embed(batch, 3));
+  check(calls === 2 && changed.size === 3 && [...changed.values()].every(v => v.length === 3),
+    "同模型切换维度后文档和新旧查询全部重算，新查询不会丢失", [...changed]);
+  await createVectorCache(client(3), dir).ensure(texts, batch => embed(batch, 3));
+  check(calls === 2, "新维度落盘后可再次复用");
+  await createVectorCache(client(3, "http://other.example/v1"), dir).ensure(texts, batch => embed(batch, 3));
+  check(calls === 3, "同模型同维度切换服务地址后重算");
+  check(client().cacheIdentity !== client(2).cacheIdentity, "默认维度与显式维度隔离");
+  check(client(2).cacheIdentity === client(2, "http://embedding.example/v1/", 1).cacheIdentity,
+    "批大小和地址末尾斜杠不影响编码缓存");
+}
+
+async function testSemanticRerankCandidateOrder(): Promise<void> {
+  const dir = dirFor("semantic-rerank");
+  // 先按实际 chunk id 排好，再把最相关内容赋给最大 id；确保错误的 id 排序无法碰巧通过。
+  const store = new KnowledgeStore({ filePath: path.join(dir, "knowledge.json") });
+  const sources = ["https://en.example/a", "https://en.example/b", "https://en.example/c"]
+    .sort((a, b) => store.docId(a).localeCompare(store.docId(b)));
+  await seedStore(dir, sources.map((source, i) => ({ source, content: ["weak", "medium", "strong"][i]! })));
+  const embeddings: EmbeddingClient = {
+    model: "semantic-order",
+    embed: async inputs => inputs.map(text => text === "weak" ? [0.6, 0.8] : text === "medium" ? [0.8, 0.6] : [1, 0]),
+  };
+  const rerankInputs: string[][] = [];
+  const tool = createRagSearchTool({
+    cacheDir: dir, embeddings, webSearch: fakeWeb([]), rerankCandidates: 2,
+    reranker: { model: "fake-rerank", rerank: async (_query, docs) => {
+      rerankInputs.push(docs);
+      return docs.map(text => text === "strong" ? 1 : 0.5);
+    } },
+  });
+  const out = (await tool.execute({ query: "中文查询", top_k: 2 })) as RagOutput;
+  check(JSON.stringify(rerankInputs[0]) === JSON.stringify(["strong", "medium"]),
+    "纯语义候选按相似度排名截断后送入重排，而非按 chunk id", rerankInputs);
+  check(out.results[0]?.source === sources[2] && out.results[0]?.similarity === 1,
+    "最相关的纯向量候选保留在最终结果首位", out.results);
 }
 
 /** 词法零命中的英文文档被语义通道捞回来，且不再触发联网兜底 */
@@ -428,6 +486,8 @@ async function main(): Promise<void> {
   try {
     testCosineTopK();
     await testVectorCache();
+    await testCacheConfigurationChanges();
+    await testSemanticRerankCandidateOrder();
     await testSemanticRescue();
     await testHybridFusion();
     await testEmbeddingFailureDegradation();

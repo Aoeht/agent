@@ -183,7 +183,7 @@ export class MemoryRecall {
     let vector: Array<{ id: string; similarity: number }> = [];
     if (this.embeddings && this.mode !== "keyword") {
       try {
-        this.vectorCache ??= new VectorCache({ filePath: this.vectorPath, model: this.embeddings.model, maxEntries: 4000 });
+        this.vectorCache ??= new VectorCache({ filePath: this.vectorPath, model: this.embeddings.cacheIdentity ?? this.embeddings.model, maxEntries: 4000 });
         const vectors = await this.vectorCache.ensure(
           [queryText, ...candidates.map((candidate) => candidate.embeddingText)],
           (batch) => this.embeddings!.embed(batch)

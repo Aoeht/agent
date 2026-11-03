@@ -179,7 +179,8 @@ export function createRagSearchTool(options: RagSearchOptions = {}): ToolDefinit
    */
   function fuseChannels(lexical: Candidate[], semantic: Candidate[]): Candidate[] {
     if (semantic.length === 0) return lexical;
-    if (lexical.length === 0) return semantic;
+    // 纯语义候选的 BM25 score 为 0；保留通道排名，供后续重排候选截断使用。
+    if (lexical.length === 0) return semantic.map((candidate, i) => ({ ...candidate, rrf: 1 / (RRF_K + i + 1) }));
     const rrf = new Map<string, number>();
     const addChannel = (channel: Candidate[]) =>
       channel.forEach((candidate, i) => rrf.set(candidate.chunkId, (rrf.get(candidate.chunkId) ?? 0) + 1 / (RRF_K + i + 1)));
@@ -482,7 +483,7 @@ export function createRagSearchTool(options: RagSearchOptions = {}): ToolDefinit
 
       // 4. 重排：对候选池按现有排序取前 N 重新打分，再按重排分重挑 top_k；trust 权重仍乘在重排分上，
       //    内部规则不会被网页结果无脑压掉。重排失败保留原排序
-      if (reranker && selected.length > 1) {
+      if (reranker && pool.size > 1) {
         const candidates = [...pool.values()].sort(byRank).slice(0, rerankCandidates);
         mark = performance.now();
         try {
