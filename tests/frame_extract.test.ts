@@ -175,4 +175,42 @@ describeWithFfmpeg("真实 ffmpeg 抽帧", () => {
     expect(manifest.grids).toHaveLength(1);
     expect(manifest.frames.at(-1).t).toBeGreaterThan(9);
   });
+
+  test("CLI 外部 ASR 参与选窗，历史作者结论上调预算并保留证据", async () => {
+    const snapshotPath = path.join(workDir, "history-snapshot.json");
+    const transcriptPath = path.join(workDir, "asr.json");
+    const findingsPath = path.join(workDir, "findings.jsonl");
+    const outDir = path.join(workDir, "history-output");
+    await fs.writeFile(snapshotPath, JSON.stringify({
+      bvid: "BV1FRAMETEST", fetched_at: "2026-11-04T00:00:00Z",
+      video: { duration_s: 12, owner_mid: 123 },
+      author: { mid: "123", fans: 1000000, official_type: 2 },
+    }));
+    await fs.writeFile(transcriptPath, JSON.stringify({
+      bvid: "BV1FRAMETEST", source: "asr", page: 1,
+      segments: [{ start_s: 2, end_s: 4, text: "加微信领资料" }],
+    }));
+    await fs.writeFile(findingsPath, JSON.stringify({
+      id: "historical-author", recorded_at: "2026-01-01T00:00:00Z", source: "scan_video",
+      subject: "BV1AbCdEfGh2", dedupe_key: "BV1AbCdEfGh2:author", evidence: "历史签名原文",
+      author_risk: { owner_mid: 123, risk_level: "high" },
+    }) + "\n");
+    const proc = Bun.spawn([process.execPath, "run", "src/frame/cli.ts",
+      "--bvid", "BV1FRAMETEST", "--snapshot", snapshotPath, "--video", videoPath,
+      "--transcript", transcriptPath, "--findings", findingsPath,
+      "--out", outDir, "--heuristic", "--no-scenes", "--no-profile",
+    ], { stdout: "pipe", stderr: "pipe" });
+    const [code, stdout, stderr] = await Promise.all([
+      proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text(),
+    ]);
+    expect({ code, error: code === 0 ? "" : stdout + stderr }).toEqual({ code: 0, error: "" });
+    const manifest = JSON.parse(await fs.readFile(path.join(outDir, "manifest.json"), "utf8"));
+    expect(manifest.policy.author_level).toBe("high");
+    expect(manifest.policy.max_grids).toBe(20);
+    expect(manifest.policy.author_score).toBeLessThan(30);
+    expect(manifest.inputs.transcript_source).toBe("asr");
+    expect(manifest.inputs.transcript_segments).toBe(1);
+    expect(manifest.inputs.author_history.records[0].id).toBe("historical-author");
+    expect(manifest.windows.some((window: { reason: string }) => window.reason.includes("得分 2"))).toBe(true);
+  });
 });

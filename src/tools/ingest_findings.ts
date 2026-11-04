@@ -3,6 +3,7 @@ import { z } from "zod";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { ToolDefinition, defineTool } from "../core/types";
+import { AuthorFindingSchema } from "../bili/author_history";
 
 /**
  * 发现库默认落盘位置：进程工作目录下的 .agent-data。
@@ -12,6 +13,7 @@ export const FINDINGS_DIR = path.join(process.cwd(), ".agent-data");
 const FINDINGS_FILE = "findings.jsonl";
 
 const FindingItemSchema = z.object({
+  author_risk: AuthorFindingSchema.optional().describe("scanner 作者维度的结构化结论；仅填真实 owner_mid，必须附 evidence；无法判断用 unknown"),
   summary: z.string().trim().min(1, "summary 不能为空").max(2000).describe("发现的正文：一句话说清这条结论/发现"),
   verdict: z.string().trim().min(1, "verdict 不能为空").max(100).describe("结论标签，简短短语，如：正常 / 存疑 / 已确认 / 建议:采纳"),
   confidence: z.number().min(0).max(1).optional().describe("把握程度 0~1；没有量化依据时省略"),
@@ -32,6 +34,7 @@ export type IngestFindingsParams = z.output<typeof IngestFindingsParamsSchema>;
 
 /** 单条落盘记录：批次字段摊平到每条，下游按行消费（jq/pandas）不用解嵌套 */
 export interface FindingRecord {
+  author_risk?: z.infer<typeof AuthorFindingSchema>;
   id: string;
   recorded_at: string;
   subject: string;
@@ -111,6 +114,7 @@ export function createIngestFindingsTool(options: IngestFindingsOptions = {}): T
             seenKeys.add(item.dedupe_key); // 同一批内重复键同样只收第一条
           }
           accepted.push({
+            ...(item.author_risk === undefined ? {} : { author_risk: item.author_risk }),
             id: idGen(),
             recorded_at: recordedAt,
             subject: params.subject,

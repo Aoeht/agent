@@ -132,7 +132,49 @@ export async function loadSnapshot(datasetDir: string, bvid: string): Promise<Vi
       `首个问题：${first?.path.join(".")} — ${first?.message}`,
     );
   }
-  return result.data;
+  const snapshot = result.data;
+  // 采集快照可以刷新；本地转写独立保存，供 scanner 与抽帧共用。
+  if (normalizeTranscript(snapshot).length === 0) {
+    const transcriptDir = path.join(datasetDir, "transcripts");
+    // 不用未校验的快照字段拼接路径。
+    if (/^BV[0-9A-Za-z]{10}$/.test(snapshot.bvid)) {
+      for (const extension of ["json", "srt"]) {
+        const transcriptPath = path.join(transcriptDir, `${snapshot.bvid}.${extension}`);
+        try {
+          snapshot.transcript = await loadTranscriptFile(transcriptPath, snapshot.bvid);
+          break;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+      }
+    }
+  }
+  return snapshot;
+}
+
+/** 外部转写只接受当前首 P 的 SRT 或标准 transcript JSON，不猜测服务商格式。 */
+export async function loadTranscriptFile(file: string, bvid: string): Promise<z.infer<typeof TranscriptSchema>> {
+  const text = (await fs.readFile(file, "utf8")).replace(/^\uFEFF/, "");
+  let transcript: z.infer<typeof TranscriptSchema>;
+  if (path.extname(file).toLowerCase() === ".srt") {
+    transcript = { source: "srt", segments: parseSrt(text) };
+  } else if (path.extname(file).toLowerCase() === ".json") {
+    const input = TranscriptSchema.extend({
+      bvid: z.literal(bvid).optional(),
+      page: z.literal(1).optional(),
+    }).parse(JSON.parse(text));
+    transcript = { source: input.source, ...(input.segments ? { segments: input.segments } : {}),
+      ...(input.srt === undefined ? {} : { srt: input.srt }) };
+    if (transcript.source === "none") throw new Error(`转写 JSON 必须声明 source=asr|srt|cc：${file}`);
+  } else {
+    throw new Error(`转写文件只支持 .srt / .json：${file}`);
+  }
+  const segments = transcript.segments?.length ? transcript.segments : parseSrt(transcript.srt ?? "");
+  if (segments.length === 0 || segments.some((s) =>
+    !Number.isFinite(s.start_s) || !Number.isFinite(s.end_s) || s.start_s < 0 || s.end_s <= s.start_s || !s.text.trim())) {
+    throw new Error(`转写没有有效分段或时间戳非法：${file}`);
+  }
+  return { source: transcript.source, segments: segments.slice().sort((a, b) => a.start_s - b.start_s) };
 }
 
 /** 归一化转写：只有原始 SRT 时解析成结构化分段；返回分段列表（可能为空） */

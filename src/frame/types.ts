@@ -5,6 +5,7 @@
  */
 import type { AuthorRiskLevel } from "../bili/author_risk";
 import type { VideoProfileSummary } from "./profile";
+import type { AuthorHistory } from "../bili/author_history";
 
 /** 规划器给出的待看时间窗（秒） */
 export interface FrameWindow {
@@ -85,6 +86,11 @@ export interface FrameBundle {
   video_path: string;
   duration_s: number;
   generated_at: string;
+  inputs?: {
+    transcript_source: "cc" | "srt" | "asr" | "none";
+    transcript_segments: number;
+    author_history: AuthorHistory;
+  };
   windows: FrameWindow[];
   frames: ExtractedFrame[];
   grids: FrameGrid[];

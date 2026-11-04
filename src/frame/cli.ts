@@ -20,7 +20,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { scoreAuthor, type AuthorRiskLevel } from "../bili/author_risk";
-import { loadSnapshot, resolveBvid } from "../bili/snapshot";
+import { loadSnapshot, loadTranscriptFile, normalizeTranscript, resolveBvid } from "../bili/snapshot";
+import { loadAuthorHistory } from "../bili/author_history";
 import { sampleFrames, probeDuration } from "./extract";
 import { composeGrids } from "./grid";
 import {
@@ -44,6 +45,8 @@ const LEVELS: AuthorRiskLevel[] = ["high", "medium", "low", "clean", "unknown"];
 interface CliArgs {
   bvid: string;
   snapshot?: string;
+  transcript?: string;
+  findings?: string;
   video?: string;
   planFile?: string;
   heuristic: boolean;
@@ -63,6 +66,8 @@ function usage(): string {
     "",
     "  --video <path>        视频文件（抽帧必需；--print-prompt 时可不给）",
     "  --snapshot <path>     快照文件，默认 dataset/<BV号>.json",
+    "  --transcript <path>   本次使用的 SRT / transcript JSON（覆盖快照转写）",
+    "  --findings <path>     作者历史 JSONL，默认 .agent-data/findings.jsonl",
     "  --plan <path>         模型规划回执（JSON 或带代码块的原文）",
     "  --heuristic           不调模型，直接用确定性粗定位窗口（冒烟用）",
     "  --print-prompt        只输出窗口规划提示词并退出",
@@ -106,6 +111,8 @@ function parseArgs(argv: string[]): CliArgs {
   return {
     bvid,
     ...(valueOf("--snapshot") === undefined ? {} : { snapshot: valueOf("--snapshot")! }),
+    ...(valueOf("--transcript") === undefined ? {} : { transcript: valueOf("--transcript")! }),
+    ...(valueOf("--findings") === undefined ? {} : { findings: valueOf("--findings")! }),
     ...(valueOf("--video") === undefined ? {} : { video: valueOf("--video")! }),
     ...(valueOf("--plan") === undefined ? {} : { planFile: valueOf("--plan")! }),
     heuristic: argv.includes("--heuristic"),
@@ -141,6 +148,8 @@ async function main(): Promise<void> {
     path.dirname(snapshotPath),
     path.basename(snapshotPath, ".json"),
   );
+  if (snapshot.bvid !== args.bvid) throw new Error("快照 BV 号与 --bvid 不一致");
+  if (args.transcript !== undefined) snapshot.transcript = await loadTranscriptFile(path.resolve(args.transcript), args.bvid);
 
   if (args.printPrompt) {
     const messages = buildWindowPlannerMessages(snapshot, {
@@ -194,7 +203,14 @@ async function main(): Promise<void> {
     }
   }
 
-  const authorRisk = scoreAuthor(snapshot.author ?? {});
+  const ownerMid = snapshot.author?.mid ?? snapshot.video?.owner_mid;
+  if (snapshot.author?.mid !== undefined && snapshot.video?.owner_mid !== undefined
+    && String(snapshot.author.mid) !== String(snapshot.video.owner_mid)) throw new Error("作者 MID 与视频 owner_mid 不一致");
+  const authorHistory = await loadAuthorHistory(ownerMid, {
+    excludeBvid: args.bvid,
+    ...(args.findings === undefined ? {} : { storePath: path.resolve(args.findings) }),
+  });
+  const authorRisk = scoreAuthor({ ...snapshot.author, history_level: authorHistory.level });
   const level = args.authorLevel ?? authorRisk.level;
   const budget = frameBudgetFor(level, args.maxGrids === undefined ? {} : { maxGrids: args.maxGrids });
 
@@ -229,6 +245,11 @@ async function main(): Promise<void> {
     video_path: videoPath,
     duration_s: durationS,
     generated_at: new Date().toISOString(),
+    inputs: {
+      transcript_source: snapshot.transcript?.source ?? "none",
+      transcript_segments: normalizeTranscript(snapshot).length,
+      author_history: authorHistory,
+    },
     windows: sampled.windows,
     frames,
     grids,
