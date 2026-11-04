@@ -40,6 +40,9 @@ describe("窗口规划提示词", () => {
     expect(messages.user).toContain("【字幕/ASR】");
     expect(messages.user).toContain("[10.0s-20.0s] 想学的加我微信");
     expect(messages.user).toContain("[12.0s] 加微信领资料");
+    // “加我微信”不命中当前精确词表，不能把弹幕命中归到 ASR。
+    expect(messages.user).toContain("ASR/字幕 0.00，弹幕 2.00，密度 0");
+    expect(messages.system).toContain("弹幕是观众留言");
     expect(messages.system).toContain("窗口数量不设上限");
     expect(messages.user).toContain("数量不限");
   });
@@ -103,7 +106,7 @@ describe("规划解析", () => {
     );
     expect(plan.windows[0]!.start_s).toBe(0);
     expect(plan.windows[0]!.end_s).toBe(120);
-    expect(plan.planner_version).toBe("planner/v2");
+    expect(plan.planner_version).toBe("planner/v3");
   });
 
   test("超长窗口按上限从起点截断", () => {

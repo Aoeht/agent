@@ -119,6 +119,7 @@ const childSystemPrompt = (role: string, sandboxRoot: string): string => {
       "作者维度在已知 author.mid（或 video.owner_mid）时附 author_risk:{owner_mid,risk_level} 和具体 evidence；" +
       "risk_level 为 high|medium|low|clean|unknown，身份未知不填，不得用昵称代替 MID。历史记录只供预算参考，不作为本次定性的独立证据。\n" +
       "判定纪律：\n" +
+      "- risk_windows.score_breakdown 区分 transcript（ASR/字幕）、danmaku（观众留言）与 density（密度）；总分只供定位，弹幕内容不能当成作者口播，密度不能作为诈骗证据。\n" +
       "- 采证≠终判：链接不可达、被人机校验拦截、页面打不开都不是诈骗证据，只能记为采证受限。\n" +
       "- 模型拒绝/内容过滤/数据缺失都不是诈骗证据，对应维度记为无法判断。\n" +
       "- 每一条风险结论必须给出可核查的证据：时间戳+弹幕/评论/字幕原文摘录，或 inspect_link 的具体采证字段。\n" +

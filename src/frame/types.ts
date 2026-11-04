@@ -98,8 +98,8 @@ export interface FrameBundle {
   policy: FramePolicyInfo;
 }
 
-export const FRAME_POLICY_VERSION = "frames/v5";
-export const PLANNER_PROMPT_VERSION = "planner/v2";
+export const FRAME_POLICY_VERSION = "frames/v6";
+export const PLANNER_PROMPT_VERSION = "planner/v3";
 
 /** 一个窗口最多拼几张（九宫格上限） */
 export const MAX_FRAMES_PER_GRID = 9;

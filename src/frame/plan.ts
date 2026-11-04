@@ -142,6 +142,7 @@ export function buildWindowPlannerMessages(
     : candidateWindows.map(
         (w) =>
           `- ${fmtTime(w.start_s)}-${fmtTime(w.end_s)}，得分 ${w.score}` +
+          `（ASR/字幕 ${w.score_breakdown.transcript.toFixed(2)}，弹幕 ${w.score_breakdown.danmaku.toFixed(2)}，密度 ${w.score_breakdown.density}）` +
           `${w.has_link ? "，含链接" : ""}` +
           `${w.transcript_excerpt ? `，字幕摘录：${w.transcript_excerpt.slice(0, 80)}` : ""}`,
       );
@@ -160,6 +161,7 @@ export function buildWindowPlannerMessages(
     "优先画面：聊天记录、转账/收款码、平台/客服界面、二维码、联系方式、收益或中奖截图、屏幕共享、仿冒官方页面。\n" +
     "纪律：\n" +
     "- 只依据给你的字幕、弹幕和元信息，不要臆测没出现的内容；\n" +
+    "- ASR/字幕与弹幕分开计分；弹幕是观众留言，不代表作者口播；密度分只提示值得查看，不是诈骗证据；\n" +
     "- 窗口必须落在视频时长内，按时长上限截短；\n" +
     windowCountRule +
     "- 没有值得看画面的段落时返回空数组，不要为了凑数给窗口；\n" +
@@ -443,7 +445,9 @@ export function heuristicWindows(
       .map((window) => ({
         start_s: window.start_s,
         end_s: window.end_s,
-        reason: `启发式粗定位：得分 ${window.score}${window.has_link ? "，含链接" : ""}`,
+        reason: `启发式粗定位：得分 ${window.score}` +
+          `（ASR/字幕 ${window.score_breakdown.transcript.toFixed(2)}，弹幕 ${window.score_breakdown.danmaku.toFixed(2)}，密度 ${window.score_breakdown.density}）` +
+          `${window.has_link ? "，含链接" : ""}`,
         priority: Math.min(1, window.score / 10),
         focus_times: collectFocusTimes(snapshot.danmaku, window, segments),
       }));

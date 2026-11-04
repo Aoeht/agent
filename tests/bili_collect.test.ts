@@ -65,6 +65,12 @@ test("bili_collect：证据聚合端到端", async () => {
   // 风险窗口：弹幕（链接+加微信）与字幕（联系方式）都落在 0~10s
   expect(out.risk_windows).toHaveLength(1);
   expect(out.risk_windows[0]).toMatchObject({ start_s: 0, end_s: 10, has_link: true });
+  expect(out.risk_windows[0].score_breakdown.transcript).toBeGreaterThan(0);
+  expect(out.risk_windows[0].score_breakdown.danmaku).toBeGreaterThan(0);
+  expect(out.risk_windows[0].score).toBeCloseTo(
+    out.risk_windows[0].score_breakdown.transcript + out.risk_windows[0].score_breakdown.danmaku
+      + out.risk_windows[0].score_breakdown.density,
+  );
   // 命中评论（正文）+ 楼中楼链接（混淆变体已还原）
   expect(out.flagged_comments).toHaveLength(1);
   expect(out.flagged_comments[0].hits).toContain("进群");

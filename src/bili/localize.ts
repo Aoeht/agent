@@ -24,6 +24,8 @@ export interface RiskWindow {
   start_s: number;
   end_s: number;
   score: number;
+  /** 各来源独立限流；密度只代表值得查看，不是内容风险证据。总分为三项之和。 */
+  score_breakdown: { transcript: number; danmaku: number; density: number };
   has_link: boolean;
   /** 窗口内命中关键词的弹幕（最多 maxHitsPerWindow 条） */
   danmaku_hits: Array<{ t: number; text: string; terms: string[] }>;
@@ -53,7 +55,7 @@ export interface LocalizeOptions {
 
 const LINK_BONUS = 2;
 const DENSITY_BONUS = 2;
-/** 单桶内同一关键词最多计 3 次，防一条刷屏词独占得分 */
+/** 每个来源在单桶内同一关键词最多计 3 次，弹幕不能挤掉 ASR 的贡献。 */
 const MAX_PER_TERM = 3;
 
 export function localizeRisks(
@@ -77,10 +79,12 @@ export function localizeRisks(
   const bucketTexts: string[][] = Array.from({ length: bucketCount }, () => []);
   const bucketDanmaku: TimedText[][] = Array.from({ length: bucketCount }, () => []);
   const totals = new Map<string, KeywordHit>();
-  const bucketTerms = Array.from({ length: bucketCount }, () => new Map<string, { count: number; weight: number }>());
-  const linkWeights = new Array<number>(bucketCount).fill(0);
+  const createBuckets = () => Array.from({ length: bucketCount }, () => ({
+    terms: new Map<string, { count: number; weight: number }>(), links: 0,
+  }));
+  const sourceBuckets = { transcript: createBuckets(), danmaku: createBuckets() };
 
-  const accumulate = (text: string, assignments: Array<{ bucket: number; fraction: number }>): string[] => {
+  const accumulate = (source: keyof typeof sourceBuckets, text: string, assignments: Array<{ bucket: number; fraction: number }>): string[] => {
     const hits = scanKeywords(text);
     const links = extractLinks(text, "localize");
     for (const hit of hits) {
@@ -90,14 +94,15 @@ export function localizeRisks(
       else totals.set(key, { ...hit });
     }
     for (const { bucket, fraction } of assignments) {
+      const target = sourceBuckets[source][bucket]!;
       for (const hit of hits) {
-        const prev = bucketTerms[bucket]!.get(hit.term);
-        bucketTerms[bucket]!.set(hit.term, {
+        const prev = target.terms.get(hit.term);
+        target.terms.set(hit.term, {
           count: (prev?.count ?? 0) + Math.min(hit.count, MAX_PER_TERM) * fraction,
           weight: hit.weight,
         });
       }
-      if (links.length > 0) linkWeights[bucket]! += fraction;
+      if (links.length > 0) target.links += fraction;
     }
     return hits.map((h) => h.term);
   };
@@ -108,7 +113,7 @@ export function localizeRisks(
     bucketDanmaku[bucket]!.push(entry);
   }
   for (let bucket = 0; bucket < bucketCount; bucket += 1) {
-    accumulate(bucketTexts[bucket]!.join("\n"), [{ bucket, fraction: 1 }]);
+    accumulate("danmaku", bucketTexts[bucket]!.join("\n"), [{ bucket, fraction: 1 }]);
   }
   const transcriptAssignments: Array<{ segment: TimedSegment; terms: string[] }> = [];
   for (const segment of validTranscript) {
@@ -118,23 +123,28 @@ export function localizeRisks(
       const overlap = Math.min(segment.end_s, (bucket + 1) * bucketS) - Math.max(segment.start_s, bucket * bucketS);
       assignments.push({ bucket, fraction: overlap / (segment.end_s - segment.start_s) });
     }
-    transcriptAssignments.push({ segment, terms: accumulate(segment.text, assignments) });
+    transcriptAssignments.push({ segment, terms: accumulate("transcript", segment.text, assignments) });
   }
 
   const avgDanmaku = validDanmaku.length / bucketCount;
   const scores = new Array<number>(bucketCount).fill(0);
+  const breakdowns: RiskWindow["score_breakdown"][] = [];
   const hasLinkByBucket = new Array<boolean>(bucketCount).fill(false);
   for (let i = 0; i < bucketCount; i += 1) {
-    let score = [...bucketTerms[i]!.values()].reduce((sum, hit) => sum + hit.weight * Math.min(hit.count, MAX_PER_TERM), 0);
-    if (linkWeights[i]! > 0) {
-      score += LINK_BONUS * Math.min(1, linkWeights[i]!);
-      hasLinkByBucket[i] = true;
+    const breakdown = { transcript: 0, danmaku: 0, density: 0 };
+    for (const source of ["transcript", "danmaku"] as const) {
+      const bucket = sourceBuckets[source][i]!;
+      breakdown[source] = [...bucket.terms.values()].reduce(
+        (sum, hit) => sum + hit.weight * Math.min(hit.count, MAX_PER_TERM), 0,
+      ) + LINK_BONUS * Math.min(1, bucket.links);
+      if (bucket.links > 0) hasLinkByBucket[i] = true;
     }
     // 密度突增：弹幕明显高于均值往往是集体反应（嘲讽/警告/引流互动），值得看
     if (validDanmaku.length >= 30 && bucketDanmaku[i]!.length > Math.max(5, avgDanmaku * 2.5)) {
-      score += DENSITY_BONUS;
+      breakdown.density = DENSITY_BONUS;
     }
-    scores[i] = score;
+    breakdowns.push(breakdown);
+    scores[i] = breakdown.transcript + breakdown.danmaku + breakdown.density;
   }
 
   // 相邻正分桶合并（允许 1 桶间隔），生成候选窗口
@@ -193,10 +203,16 @@ export function localizeRisks(
       if (excerpt.length >= excerptChars) break;
       excerpt += (excerpt ? " " : "") + a.segment.text;
     }
+    const breakdown = breakdowns.slice(start, end + 1).reduce((sum, part) => ({
+      transcript: sum.transcript + part.transcript,
+      danmaku: sum.danmaku + part.danmaku,
+      density: sum.density + part.density,
+    }), { transcript: 0, danmaku: 0, density: 0 });
     return {
       start_s: startS,
       end_s: endS,
-      score: candidates.find((c) => c.start === start && c.end === end)!.score,
+      score: breakdown.transcript + breakdown.danmaku + breakdown.density,
+      score_breakdown: breakdown,
       has_link: hasLinkByBucket.slice(start, end + 1).some(Boolean),
       danmaku_hits: danmakuHits,
       transcript_hits: transcriptHits,

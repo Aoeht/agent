@@ -50,10 +50,35 @@ test("跨桶窄区间与整桶边界采用半开区间，非法时间不参与�
   expect(() => localizeRisks([], [], { bucketS: 0 })).toThrow();
 });
 
-test("同桶 ASR 与弹幕仍共享每词计分上限，原始词频完整保留", () => {
+test("同桶 ASR 与弹幕独立计分和限流，原始词频完整保留", () => {
   const result = localizeRisks([{ t: 1, text: "贷款贷款贷款" }], [{ start_s: 1, end_s: 9, text: "贷款贷款" }]);
-  expect(result.windows[0]!.score).toBe(9);
+  expect(result.windows[0]!.score).toBe(15);
+  expect(result.windows[0]!.score_breakdown).toEqual({ transcript: 6, danmaku: 9, density: 0 });
   expect(result.keyword_totals[0]!.count).toBe(5);
+});
+
+test("弹幕刷屏不能挤掉 ASR 分数，ASR 重复不能突破自身上限", () => {
+  const transcript = [{ start_s: 1, end_s: 9, text: "贷款贷款" }];
+  const spam = [{ t: 1, text: "贷款".repeat(100) }];
+  const solo = localizeRisks([], transcript).windows[0]!;
+  const mixed = localizeRisks(spam, transcript).windows[0]!;
+  expect(mixed.score_breakdown.transcript).toBe(solo.score_breakdown.transcript);
+  expect(mixed.score_breakdown.danmaku).toBe(9);
+  const repeated = localizeRisks(spam, Array.from({ length: 100 }, () => transcript[0]!)).windows[0]!;
+  expect(repeated.score_breakdown).toEqual({ transcript: 9, danmaku: 9, density: 0 });
+});
+
+test("链接分按来源保留，长字幕分摊及合并窗口的分项总和可核对", () => {
+  const mixed = localizeRisks([{ t: 5, text: "https://example.com" }], [
+    { start_s: 0, end_s: 35, text: "https://example.com" },
+  ]).windows[0]!;
+  expect(mixed.score_breakdown.transcript).toBeCloseTo(2);
+  expect(mixed.score_breakdown.danmaku).toBe(2);
+  expect(mixed.score_breakdown.density).toBe(0);
+  expect(mixed.score).toBeCloseTo(4);
+  const merged = localizeRisks([{ t: 21, text: "加微信" }], [{ start_s: 0, end_s: 10, text: "贷款" }]).windows[0]!;
+  expect(merged).toMatchObject({ start_s: 0, end_s: 30, score: 5,
+    score_breakdown: { transcript: 3, danmaku: 2, density: 0 } });
 });
 
 test("相邻命中与隔一桶的命中都合并进同一窗口", () => {
@@ -88,6 +113,7 @@ test("弹幕密度突增单独成窗（无关键词也值得看）", () => {
   const result = localizeRisks(danmaku, []);
   expect(result.windows).toHaveLength(1);
   expect(result.windows[0]!.score).toBe(2); // 只有密度加分
+  expect(result.windows[0]!.score_breakdown).toEqual({ transcript: 0, danmaku: 0, density: 2 });
   expect(result.windows[0]!.danmaku_hits).toHaveLength(0);
 });
 
