@@ -6,6 +6,8 @@
 import type { AuthorRiskLevel } from "../bili/author_risk";
 import type { VideoProfileSummary } from "./profile";
 import type { AuthorHistory } from "../bili/author_history";
+import type { measureDataCoverage } from "../bili/coverage";
+import type { associateContacts } from "../bili/contacts";
 
 /** 规划器给出的待看时间窗（秒） */
 export interface FrameWindow {
@@ -87,6 +89,8 @@ export interface FrameBundle {
   duration_s: number;
   generated_at: string;
   inputs?: {
+    data_coverage?: ReturnType<typeof measureDataCoverage>;
+    contact_associations?: ReturnType<typeof associateContacts>;
     transcript_source: "cc" | "srt" | "asr" | "none";
     transcript_segments: number;
     author_history: AuthorHistory;
@@ -99,7 +103,7 @@ export interface FrameBundle {
 }
 
 export const FRAME_POLICY_VERSION = "frames/v6";
-export const PLANNER_PROMPT_VERSION = "planner/v3";
+export const PLANNER_PROMPT_VERSION = "planner/v4";
 
 /** 一个窗口最多拼几张（九宫格上限） */
 export const MAX_FRAMES_PER_GRID = 9;

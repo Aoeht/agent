@@ -17,6 +17,8 @@ import {
 import { extractLinks } from "../bili/links";
 import { localizeRisks, type RiskWindow } from "../bili/localize";
 import { scanKeywords } from "../core/scam_lexicon";
+import { measureDataCoverage } from "../bili/coverage";
+import { associateContacts } from "../bili/contacts";
 import {
   FRAME_POLICY_VERSION,
   PLANNER_PROMPT_VERSION,
@@ -162,6 +164,7 @@ export function buildWindowPlannerMessages(
     "纪律：\n" +
     "- 只依据给你的字幕、弹幕和元信息，不要臆测没出现的内容；\n" +
     "- ASR/字幕与弹幕分开计分；弹幕是观众留言，不代表作者口播；密度分只提示值得查看，不是诈骗证据；\n" +
+    "- 数据覆盖率只衡量字幕时间区间，不代表识别准确率；空档不等于安全，可结合视觉线索补看；联系方式关联是核查线索，同域名不证明同一账号或控制者；\n" +
     "- 窗口必须落在视频时长内，按时长上限截短；\n" +
     windowCountRule +
     "- 没有值得看画面的段落时返回空数组，不要为了凑数给窗口；\n" +
@@ -171,6 +174,8 @@ export function buildWindowPlannerMessages(
 
   const user =
     `【视频元信息】\n${metaLines.join("\n")}\n\n` +
+    `【数据覆盖率】\n${JSON.stringify(measureDataCoverage(snapshot))}\n\n` +
+    `【跨来源联系方式关联】\n${JSON.stringify(associateContacts(snapshot))}\n\n` +
     `【确定性粗定位候选（仅供参考）】\n${candidateLines.join("\n")}\n\n` +
     `【字幕/ASR】\n${transcriptLines.length > 0 ? transcriptLines.join("\n") : "（无字幕/转写）"}\n\n` +
     `【弹幕样本（按时间）】\n${danmakuLines.length > 0 ? danmakuLines.join("\n") : "（无弹幕数据）"}\n\n` +

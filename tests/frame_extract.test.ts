@@ -210,6 +210,9 @@ describeWithFfmpeg("真实 ffmpeg 抽帧", () => {
     expect(manifest.policy.author_score).toBeLessThan(30);
     expect(manifest.inputs.transcript_source).toBe("asr");
     expect(manifest.inputs.transcript_segments).toBe(1);
+    expect(manifest.inputs.data_coverage.duration_s).toBe(12);
+    expect(manifest.inputs.data_coverage.transcript.coverage_ratio).toBeCloseTo(2 / 12);
+    expect(manifest.inputs.data_coverage.transcript.longest_gap).toEqual({ start_s: 4, end_s: 12, duration_s: 8 });
     expect(manifest.windows[0].focus_times).toContain(3);
     expect(manifest.frames.some((frame: { t: number; reason: string }) => frame.t === 3 && frame.reason === "focus")).toBe(true);
     expect(manifest.inputs.author_history.records[0].id).toBe("historical-author");

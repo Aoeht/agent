@@ -106,7 +106,7 @@ describe("规划解析", () => {
     );
     expect(plan.windows[0]!.start_s).toBe(0);
     expect(plan.windows[0]!.end_s).toBe(120);
-    expect(plan.planner_version).toBe("planner/v3");
+    expect(plan.planner_version).toBe("planner/v4");
   });
 
   test("超长窗口按上限从起点截断", () => {

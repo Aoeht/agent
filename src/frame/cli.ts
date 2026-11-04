@@ -22,6 +22,8 @@ import path from "node:path";
 import { scoreAuthor, type AuthorRiskLevel } from "../bili/author_risk";
 import { loadSnapshot, loadTranscriptFile, normalizeTranscript, resolveBvid } from "../bili/snapshot";
 import { loadAuthorHistory } from "../bili/author_history";
+import { measureDataCoverage } from "../bili/coverage";
+import { associateContacts } from "../bili/contacts";
 import { sampleFrames, probeDuration } from "./extract";
 import { composeGrids } from "./grid";
 import {
@@ -246,6 +248,8 @@ async function main(): Promise<void> {
     duration_s: durationS,
     generated_at: new Date().toISOString(),
     inputs: {
+      data_coverage: measureDataCoverage(snapshot, durationS),
+      contact_associations: associateContacts(snapshot),
       transcript_source: snapshot.transcript?.source ?? "none",
       transcript_segments: normalizeTranscript(snapshot).length,
       author_history: authorHistory,

@@ -26,7 +26,7 @@ function fixtureSnapshot() {
       owner_mid: 42,
       tags: ["生活", "职场"],
     },
-    author: { mid: 42, name: "某人", fans: 12, attention: 3000, official_type: 0, sign: "接推广" },
+    author: { mid: 42, name: "某人", fans: 12, attention: 3000, official_type: 0, sign: "接推广 微信 abc123 example.com" },
     danmaku: [
       { t: 5, text: "细节看 example点com" },
       { t: 6, text: "加微信领福利" },
@@ -58,6 +58,10 @@ test("bili_collect：证据聚合端到端", async () => {
   expect(out.author.fans).toBe(12);
   expect(out.author.official).toBe("无认证");
   expect(out.notes).toHaveLength(0);
+  expect(out.data_coverage.transcript.coverage_ratio).toBeCloseTo(10 / 120);
+  expect(out.data_coverage.transcript.longest_gap.duration_s).toBe(110);
+  expect(out.contact_associations.associations.find((item: { kind: string }) => item.kind === "wechat").sources)
+    .toEqual(["desc", "author_sign"]);
 
   // 标题/简介命中
   const titleTerms = out.title_desc_hits.map((h: { term: string }) => h.term);
@@ -78,8 +82,8 @@ test("bili_collect：证据聚合端到端", async () => {
   // 链接来源合并：弹幕与评论里的同一主机合成一条，来源并集；两处都是混淆形态
   const link = out.links.find((l: { normalized: string }) => l.normalized === "example.com");
   expect(link).toBeDefined();
-  expect(link.sources).toEqual(expect.arrayContaining(["danmaku", "comment"]));
-  expect(link.kind).toBe("obfuscated");
+  expect(link.sources).toEqual(expect.arrayContaining(["author_sign", "danmaku", "comment"]));
+  expect(link.kind).toBe("domain");
   await fs.rm(dir, { recursive: true, force: true });
 });
 

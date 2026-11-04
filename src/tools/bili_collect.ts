@@ -21,6 +21,8 @@ import {
 } from "../bili/snapshot";
 import { extractLinks, type ExtractedLink } from "../bili/links";
 import { localizeRisks, type RiskWindow } from "../bili/localize";
+import { associateContacts } from "../bili/contacts";
+import { measureDataCoverage } from "../bili/coverage";
 
 export interface BiliCollectToolOptions {
   /** 快照数据集目录；缺省 BILI_DATASET_DIR，再缺省 dataset/。注册时固定，子代理不可指定任意路径 */
@@ -97,6 +99,10 @@ async function collectEvidence(bvid: string, datasetDir: string): Promise<string
     collectLinks(video.title, "title");
     collectLinks(video.desc, "desc");
   }
+  if (author) {
+    collectLinks(author.name, "author_name");
+    collectLinks(author.sign, "author_sign");
+  }
   for (const entry of danmaku) collectLinks(entry.text, "danmaku");
   for (const comment of comments) {
     collectLinks(comment.message, "comment");
@@ -149,6 +155,8 @@ async function collectEvidence(bvid: string, datasetDir: string): Promise<string
 
   const evidence = {
     bvid,
+    data_coverage: measureDataCoverage(snapshot),
+    contact_associations: associateContacts(snapshot),
     snapshot_fetched_at: snapshot.fetched_at,
     video: video
       ? {
