@@ -1,7 +1,8 @@
 // src/frame/grid.ts
 /**
- * 九宫格拼图：把同一窗口内最多 9 帧拼成一张 3×3 大图，每格左上角烧录
- * "W窗 C格 时间"标签。一次视觉请求只发一张图，既避开图片通道张数上限，
+ * 九宫格拼图：把最多 9 帧拼成一张 3×3 大图，每格左上角烧录
+ * "W窗 C格 时间"标签。跨窗口连续填充：一个窗口不足 9 帧时，用后续窗口的帧补齐，
+ * 只有最后一张图允许留空。一次视觉请求只发一张图，既避开图片通道张数上限，
  * 又让模型能按格位回报证据（"第 5 格 10.0s 出现收款码"）。
  *
  * 拼图只做缩略定位，不承担读小字：原帧仍单独保留，需要时可单帧放大 + OCR。
@@ -18,9 +19,11 @@ import {
 } from "./types";
 
 export interface GridOptions {
-  /** 单格宽（默认 640） */
+  /** 按画面方向选格子尺寸：横屏 640×360，竖屏 360×640；显式 tileWidth/tileHeight 优先 */
+  orientation?: "landscape" | "portrait" | "square";
+  /** 单格宽（默认按 orientation） */
   tileWidth?: number;
-  /** 单格高（默认 360） */
+  /** 单格高（默认按 orientation） */
   tileHeight?: number;
   /** 标签字体；缺省自动找系统字体，找不到就不烧录标签 */
   fontPath?: string;
@@ -36,6 +39,20 @@ export class FrameGridError extends Error {
 }
 
 const DEFAULTS = { tileWidth: 640, tileHeight: 360, jpegQuality: 2 } as const;
+
+const ORIENTATION_TILES = {
+  landscape: { tileWidth: 640, tileHeight: 360 },
+  portrait: { tileWidth: 360, tileHeight: 640 },
+  square: { tileWidth: 480, tileHeight: 480 },
+} as const;
+
+function resolveTileSize(options: GridOptions): { tileWidth: number; tileHeight: number } {
+  const base = ORIENTATION_TILES[options.orientation ?? "landscape"];
+  return {
+    tileWidth: options.tileWidth ?? base.tileWidth,
+    tileHeight: options.tileHeight ?? base.tileHeight,
+  };
+}
 
 const CANDIDATE_FONTS = [
   "C:/Windows/Fonts/arial.ttf",
@@ -110,8 +127,7 @@ export async function composeNineGrid(
   if (frames.length > MAX_FRAMES_PER_GRID) {
     throw new FrameGridError(`单张九宫格最多 ${MAX_FRAMES_PER_GRID} 帧，收到 ${frames.length} 帧`);
   }
-  const tileWidth = options.tileWidth ?? DEFAULTS.tileWidth;
-  const tileHeight = options.tileHeight ?? DEFAULTS.tileHeight;
+  const { tileWidth, tileHeight } = resolveTileSize(options);
   const jpegQuality = options.jpegQuality ?? DEFAULTS.jpegQuality;
   const fontPath = findFont(options.fontPath);
   const gridWidth = tileWidth * 3;
@@ -174,32 +190,34 @@ export async function composeNineGrid(
   if (stat === undefined || stat.size === 0) {
     throw new FrameGridError(`九宫格未生成：${outPath}`);
   }
-  return { path: outPath, width: gridWidth, height: gridHeight, cells };
+  return {
+    path: outPath,
+    width: gridWidth,
+    height: gridHeight,
+    window_indexes: [...new Set(frames.map((frame) => frame.window_index))].sort((a, b) => a - b),
+    cells,
+  };
 }
 
-/** 按窗口分组，每窗口一张九宫格（超过 9 帧时切多张，正常抽帧不会触发） */
+/**
+ * 按窗口顺序 + 时间顺序排成一条帧流，每 9 帧拼一张。
+ * 后一个窗口的帧会填进前一窗口留下的空位，只有最后一张允许不满 9 格。
+ */
 export async function composeGrids(
   frames: ExtractedFrame[],
   outDir: string,
   options: GridOptions = {},
 ): Promise<FrameGrid[]> {
-  const byWindow = new Map<number, ExtractedFrame[]>();
-  for (const frame of frames) {
-    const bucket = byWindow.get(frame.window_index) ?? [];
-    bucket.push(frame);
-    byWindow.set(frame.window_index, bucket);
-  }
+  if (frames.length === 0) return [];
+  const sorted = frames
+    .slice()
+    .sort((a, b) => a.window_index - b.window_index || a.t - b.t);
   await fs.mkdir(outDir, { recursive: true });
   const grids: FrameGrid[] = [];
-  for (const [windowIndex, windowFrames] of [...byWindow.entries()].sort((a, b) => a[0] - b[0])) {
-    const sorted = windowFrames.slice().sort((a, b) => a.t - b.t);
-    for (let chunk = 0; chunk * MAX_FRAMES_PER_GRID < sorted.length; chunk += 1) {
-      const slice = sorted.slice(chunk * MAX_FRAMES_PER_GRID, (chunk + 1) * MAX_FRAMES_PER_GRID);
-      const suffix = chunk === 0 ? "" : `_${chunk + 1}`;
-      grids.push(
-        await composeNineGrid(slice, path.join(outDir, `grid_w${windowIndex}${suffix}.jpg`), options),
-      );
-    }
+  for (let chunk = 0; chunk * MAX_FRAMES_PER_GRID < sorted.length; chunk += 1) {
+    const slice = sorted.slice(chunk * MAX_FRAMES_PER_GRID, (chunk + 1) * MAX_FRAMES_PER_GRID);
+    const name = `grid_${String(chunk + 1).padStart(3, "0")}.jpg`;
+    grids.push(await composeNineGrid(slice, path.join(outDir, name), options));
   }
   return grids;
 }

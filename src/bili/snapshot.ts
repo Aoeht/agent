@@ -47,6 +47,10 @@ export const AuthorSchema = z.object({
   official_type: z.number().optional(),
   official_desc: z.string().optional(),
   sign: z.string().default(""),
+  /** 已投稿件数（采集侧 card.archive_count） */
+  video_count: z.number().optional(),
+  /** 累计播放量（采集侧 statistics.archive.view） */
+  total_views: z.number().optional(),
 });
 
 export const DanmakuEntrySchema = z.object({

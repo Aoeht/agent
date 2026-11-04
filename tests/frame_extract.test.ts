@@ -2,7 +2,8 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { detectSceneTimes, pickFrameTimes, probeDuration, sampleFrames } from "../src/frame/extract";
+import { detectSceneTimes, probeDuration, sampleFrames } from "../src/frame/extract";
+import { frameBudgetFor } from "../src/frame/policy";
 import type { FramePlan } from "../src/frame/types";
 
 const ffmpegReady = Bun.which("ffmpeg") !== null && Bun.which("ffprobe") !== null;
@@ -14,57 +15,21 @@ function runFfmpeg(args: string[]): void {
   }
 }
 
-describe("时间点选择（纯函数）", () => {
-  test("首尾必留，场景帧优先，0.5 秒内去重", () => {
-    const times = pickFrameTimes(
-      { start_s: 0, end_s: 10, reason: "test" },
-      [2, 5],
-      { intervalS: 2.5, maxFrames: 6 },
-    );
-    const values = times.map((item) => item.t);
-    expect(values[0]).toBeCloseTo(0.05, 2);
-    expect(values.at(-1)).toBeCloseTo(9.95, 2);
-    expect(values.filter((t) => Math.abs(t - 2) < 0.01)).toHaveLength(1);
-    expect(values.filter((t) => Math.abs(t - 5) < 0.01)).toHaveLength(1);
-    expect(times.find((item) => Math.abs(item.t - 2) < 0.01)?.reason).toBe("scene");
-  });
-
-  test("限流时优先保留场景帧并始终包含首尾", () => {
-    const times = pickFrameTimes(
-      { start_s: 0, end_s: 10, reason: "test" },
-      [2, 5],
-      { intervalS: 2.5, maxFrames: 3 },
-    );
-    expect(times.map((item) => item.t)).toHaveLength(3);
-    expect(times[0]!.reason).toBe("edge");
-    expect(times.at(-1)!.reason).toBe("edge");
-    expect(times.some((item) => item.reason === "scene")).toBe(true);
-  });
-
-  test("maxFrames=1 只留一帧", () => {
-    const times = pickFrameTimes({ start_s: 0, end_s: 10, reason: "test" }, [2], { maxFrames: 1 });
-    expect(times).toHaveLength(1);
-  });
-
-  test("名额有限时在整段窗口均匀铺开，不挤在前几秒", () => {
-    const times = pickFrameTimes(
-      { start_s: 0, end_s: 30, reason: "test" },
-      [],
-      { intervalS: 2.5, maxFrames: 5 },
-    );
-    const values = times.map((item) => item.t);
-    expect(values).toHaveLength(5);
-    expect(values[0]).toBeCloseTo(0.05, 2);
-    expect(values.at(-1)).toBeCloseTo(29.95, 1);
-    expect(values.some((t) => t > 20)).toBe(true);
-  });
-});
+function plan(windows: FramePlan["windows"]): FramePlan {
+  return {
+    bvid: "BV1FRAMETEST",
+    policy_version: "frames/v3",
+    planner_version: "planner/v2",
+    windows,
+  };
+}
 
 const describeWithFfmpeg = ffmpegReady ? describe : describe.skip;
 
 describeWithFfmpeg("真实 ffmpeg 抽帧", () => {
   let workDir = "";
   let videoPath = "";
+  let staticPath = "";
 
   beforeAll(async () => {
     workDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-agent-frame-extract-"));
@@ -75,10 +40,18 @@ describeWithFfmpeg("真实 ffmpeg 抽帧", () => {
       "-t", "12", "-pix_fmt", "yuv420p",
       videoPath,
     ]);
+    staticPath = path.join(workDir, "static.mp4");
+    runFfmpeg([
+      "-y", "-hide_banner", "-loglevel", "error",
+      "-f", "lavfi", "-i", "color=c=0x336699:s=320x180:rate=10",
+      "-t", "10", "-pix_fmt", "yuv420p",
+      staticPath,
+    ]);
   });
 
   afterAll(async () => {
-    await fs.rm(workDir, { recursive: true, force: true });
+    // Windows 上 ffmpeg 抽帧失败后可能仍短暂占用输出目录
+    await fs.rm(workDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   test("读取时长", async () => {
@@ -95,32 +68,30 @@ describeWithFfmpeg("真实 ffmpeg 抽帧", () => {
       "-map", "[v]", "-pix_fmt", "yuv420p",
       sceneVideo,
     ]);
-    const full = await detectSceneTimes(sceneVideo, { start_s: 0, end_s: 4, reason: "test" }, 0.3);
+    const full = await detectSceneTimes(sceneVideo, { start_s: 0, end_s: 4, reason: "test" }, 0.35);
     expect(full.some((t) => Math.abs(t - 2) < 0.2)).toBe(true);
 
-    const offset = await detectSceneTimes(sceneVideo, { start_s: 1, end_s: 4, reason: "test" }, 0.3);
+    const offset = await detectSceneTimes(sceneVideo, { start_s: 1, end_s: 4, reason: "test" }, 0.35);
     // -ss 从 1s 开始后 pts_time 会重置，必须加回窗口起点
     expect(offset.some((t) => Math.abs(t - 2) < 0.2)).toBe(true);
   });
 
-  test("按窗口抽帧并落盘、哈希稳定", async () => {
-    const plan: FramePlan = {
-      bvid: "BV1FRAMETEST",
-      policy_version: "frames/v1",
-      planner_version: "planner/v1",
-      windows: [{ start_s: 1, end_s: 6, reason: "测试窗口" }],
-    };
-    const frames = await sampleFrames({
+  test("按窗口抽帧并落盘、哈希稳定且不超过预算", async () => {
+    const budget = frameBudgetFor("medium");
+    const result = await sampleFrames({
       videoPath,
-      plan,
+      plan: plan([{ start_s: 1, end_s: 6, reason: "测试窗口", source: "plan" }]),
       outDir: path.join(workDir, "frames"),
-      options: { intervalS: 2.5, maxFramesPerWindow: 6, sceneThreshold: 0.9, concurrency: 2 },
+      durationS: 12,
+      budget,
+      options: { sceneThreshold: 0.9, concurrency: 2 },
     });
 
-    expect(frames.length).toBeGreaterThanOrEqual(3);
-    expect(frames.length).toBeLessThanOrEqual(6);
+    expect(result.frames.length).toBeGreaterThanOrEqual(2);
+    expect(result.frames.length).toBeLessThanOrEqual(budget.max_frames);
+    expect(result.truncated).toBe(false);
     const seen = new Set<number>();
-    for (const frame of frames) {
+    for (const frame of result.frames) {
       expect(frame.t).toBeGreaterThanOrEqual(1);
       expect(frame.t).toBeLessThanOrEqual(6);
       expect(frame.window_index).toBe(1);
@@ -131,5 +102,52 @@ describeWithFfmpeg("真实 ffmpeg 抽帧", () => {
       expect(seen.has(key)).toBe(false);
       seen.add(key);
     }
+  });
+
+  test("命中可疑弹幕的窗口按 focus 时间点补帧", async () => {
+    const result = await sampleFrames({
+      videoPath,
+      plan: plan([{ start_s: 1, end_s: 6, reason: "口播", focus_times: [3.4], source: "plan" }]),
+      outDir: path.join(workDir, "frames-focus"),
+      durationS: 12,
+      budget: frameBudgetFor("medium"),
+      options: { sceneThreshold: 0.9, concurrency: 2 },
+    });
+    const focus = result.frames.find((frame) => Math.abs(frame.t - 3.4) < 0.01);
+    expect(focus?.reason).toBe("focus");
+  });
+
+  test("静态画面不再退化为 1fps，单窗只留少量帧", async () => {
+    const budget = frameBudgetFor("clean");
+    const result = await sampleFrames({
+      videoPath: staticPath,
+      plan: plan([{ start_s: 0, end_s: 10, reason: "静态口播", source: "plan" }]),
+      outDir: path.join(workDir, "frames-static"),
+      durationS: 10,
+      budget,
+      options: { sceneThreshold: 0.35, concurrency: 2 },
+    });
+    expect(result.frames.length).toBeLessThanOrEqual(budget.per_window_max);
+    expect(result.frames.length).toBeLessThan(10);
+  });
+
+  test("长视频未覆盖空档自动补覆盖窗口", async () => {
+    const budget = frameBudgetFor("low");
+    const result = await sampleFrames({
+      videoPath,
+      plan: plan([{ start_s: 0, end_s: 2, reason: "开头命中", source: "plan" }]),
+      outDir: path.join(workDir, "frames-coverage"),
+      durationS: 12,
+      budget,
+      options: {
+        sceneThreshold: 0.9,
+        detectScenes: false,
+        // 12s 冒烟片把空档阈值调小，验证覆盖窗口机制本身
+        selection: { coverageMinGapS: 4, coverageWindowS: 3 },
+      },
+    });
+    const coverage = result.windows.filter((window) => window.source === "coverage");
+    expect(coverage.length).toBeGreaterThan(0);
+    expect(result.frames.length).toBeLessThanOrEqual(budget.max_frames);
   });
 });

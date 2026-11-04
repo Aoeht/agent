@@ -167,6 +167,8 @@ async function collectEvidence(bvid: string, datasetDir: string): Promise<string
           ...(author.mid !== undefined ? { mid: author.mid } : {}),
           ...(author.fans !== undefined ? { fans: author.fans } : {}),
           ...(author.attention !== undefined ? { attention: author.attention } : {}),
+          ...(author.video_count !== undefined ? { video_count: author.video_count } : {}),
+          ...(author.total_views !== undefined ? { total_views: author.total_views } : {}),
           official: describeOfficial(author.official_type) +
             (author.official_desc ? `：${trunc(author.official_desc, 120)}` : ""),
           sign: trunc(author.sign, 200),

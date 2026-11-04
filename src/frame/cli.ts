@@ -1,6 +1,6 @@
 // src/frame/cli.ts
 /**
- * 抽帧 CLI：读快照 → 窗口规划（模型回执文件 / 启发式冒烟）→ 抽帧 → 九宫格。
+ * 抽帧 CLI：读快照 → 视觉画像 → 窗口规划（模型回执文件 / 启发式冒烟）→ 预算内取样 → 九宫格。
  *
  *   # 1) 先让大模型规划：导出提示词，喂给任意模型，把 JSON 回执存成 plan.json
  *   bun run src/frame/cli.ts --bvid BV1xxx --print-prompt
@@ -11,21 +11,26 @@
  *   # 3) 无模型时冒烟：直接用确定性粗定位窗口
  *   bun run src/frame/cli.ts --bvid BV1xxx --video work/videos/BV1xxx.mp4 --heuristic
  *
+ * 只识别首个分 P（page=1）；作者档位默认按快照 author 计算，决定九宫格预算。
  * 产物（默认 dataset/<BV号>/frames/）：
  *   frames/       原分辨率帧（供 OCR / 单帧放大）
- *   grids/        每窗口一张 3×3 九宫格（1920×1080）
- *   manifest.json 窗口、帧、格位映射、策略版本
+ *   grids/        每 9 帧一张九宫格（横屏 1920×1080 / 竖屏 1080×1920）
+ *   manifest.json 窗口、帧、格位映射、视觉画像、预算与策略版本
  */
 import fs from "node:fs/promises";
 import path from "node:path";
+import { scoreAuthor, type AuthorRiskLevel } from "../bili/author_risk";
 import { loadSnapshot, resolveBvid } from "../bili/snapshot";
 import { sampleFrames, probeDuration } from "./extract";
 import { composeGrids } from "./grid";
 import {
+  attachFocusTimes,
   buildWindowPlannerMessages,
   heuristicWindows,
   parseFramePlan,
 } from "./plan";
+import { frameBudgetFor } from "./policy";
+import { probeVideoProfile, type VideoProfile } from "./profile";
 import {
   FRAME_POLICY_VERSION,
   PLANNER_PROMPT_VERSION,
@@ -33,6 +38,8 @@ import {
   type FramePlan,
   type FrameWindow,
 } from "./types";
+
+const LEVELS: AuthorRiskLevel[] = ["high", "medium", "low", "clean", "unknown"];
 
 interface CliArgs {
   bvid: string;
@@ -42,8 +49,12 @@ interface CliArgs {
   heuristic: boolean;
   printPrompt: boolean;
   outDir?: string;
-  intervalS?: number;
   maxWindows?: number;
+  authorLevel?: AuthorRiskLevel;
+  maxGrids?: number;
+  probeEveryS?: number;
+  noProfile: boolean;
+  noScenes: boolean;
 }
 
 function usage(): string {
@@ -56,8 +67,12 @@ function usage(): string {
     "  --heuristic           不调模型，直接用确定性粗定位窗口（冒烟用）",
     "  --print-prompt        只输出窗口规划提示词并退出",
     "  --out <dir>           产物目录，默认 dataset/<BV号>/frames",
-    "  --interval <sec>      窗口内固定间隔，默认 2.5",
-    "  --max-windows <n>     最多保留几个窗口，默认 2",
+    "  --author-level <lvl>  覆盖作者档位：high|medium|low|clean|unknown",
+    "  --max-grids <n>       覆盖全局九宫格预算（默认按作者档位）",
+    "  --probe-every <sec>   规划窗口内的覆盖探针间隔",
+    "  --no-profile          跳过视觉画像预扫描",
+    "  --no-scenes           跳过窗口硬切检测",
+    "  --max-windows <n>     最多保留几个模型窗口，默认不限（覆盖窗口另计）",
   ].join("\n");
 }
 
@@ -69,15 +84,24 @@ function parseArgs(argv: string[]): CliArgs {
   const bvidInput = valueOf("--bvid");
   if (bvidInput === undefined) throw new Error(`缺少 --bvid\n\n${usage()}`);
   const bvid = resolveBvid(bvidInput);
-  const intervalRaw = valueOf("--interval");
   const maxWindowsRaw = valueOf("--max-windows");
-  const intervalS = intervalRaw === undefined ? undefined : Number.parseFloat(intervalRaw);
+  const maxGridsRaw = valueOf("--max-grids");
+  const probeEveryRaw = valueOf("--probe-every");
   const maxWindows = maxWindowsRaw === undefined ? undefined : Number.parseInt(maxWindowsRaw, 10);
-  if (intervalS !== undefined && (!Number.isFinite(intervalS) || intervalS <= 0)) {
-    throw new Error(`--interval 必须是正数：${intervalRaw}`);
-  }
+  const maxGrids = maxGridsRaw === undefined ? undefined : Number.parseInt(maxGridsRaw, 10);
+  const probeEveryS = probeEveryRaw === undefined ? undefined : Number.parseFloat(probeEveryRaw);
   if (maxWindows !== undefined && (!Number.isInteger(maxWindows) || maxWindows < 1)) {
     throw new Error(`--max-windows 必须是正整数：${maxWindowsRaw}`);
+  }
+  if (maxGrids !== undefined && (!Number.isInteger(maxGrids) || maxGrids < 1)) {
+    throw new Error(`--max-grids 必须是正整数：${maxGridsRaw}`);
+  }
+  if (probeEveryS !== undefined && (!Number.isFinite(probeEveryS) || probeEveryS <= 0)) {
+    throw new Error(`--probe-every 必须是正数：${probeEveryRaw}`);
+  }
+  const levelRaw = valueOf("--author-level");
+  if (levelRaw !== undefined && !LEVELS.includes(levelRaw as AuthorRiskLevel)) {
+    throw new Error(`--author-level 取值必须是 ${LEVELS.join("|")}：${levelRaw}`);
   }
   return {
     bvid,
@@ -87,8 +111,12 @@ function parseArgs(argv: string[]): CliArgs {
     heuristic: argv.includes("--heuristic"),
     printPrompt: argv.includes("--print-prompt"),
     ...(valueOf("--out") === undefined ? {} : { outDir: valueOf("--out")! }),
-    ...(intervalS === undefined ? {} : { intervalS }),
     ...(maxWindows === undefined ? {} : { maxWindows }),
+    ...(levelRaw === undefined ? {} : { authorLevel: levelRaw as AuthorRiskLevel }),
+    ...(maxGrids === undefined ? {} : { maxGrids }),
+    ...(probeEveryS === undefined ? {} : { probeEveryS }),
+    noProfile: argv.includes("--no-profile"),
+    noScenes: argv.includes("--no-scenes"),
   };
 }
 
@@ -132,7 +160,8 @@ async function main(): Promise<void> {
     plan = parseFramePlan(raw, {
       bvid: args.bvid,
       durationS,
-      ...(args.maxWindows === undefined ? {} : { maxWindows: args.maxWindows }),
+      // 外部/人工 plan 不设默认上限：文件里写了几个窗口就抽几个；要限流时显式给 --max-windows
+      maxWindows: args.maxWindows ?? Number.POSITIVE_INFINITY,
     });
   } else {
     const windows = heuristicWindows(snapshot, {
@@ -149,23 +178,50 @@ async function main(): Promise<void> {
       notes: "heuristic：未调用模型，仅用于冒烟",
     };
   }
-  const windows = clampWindows(plan.windows, durationS);
+  const planWindows = clampWindows(plan.windows, durationS).map((window) => ({
+    ...window,
+    source: args.planFile === undefined ? "heuristic" as const : "plan" as const,
+  }));
+  const windows = attachFocusTimes(snapshot, planWindows);
   if (windows.length === 0) throw new Error("规划窗口全部落在视频时长之外");
+
+  let profile: VideoProfile | undefined;
+  if (!args.noProfile) {
+    try {
+      profile = await probeVideoProfile(videoPath);
+    } catch (error) {
+      console.error(`视觉画像失败，降级为窗口+硬切取样：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  const authorRisk = scoreAuthor(snapshot.author ?? {});
+  const level = args.authorLevel ?? authorRisk.level;
+  const budget = frameBudgetFor(level, args.maxGrids === undefined ? {} : { maxGrids: args.maxGrids });
 
   const outDir = path.resolve(args.outDir ?? path.join(datasetDir, args.bvid, "frames"));
   const frameDir = path.join(outDir, "frames");
   const gridDir = path.join(outDir, "grids");
 
-  const frames = await sampleFrames({
+  const sampled = await sampleFrames({
     videoPath,
     plan: { ...plan, windows },
     outDir: frameDir,
-    ...(args.intervalS === undefined ? {} : { options: { intervalS: args.intervalS } }),
+    durationS,
+    ...(profile === undefined ? {} : { profile }),
+    budget,
+    options: {
+      ...(args.probeEveryS === undefined ? {} : { selection: { probeEveryS: args.probeEveryS } }),
+      ...(args.noScenes ? { detectScenes: false } : {}),
+    },
   });
-  const grids = await composeGrids(frames, gridDir);
+  const frames = sampled.frames;
+  const grids = await composeGrids(frames, gridDir, {
+    orientation: profile?.orientation ?? "landscape",
+  });
 
   const bundle: FrameBundle = {
     bvid: args.bvid,
+    page: 1,
     policy_version: plan.policy_version,
     planner_version: plan.planner_version,
     plan_source: args.planFile === undefined ? "heuristic" : "plan_file",
@@ -173,16 +229,46 @@ async function main(): Promise<void> {
     video_path: videoPath,
     duration_s: durationS,
     generated_at: new Date().toISOString(),
-    windows,
+    windows: sampled.windows,
     frames,
     grids,
+    ...(profile === undefined ? {} : { profile: profile.summary }),
+    policy: {
+      author_level: level,
+      author_score: authorRisk.score,
+      author_reasons: authorRisk.reasons,
+      max_grids: budget.max_grids,
+      per_window_max: budget.per_window_max,
+      selected_frames: frames.length,
+      truncated: sampled.truncated,
+    },
   };
   const manifestPath = path.join(outDir, "manifest.json");
   await fs.writeFile(manifestPath, `${JSON.stringify(bundle, null, 2)}\n`, "utf8");
 
-  console.log(`视频时长 ${durationS.toFixed(1)}s，窗口 ${windows.length} 个，帧 ${frames.length} 张，拼图 ${grids.length} 张`);
-  for (const [index, window] of windows.entries()) {
-    console.log(`  窗口 ${index + 1}: ${window.start_s.toFixed(1)}-${window.end_s.toFixed(1)}s ${window.reason}`);
+  if (profile !== undefined) {
+    console.log(
+      `视觉画像：${profile.kind}，${profile.orientation}${profile.text_heavy ? "，文字密集" : ""}` +
+      `（采样 ${profile.summary.sample_count} 点，静态 ${(profile.summary.static_ratio * 100).toFixed(0)}%，` +
+      `大变化 ${(profile.summary.big_change_ratio * 100).toFixed(0)}%）`,
+    );
+  }
+  console.log(
+    `作者档位 ${level}（分数 ${authorRisk.score ?? "未知"}，预算 ${budget.max_grids} 张 / 单窗 ${budget.per_window_max} 帧）` +
+    `${args.authorLevel === undefined ? "" : "［手动覆盖］"}`,
+  );
+  console.log(
+    `视频时长 ${durationS.toFixed(1)}s，窗口 ${sampled.windows.length} 个` +
+    `（含覆盖 ${sampled.windows.filter((window) => window.source === "coverage").length} 个），` +
+    `候选 ${sampled.candidate_count} 个，帧 ${frames.length} 张，拼图 ${grids.length} 张` +
+    `${sampled.truncated ? "（已按预算截断）" : ""}`,
+  );
+  for (const [index, window] of sampled.windows.entries()) {
+    const focus = window.focus_times?.length ?? 0;
+    console.log(
+      `  窗口 ${index + 1}: ${window.start_s.toFixed(1)}-${window.end_s.toFixed(1)}s ` +
+      `focus ${focus} 个 ${window.reason}`,
+    );
   }
   for (const grid of grids) {
     console.log(`  ${grid.path}（${grid.width}×${grid.height}，${grid.cells.length} 格）`);

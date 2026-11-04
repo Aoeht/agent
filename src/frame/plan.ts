@@ -11,8 +11,11 @@
 import {
   normalizeTranscript,
   type VideoSnapshot,
+  type DanmakuEntry,
 } from "../bili/snapshot";
+import { extractLinks } from "../bili/links";
 import { localizeRisks, type RiskWindow } from "../bili/localize";
+import { scanKeywords } from "../core/scam_lexicon";
 import {
   FRAME_POLICY_VERSION,
   PLANNER_PROMPT_VERSION,
@@ -26,7 +29,7 @@ export interface PlannerMessages {
 }
 
 export interface PlannerOptions {
-  /** 最多保留几个窗口（默认 2：对应两张九宫格，控制视觉判读成本） */
+  /** 最多保留几个窗口；默认不限，只有显式限流时才截断 */
   maxWindows?: number;
   /** 单窗口最长秒数（默认 120） */
   maxWindowSeconds?: number;
@@ -37,7 +40,7 @@ export interface PlannerOptions {
 }
 
 const DEFAULTS = {
-  maxWindows: 2,
+  maxWindows: Number.POSITIVE_INFINITY,
   maxWindowSeconds: 120,
   maxAsrChars: 12_000,
   maxDanmaku: 240,
@@ -139,14 +142,22 @@ export function buildWindowPlannerMessages(
           `${w.transcript_excerpt ? `，字幕摘录：${w.transcript_excerpt.slice(0, 80)}` : ""}`,
       );
 
+  const maxWindowLimit = Math.min(
+    maxWindowSeconds,
+    Math.max(5, Math.round(duration || maxWindowSeconds)),
+  );
+  const windowCountRule = Number.isFinite(maxWindows)
+    ? `- 最多 ${maxWindows} 个窗口，单窗口不超过 ${maxWindowLimit} 秒，互不重叠；\n`
+    : `- 窗口数量不设上限，按实际需要核对的画面给足；单窗口不超过 ${maxWindowLimit} 秒，互不重叠；\n`;
+
   const system =
     "你是短视频诈骗审查的抽帧窗口规划器。你只决定“看哪几段画面”，不做最终风险定性。\n" +
-    "目标：选出最可能包含可核查视觉证据的时间窗，让后续视觉模型用最多两张九宫格看清关键帧。\n" +
+    "目标：选出最可能包含可核查视觉证据的时间窗，让后续视觉模型按九宫格看清关键帧。\n" +
     "优先画面：聊天记录、转账/收款码、平台/客服界面、二维码、联系方式、收益或中奖截图、屏幕共享、仿冒官方页面。\n" +
     "纪律：\n" +
     "- 只依据给你的字幕、弹幕和元信息，不要臆测没出现的内容；\n" +
     "- 窗口必须落在视频时长内，按时长上限截短；\n" +
-    `- 最多 ${maxWindows} 个窗口，单窗口不超过 ${Math.min(maxWindowSeconds, Math.max(5, Math.round(duration || maxWindowSeconds)))} 秒，互不重叠；\n` +
+    windowCountRule +
     "- 没有值得看画面的段落时返回空数组，不要为了凑数给窗口；\n" +
     "- 纯口播、无视觉证据的段落优先级要低；\n" +
     "只输出一个 JSON 对象，不要前后解释。格式：\n" +
@@ -157,7 +168,9 @@ export function buildWindowPlannerMessages(
     `【确定性粗定位候选（仅供参考）】\n${candidateLines.join("\n")}\n\n` +
     `【字幕/ASR】\n${transcriptLines.length > 0 ? transcriptLines.join("\n") : "（无字幕/转写）"}\n\n` +
     `【弹幕样本（按时间）】\n${danmakuLines.length > 0 ? danmakuLines.join("\n") : "（无弹幕数据）"}\n\n` +
-    `请给出最多 ${maxWindows} 个抽帧窗口的 JSON。`;
+    (Number.isFinite(maxWindows)
+      ? `请给出最多 ${maxWindows} 个抽帧窗口的 JSON。`
+      : "请给出需要核对的抽帧窗口 JSON（数量不限）。");
 
   return { system, user };
 }
@@ -343,8 +356,39 @@ export async function planWindowsWithModel(
   });
 }
 
+/** 命中关键词或链接的弹幕时间点：这些点会作为抽帧中心 */
+export function collectFocusTimes(
+  danmaku: DanmakuEntry[],
+  window: { start_s: number; end_s: number },
+): number[] {
+  return danmaku
+    .filter(
+      (entry) =>
+        entry.t >= window.start_s &&
+        entry.t <= window.end_s &&
+        (scanKeywords(entry.text).length > 0 || extractLinks(entry.text, "frame_focus").length > 0),
+    )
+    .map((entry) => entry.t);
+}
+
+/** 把窗口内命中的可疑弹幕时间点挂到窗口上；已有 focus_times 时合并去重 */
+export function attachFocusTimes(
+  snapshot: VideoSnapshot,
+  windows: FrameWindow[],
+): FrameWindow[] {
+  return windows.map((window) => {
+    const merged = [
+      ...new Set([
+        ...(window.focus_times ?? []),
+        ...collectFocusTimes(snapshot.danmaku, window),
+      ]),
+    ].sort((a, b) => a - b);
+    return { ...window, ...(merged.length === 0 ? {} : { focus_times: merged }) };
+  });
+}
+
 /**
- * 无模型时的冒烟窗口：直接取粗定位 top-K。
+ * 无模型时的冒烟窗口：按得分取粗定位 top-K，再按时间回排。
  * 只用于本地验证抽帧链路，不替代大模型规划；没有命中时试看开头 30 秒。
  */
 export function heuristicWindows(
@@ -353,14 +397,25 @@ export function heuristicWindows(
 ): FrameWindow[] {
   const maxWindows = options.maxWindows ?? DEFAULTS.maxWindows;
   const segments = normalizeTranscript(snapshot);
-  const localization = localizeRisks(snapshot.danmaku, segments, { topK: Math.max(maxWindows, 6) });
+  const localization = localizeRisks(snapshot.danmaku, segments, {
+    topK: Number.isFinite(maxWindows) ? Math.max(maxWindows, 6) : Number.POSITIVE_INFINITY,
+  });
   if (localization.windows.length > 0) {
-    return localization.windows.slice(0, maxWindows).map((window) => ({
-      start_s: window.start_s,
-      end_s: window.end_s,
-      reason: `启发式粗定位：得分 ${window.score}${window.has_link ? "，含链接" : ""}`,
-      priority: Math.min(1, window.score / 10),
-    }));
+    const byScore = localization.windows
+      .slice()
+      .sort((a, b) => b.score - a.score || a.start_s - b.start_s);
+    const limited = Number.isFinite(maxWindows)
+      ? byScore.slice(0, Math.max(1, maxWindows))
+      : byScore;
+    return limited
+      .sort((a, b) => a.start_s - b.start_s)
+      .map((window) => ({
+        start_s: window.start_s,
+        end_s: window.end_s,
+        reason: `启发式粗定位：得分 ${window.score}${window.has_link ? "，含链接" : ""}`,
+        priority: Math.min(1, window.score / 10),
+        focus_times: collectFocusTimes(snapshot.danmaku, window),
+      }));
   }
   const duration = estimateDuration(snapshot);
   if (duration <= 0) return [];

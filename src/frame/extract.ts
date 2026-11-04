@@ -1,20 +1,20 @@
 // src/frame/extract.ts
 /**
- * 确定性抽帧：窗口内取首尾帧、场景切换帧与固定间隔帧，去重后限流。
- * 抽帧不做任何语义判断，只保证"窗口内时间点可复现、帧文件可追溯"。
+ * 确定性抽帧：视觉画像 + 场景硬切 + 可疑弹幕时间点生成候选，
+ * 再按作者档位预算跨窗口选帧；静态段落只取 1 帧，连续变化段落按上限间隔取样。
+ * 抽帧不做任何语义判断，只保证"时间点可复现、帧文件可追溯"。
  */
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { ExtractedFrame, FramePlan, FrameReason, FrameWindow } from "./types";
+import { frameBudgetFor, type FrameBudget } from "./policy";
+import type { VideoProfile } from "./profile";
+import { appendCoverageWindows, selectFrameCandidates, type SelectionOptions } from "./select";
+import type { ExtractedFrame, FramePlan, FrameWindow } from "./types";
 
 export interface FrameSampleOptions {
-  /** 固定间隔秒数（默认 2.5） */
-  intervalS?: number;
-  /** 单窗口最多抽几帧（默认 9，正好一张九宫格） */
-  maxFramesPerWindow?: number;
-  /** 场景切换阈值（默认 0.3，越高越严格） */
+  /** 场景像素变化阈值（默认 0.35，超过才抽） */
   sceneThreshold?: number;
   /** ffmpeg 并发数（默认 3） */
   concurrency?: number;
@@ -22,12 +22,35 @@ export interface FrameSampleOptions {
   jpegQuality?: number;
   /** 原帧最大宽度（默认 1280；九宫格缩略图另算） */
   maxWidth?: number;
+  /** 关闭场景检测：只用视觉画像与覆盖探针（覆盖窗口本来就不跑） */
+  detectScenes?: boolean;
+  /** 候选生成与去重参数 */
+  selection?: SelectionOptions;
+}
+
+export interface SampleFramesParams {
+  videoPath: string;
+  plan: FramePlan;
+  outDir: string;
+  durationS?: number;
+  profile?: VideoProfile;
+  /** 缺省按 unknown 档（10 张九宫格） */
+  budget?: FrameBudget;
+  options?: FrameSampleOptions;
+}
+
+export interface SampleFramesResult {
+  frames: ExtractedFrame[];
+  /** 含自动补的全片覆盖窗口 */
+  windows: FrameWindow[];
+  candidate_count: number;
+  /** 候选多于预算，发生了截断 */
+  truncated: boolean;
+  budget: FrameBudget;
 }
 
 const DEFAULTS = {
-  intervalS: 2.5,
-  maxFramesPerWindow: 9,
-  sceneThreshold: 0.3,
+  sceneThreshold: 0.35,
   concurrency: 3,
   jpegQuality: 2,
   maxWidth: 1280,
@@ -118,70 +141,6 @@ export async function detectSceneTimes(
   }
 }
 
-const REASON_RANK: Record<FrameReason, number> = { scene: 3, edge: 2, interval: 1 };
-
-/** 从有序候选里等距取 count 个，保证名额花在整段窗口而不是挤在前几秒 */
-function takeEvenly<T>(items: T[], count: number): T[] {
-  if (count <= 0) return [];
-  if (count >= items.length) return items.slice();
-  if (count === 1) return [items[Math.floor(items.length / 2)]!];
-  const picked: T[] = [];
-  for (let i = 0; i < count; i += 1) {
-    const index = Math.round((i * (items.length - 1)) / (count - 1));
-    picked.push(items[index]!);
-  }
-  return picked;
-}
-
-/**
- * 选时间点：首尾帧必留，场景帧优先，剩余用固定间隔补齐；0.5 秒内视为同一帧。
- * 结果按时间排序，数量不超过 maxFrames。
- */
-export function pickFrameTimes(
-  window: FrameWindow,
-  sceneTimes: number[],
-  options: { intervalS?: number; maxFrames?: number } = {},
-): Array<{ t: number; reason: FrameReason }> {
-  const intervalS = options.intervalS ?? DEFAULTS.intervalS;
-  const maxFrames = Math.max(1, options.maxFrames ?? DEFAULTS.maxFramesPerWindow);
-  const start = window.start_s;
-  const end = window.end_s;
-  const candidates = new Map<number, { t: number; reason: FrameReason }>();
-
-  const add = (rawT: number, reason: FrameReason) => {
-    if (!Number.isFinite(rawT)) return;
-    const t = Math.max(start, Math.min(end - 0.05, rawT));
-    const key = Math.round(t * 2) / 2;
-    const existing = candidates.get(key);
-    if (existing === undefined || REASON_RANK[reason] > REASON_RANK[existing.reason]) {
-      candidates.set(key, { t, reason });
-    }
-  };
-
-  add(start + 0.05, "edge");
-  add(end - 0.05, "edge");
-  for (const t of sceneTimes) add(t, "scene");
-  for (let t = start; t < end; t += intervalS) add(t, "interval");
-
-  const all = [...candidates.values()].sort((a, b) => a.t - b.t);
-  if (all.length <= maxFrames) return all;
-  if (maxFrames === 1) return [all[0]!];
-
-  // 首尾必留；场景帧优先但要在窗口内等距铺开；剩余名额再用间隔帧均匀补齐
-  const first = all[0]!;
-  const last = all.at(-1)!;
-  const forced = new Set([first.t, last.t]);
-  const pool = all.filter((item) => !forced.has(item.t)).sort((a, b) => a.t - b.t);
-  const scenes = pool.filter((item) => item.reason === "scene");
-  const rest = pool.filter((item) => item.reason !== "scene");
-  const chosen = [first, last];
-  const remaining = maxFrames - chosen.length;
-  const scenePicks = takeEvenly(scenes, Math.min(remaining, scenes.length));
-  chosen.push(...scenePicks);
-  chosen.push(...takeEvenly(rest, maxFrames - chosen.length));
-  return chosen.sort((a, b) => a.t - b.t);
-}
-
 /** 单帧落盘：原分辨率（最多 maxWidth 宽），供 OCR/单帧放大；九宫格另做缩略 */
 export async function extractFrameAt(
   videoPath: string,
@@ -234,43 +193,58 @@ async function mapLimit<T, R>(
   return results;
 }
 
-/** 对一份规划逐个窗口抽帧；返回的 path 是实际落盘的帧文件 */
-export async function sampleFrames(params: {
-  videoPath: string;
-  plan: FramePlan;
-  outDir: string;
-  options?: FrameSampleOptions;
-}): Promise<ExtractedFrame[]> {
-  const { videoPath, plan, outDir } = params;
+/**
+ * 抽帧主入口：补全片覆盖窗口 → 非覆盖窗口做硬切检测 → 按视觉画像生成候选 →
+ * 预算内跨窗口选帧并落盘。返回最终窗口列表，manifest 与调用方共用同一份。
+ */
+export async function sampleFrames(params: SampleFramesParams): Promise<SampleFramesResult> {
+  const { videoPath, plan, outDir, profile } = params;
   const options = params.options ?? {};
-  const intervalS = options.intervalS ?? DEFAULTS.intervalS;
-  const maxFrames = options.maxFramesPerWindow ?? DEFAULTS.maxFramesPerWindow;
+  const budget = params.budget ?? frameBudgetFor("unknown");
   const sceneThreshold = options.sceneThreshold ?? DEFAULTS.sceneThreshold;
   const concurrency = options.concurrency ?? DEFAULTS.concurrency;
   const jpegQuality = options.jpegQuality ?? DEFAULTS.jpegQuality;
   const maxWidth = options.maxWidth ?? DEFAULTS.maxWidth;
 
-  await fs.mkdir(outDir, { recursive: true });
-  const frames: ExtractedFrame[] = [];
+  const fallbackDuration = plan.windows.reduce((max, window) => Math.max(max, window.end_s), 0);
+  const durationS = params.durationS ?? profile?.meta.duration_s ?? fallbackDuration;
+  const windows = appendCoverageWindows(plan.windows, durationS, budget, options.selection);
 
-  for (const [index, window] of plan.windows.entries()) {
-    const windowIndex = index + 1;
-    const sceneTimes = await detectSceneTimes(videoPath, window, sceneThreshold);
-    const times = pickFrameTimes(window, sceneTimes, { intervalS, maxFrames });
-    const extracted = await mapLimit(times, concurrency, async ({ t, reason }) => {
-      const name = `w${windowIndex}_${t.toFixed(1).replace(".", "-")}s.jpg`;
-      const outPath = path.join(outDir, name);
-      await extractFrameAt(videoPath, t, outPath, { jpegQuality, maxWidth });
-      return {
-        path: outPath,
-        t,
-        window_index: windowIndex,
-        reason,
-        sha256: await sha256(outPath),
-      } satisfies ExtractedFrame;
-    });
-    frames.push(...extracted);
+  const sceneTimes = new Map<number, number[]>();
+  if (options.detectScenes !== false) {
+    for (const [index, window] of windows.entries()) {
+      if (window.source === "coverage") continue;
+      sceneTimes.set(index + 1, await detectSceneTimes(videoPath, window, sceneThreshold));
+    }
   }
 
-  return frames;
+  const selection = selectFrameCandidates({
+    windows,
+    budget,
+    ...(profile === undefined ? {} : { profile }),
+    sceneTimes,
+    ...(options.selection === undefined ? {} : { options: options.selection }),
+  });
+
+  await fs.mkdir(outDir, { recursive: true });
+  const frames = await mapLimit(selection.selected, concurrency, async (candidate) => {
+    const name = `w${candidate.window_index}_${candidate.t.toFixed(1).replace(".", "-")}s.jpg`;
+    const outPath = path.join(outDir, name);
+    await extractFrameAt(videoPath, candidate.t, outPath, { jpegQuality, maxWidth });
+    return {
+      path: outPath,
+      t: candidate.t,
+      window_index: candidate.window_index,
+      reason: candidate.reason,
+      sha256: await sha256(outPath),
+    } satisfies ExtractedFrame;
+  });
+
+  return {
+    frames,
+    windows,
+    candidate_count: selection.candidate_count,
+    truncated: selection.candidate_count > selection.selected.length,
+    budget,
+  };
 }

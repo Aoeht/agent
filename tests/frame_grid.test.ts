@@ -67,20 +67,40 @@ describeWithFfmpeg("九宫格拼图", () => {
     await expect(composeNineGrid(frames, path.join(workDir, "too-many.jpg"))).rejects.toThrow(FrameGridError);
   });
 
+  test("竖屏朝向拼成 1080×1920", async () => {
+    const frames = Array.from({ length: 3 }, (_, index) => frame(index, 1, imagePath));
+    const grid = await composeNineGrid(frames, path.join(workDir, "grid_portrait.jpg"), {
+      orientation: "portrait",
+    });
+    expect(grid.width).toBe(1080);
+    expect(grid.height).toBe(1920);
+    expect(probeSize(grid.path)).toEqual({ width: 1080, height: 1920 });
+  });
+
   test("没有帧时报错", async () => {
     await expect(composeNineGrid([], path.join(workDir, "empty.jpg"))).rejects.toThrow(FrameGridError);
   });
 
-  test("按窗口生成多张九宫格", async () => {
+  test("跨窗口连续拼图，只有最后一张可能不满 9 帧", async () => {
     const frames = [
-      ...Array.from({ length: 3 }, (_, index) => frame(index, 1, imagePath)),
-      ...Array.from({ length: 2 }, (_, index) => frame(index, 2, imagePath)),
+      ...Array.from({ length: 5 }, (_, index) => frame(index, 1, imagePath)),
+      ...Array.from({ length: 6 }, (_, index) => frame(index, 2, imagePath)),
     ];
     const grids = await composeGrids(frames, path.join(workDir, "grids"));
     expect(grids).toHaveLength(2);
-    expect(path.basename(grids[0]!.path)).toBe("grid_w1.jpg");
-    expect(path.basename(grids[1]!.path)).toBe("grid_w2.jpg");
-    expect(grids[0]!.cells).toHaveLength(3);
+    expect(path.basename(grids[0]!.path)).toBe("grid_001.jpg");
+    expect(path.basename(grids[1]!.path)).toBe("grid_002.jpg");
+    expect(grids[0]!.cells).toHaveLength(9);
     expect(grids[1]!.cells).toHaveLength(2);
+    expect(grids[0]!.window_indexes).toEqual([1, 2]);
+    expect(grids[1]!.window_indexes).toEqual([2]);
+  });
+
+  test("单窗口恰好 9 帧时只生成一张、无空格", async () => {
+    const frames = Array.from({ length: 9 }, (_, index) => frame(index, 1, imagePath));
+    const grids = await composeGrids(frames, path.join(workDir, "grids-9"));
+    expect(grids).toHaveLength(1);
+    expect(grids[0]!.cells).toHaveLength(9);
+    expect(grids[0]!.window_indexes).toEqual([1]);
   });
 });
