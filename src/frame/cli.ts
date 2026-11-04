@@ -183,7 +183,7 @@ async function main(): Promise<void> {
     source: args.planFile === undefined ? "heuristic" as const : "plan" as const,
   }));
   const windows = attachFocusTimes(snapshot, planWindows);
-  if (windows.length === 0) throw new Error("规划窗口全部落在视频时长之外");
+  if (windows.length === 0 && plan.windows.length > 0) throw new Error("规划窗口全部落在视频时长之外");
 
   let profile: VideoProfile | undefined;
   if (!args.noProfile) {

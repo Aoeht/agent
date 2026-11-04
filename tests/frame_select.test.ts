@@ -49,8 +49,72 @@ describe("覆盖窗口", () => {
       ],
       110,
       frameBudgetFor("high"),
+      { coverageMinGapS: 180 },
     );
     expect(windows).toHaveLength(2);
+  });
+});
+
+describe("召回回归", () => {
+  test("短视频未规划的后半段也有覆盖，空计划按全片分段", () => {
+    const budget = frameBudgetFor("medium");
+    const windows = appendCoverageWindows([{ start_s: 0, end_s: 10, reason: "重点" }], 120, budget);
+    expect(windows.some((window) => window.source === "coverage" && window.end_s > 100)).toBe(true);
+    const empty = appendCoverageWindows([], 120, budget);
+    expect(empty).toHaveLength(4);
+    expect(selectFrameCandidates({ windows: empty, budget }).selected).toHaveLength(4);
+  });
+
+  test("覆盖预留不被大量重点窗口挤掉，且覆盖跨越全片", () => {
+    const planned: FrameWindow[] = Array.from({ length: 20 }, (_, i) => ({
+      start_s: i * 10, end_s: i * 10 + 2, reason: "重点", priority: 1,
+    }));
+    const coverage: FrameWindow[] = Array.from({ length: 20 }, (_, i) => ({
+      start_s: 200 + i * 10, end_s: 210 + i * 10, reason: "覆盖", source: "coverage",
+    }));
+    const windows = [...planned, ...coverage];
+    const result = selectFrameCandidates({ windows, budget: { ...frameBudgetFor("clean"), max_frames: 10 } });
+    expect(result.selected).toHaveLength(10);
+    expect(result.selected.filter((item) => item.window_index > 20).map((item) => item.t)).toEqual([205, 395]);
+    const single = selectFrameCandidates({ windows, budget: { ...frameBudgetFor("clean"), max_frames: 1 } });
+    expect(single.selected).toHaveLength(1);
+    expect(single.selected[0]!.window_index).toBeLessThanOrEqual(20);
+  });
+
+  test("覆盖选变化峰值，同哈希的不同覆盖段仍保留", () => {
+    const profile = fakeProfile(Array.from({ length: 20 }, (_, t) => ({
+      t, change: t === 8 || t === 18 ? 0.5 : 0, text: 0, hash: "0000000000000000",
+    })));
+    const result = selectFrameCandidates({
+      windows: [0, 10].map((start_s) => ({ start_s, end_s: start_s + 10, reason: "覆盖", source: "coverage" })),
+      budget: frameBudgetFor("clean"), profile,
+    });
+    expect(result.selected.map((item) => item.t)).toEqual([8, 18]);
+  });
+
+  test("文字变化不被整图哈希抹掉，限额覆盖文字变化的首尾", () => {
+    const profile = fakeProfile(Array.from({ length: 120 }, (_, t) => ({
+      t, change: 0.01, text: t % 2 === 0 ? 0.5 : 0, hash: "0000000000000000",
+    })));
+    const result = selectFrameCandidates({
+      windows: [{ start_s: 0, end_s: 120, reason: "聊天记录" }],
+      budget: frameBudgetFor("medium"), profile,
+    });
+    const text = result.selected.filter((item) => item.reason === "text");
+    expect(text).toHaveLength(6);
+    expect(text[0]!.t).toBe(0);
+    expect(text.at(-1)!.t).toBe(118);
+  });
+
+  test("两次同分截断仍保留窗口后半段的硬切", () => {
+    const result = selectFrameCandidates({
+      windows: [{ start_s: 0, end_s: 120, reason: "快切" }],
+      budget: frameBudgetFor("clean"),
+      sceneTimes: new Map([[1, Array.from({ length: 23 }, (_, i) => (i + 1) * 5)]]),
+    });
+    expect(result.selected).toHaveLength(4);
+    expect(result.selected[0]!.t).toBe(5);
+    expect(result.selected.at(-1)!.t).toBe(115);
   });
 });
 

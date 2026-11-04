@@ -2,9 +2,9 @@
 /**
  * 候选帧选择：把窗口、视觉状态时间线、场景硬切和作者预算收敛成一组时间点。
  *
- * 优先级：focus（可疑弹幕） > 文字带变化 > 状态切换/场景 > 连续变化间隔 > 覆盖探针。
- * 预算在窗口间按 priority 分配，低信号长视频用覆盖窗口每 120s 补一张，
- * 重复画面用 dHash 跨窗口去重——1fps 不再是兜底。
+ * 优先级：focus（可疑弹幕） > 场景 > 文字带变化 > 状态切换 > 连续变化间隔。
+ * 基础覆盖预留少量预算，其余在重点窗口间按 priority 分配；同分帧均匀取样。
+ * 普通候选用 dHash 跨窗口去重，文字变化和基础覆盖不被整图哈希否决。
  */
 import type { AuthorRiskLevel } from "../bili/author_risk";
 import type { FrameBudget } from "./policy";
@@ -32,7 +32,7 @@ export interface SelectionOptions {
   textMaxChange?: number;
   /** 连续变化段落的最小取样间隔（秒） */
   continuousStepS?: number;
-  /** 连续变化段落最多取几张 */
+  /** 同一窗口连续变化的补充帧最多取几张（状态起点另计） */
   continuousMax?: number;
   /** 文字带变化在同一窗口最多取几张 */
   textMax?: number;
@@ -57,7 +57,7 @@ const DEFAULTS = {
   textMax: 6,
   focusPerSegmentMax: 3,
   hashDistance: 6,
-  coverageMinGapS: 180,
+  coverageMinGapS: 1,
   coverageWindowS: 120,
   blackLuminance: 0.02,
 } as const;
@@ -74,7 +74,7 @@ const SCORE = {
 
 const MIN_CANDIDATE_GAP_S = 0.5;
 
-/** 给未覆盖的长空档补低优先级覆盖窗口；已有窗口不变 */
+/** 未规划区间也参与基础覆盖；短视频至少按四段的粒度生成候选。 */
 export function appendCoverageWindows(
   windows: FrameWindow[],
   durationS: number,
@@ -87,7 +87,7 @@ export function appendCoverageWindows(
   if (!(usableEnd > 0)) return windows;
   const minGap = options.coverageMinGapS ?? DEFAULTS.coverageMinGapS;
   const step = options.coverageWindowS ?? DEFAULTS.coverageWindowS;
-  const coverageStep = Math.min(budget.coverage_step_s, step);
+  const coverageStep = Math.max(1, Math.min(budget.coverage_step_s, step, durationS / 4));
   const sorted = windows
     .slice()
     .sort((a, b) => a.start_s - b.start_s);
@@ -156,11 +156,25 @@ function firstVisible(
 
 /** 一排里均匀抽 max 个（保留首尾，中间等距） */
 function evenlyPick<T>(items: T[], max: number): T[] {
+  if (max <= 0) return [];
   if (items.length <= max) return items;
   if (max <= 1) return [items[Math.floor((items.length - 1) / 2)]!];
   const picked: T[] = [];
   for (let i = 0; i < max; i += 1) {
     picked.push(items[Math.round((i * (items.length - 1)) / (max - 1))]!);
+  }
+  return picked;
+}
+
+/** 优先保高分；同分候选按时间均匀选择，预截断和最终配额使用同一规则。 */
+function pickCandidates(candidates: FrameCandidate[], max: number): FrameCandidate[] {
+  const ordered = candidates.slice().sort((a, b) => b.score - a.score || a.t - b.t);
+  const picked: FrameCandidate[] = [];
+  for (let i = 0; i < ordered.length && picked.length < max;) {
+    let end = i + 1;
+    while (end < ordered.length && ordered[end]!.score === ordered[i]!.score) end += 1;
+    picked.push(...evenlyPick(ordered.slice(i, end), max - picked.length));
+    i = end;
   }
   return picked;
 }
@@ -207,7 +221,8 @@ function windowCandidates(
     const clamped = clampT(t);
     // 黑屏/纯黑过场没有视觉证据，别占九宫格格位
     if (isBlack(clamped)) return;
-    const hash = profile === undefined ? undefined : hashAt(profile, clamped);
+    // 基础覆盖不能被其他时间段的整图哈希删除，否则预留配额失去意义。
+    const hash = profile === undefined || window.source === "coverage" ? undefined : hashAt(profile, clamped);
     candidates.push({
       t: clamped,
       window_index: windowIndex,
@@ -236,9 +251,9 @@ function windowCandidates(
       const continuousMax = options.continuousMax ?? DEFAULTS.continuousMax;
       const textMax = options.textMax ?? DEFAULTS.textMax;
       let active = false;
-      let continuousCount = 0;
+      const continuousTimes: number[] = [];
       let lastContinuous = Number.NEGATIVE_INFINITY;
-      let textCount = 0;
+      const textTimes: number[] = [];
       let lastText = Number.NEGATIVE_INFINITY;
       for (const sample of profile.samples) {
         if (sample.t < start || sample.t > end) continue;
@@ -247,27 +262,31 @@ function windowCandidates(
         if (moving && !active) {
           add(sample.t, "state", SCORE.state);
           active = true;
-          continuousCount = 1;
           lastContinuous = sample.t;
-        } else if (moving && active && sample.t - lastContinuous >= continuousStep && continuousCount < continuousMax) {
-          add(sample.t, "state", SCORE.continuous);
-          continuousCount += 1;
+        } else if (moving && active && sample.t - lastContinuous >= continuousStep) {
+          if (!isBlack(sample.t)) continuousTimes.push(sample.t);
           lastContinuous = sample.t;
         } else if (!moving) {
           active = false;
         }
         // 整帧都在动（片头动画/快剪）时，硬切与状态候选已覆盖这一时刻；
         // 再按文字带补帧只会重复同一画面，文字帧只服务于"画面基本静止、字幕在变"。
-        if (textMoving && sample.change < textMaxChange && sample.t - lastText >= 2 && textCount < textMax) {
-          add(sample.t, "text", SCORE.text);
-          textCount += 1;
+        if (textMoving && sample.change < textMaxChange && sample.t - lastText >= 2 && !isBlack(sample.t)) {
+          textTimes.push(sample.t);
           lastText = sample.t;
         }
       }
+      for (const t of evenlyPick(continuousTimes, continuousMax)) add(t, "state", SCORE.continuous);
+      for (const t of evenlyPick(textTimes, textMax)) add(t, "text", SCORE.text);
     }
   } else {
-    // 覆盖窗口只取一个探针；起点是黑屏时顺延到窗口内第一个可见采样点
-    add(firstVisible(profile, start, end, blackLuminance) ?? start + 0.5, "interval", SCORE.probe);
+    // 每段选变化最明显的可见点；同分靠近中点，无画像时直接取中点。
+    const midpoint = (start + end) / 2;
+    const representative = profile?.samples
+      .filter((sample) => sample.t >= start && sample.t < end && sample.luminance >= blackLuminance)
+      .sort((a, b) => (b.change + b.text_change) - (a.change + a.text_change)
+        || Math.abs(a.t - midpoint) - Math.abs(b.t - midpoint))[0];
+    add(representative?.t ?? midpoint, "interval", SCORE.probe);
   }
 
   if (candidates.length === 0) {
@@ -289,7 +308,7 @@ export function dedupeByTime(candidates: FrameCandidate[]): FrameCandidate[] {
   return kept.sort((a, b) => a.t - b.t);
 }
 
-/** 跨窗口 dHash 去重：focus 永远保留，硬切只去近乎相同的帧 */
+/** 文字变化与 focus 不由整图哈希否决；硬切只去近乎相同的帧。 */
 export function dedupeByHash(
   candidates: FrameCandidate[],
   threshold: number = DEFAULTS.hashDistance,
@@ -300,7 +319,7 @@ export function dedupeByHash(
   const kept: FrameCandidate[] = [];
   const keptHashes: Array<{ hash: string; bits: bigint; strict: boolean }> = [];
   for (const candidate of ordered) {
-    if (candidate.reason === "focus" || candidate.hash === undefined) {
+    if (candidate.reason === "focus" || candidate.reason === "text" || candidate.hash === undefined) {
       kept.push(candidate);
       continue;
     }
@@ -410,10 +429,7 @@ export function selectFrameCandidates(params: SelectFramesParams): SelectionResu
     );
     const deduped = dedupeByTime(raw);
     // 先保留两倍单窗上限，给跨窗口去重和配额分配留余量，避免候选爆炸
-    return deduped
-      .slice()
-      .sort((a, b) => b.score - a.score || a.t - b.t)
-      .slice(0, Math.max(1, budget.per_window_max * 2))
+    return pickCandidates(deduped, Math.max(1, budget.per_window_max * 2))
       .sort((a, b) => a.t - b.t);
   });
 
@@ -431,17 +447,24 @@ export function selectFrameCandidates(params: SelectFramesParams): SelectionResu
     (window.focus_times?.length ?? 0) > 0
       ? { ...window, priority: Math.max(window.priority ?? 0.5, 0.8) }
       : window);
-  const quotas = allocateQuotas(priorityWindows, capacities, budget.max_frames);
+  // 覆盖预留 20%，有重点窗口且只够一帧时仍优先重点；重点用不完的额度归还覆盖。
+  const coverageIndexes = windows.flatMap((window, index) =>
+    window.source === "coverage" && capacities[index]! > 0 ? [index] : []);
+  const planCapacities = capacities.map((capacity, index) => windows[index]!.source === "coverage" ? 0 : capacity);
+  const planCapacity = planCapacities.reduce((sum, capacity) => sum + capacity, 0);
+  const reserved = Math.min(coverageIndexes.length, budget.max_frames, Math.max(
+    budget.max_frames - planCapacity,
+    Math.min(Math.ceil(budget.max_frames * 0.2), Math.max(0, budget.max_frames - 1)),
+  ));
+  const quotas = allocateQuotas(priorityWindows, planCapacities, budget.max_frames - reserved);
+  for (const index of evenlyPick(coverageIndexes, reserved)) quotas[index] = 1;
 
   const selected: FrameCandidate[] = [];
   for (let index = 0; index < windows.length; index += 1) {
     const quota = quotas[index] ?? 0;
     if (quota <= 0) continue;
     const list = byWindow.get(index + 1) ?? [];
-    const chosen = list
-      .slice()
-      .sort((a, b) => b.score - a.score || a.t - b.t)
-      .slice(0, quota);
+    const chosen = pickCandidates(list, quota);
     selected.push(...chosen);
   }
   return {

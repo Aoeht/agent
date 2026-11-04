@@ -242,6 +242,10 @@ function normalizeWindows(
   maxWindowSeconds: number,
 ): FrameWindow[] {
   if (!Array.isArray(raw)) throw new FramePlanError("规划结果缺少 windows 数组");
+  if (!(Number.isFinite(maxWindowSeconds) && maxWindowSeconds >= MIN_WINDOW_S)) {
+    throw new FramePlanError("单窗口时长上限必须是至少 1 秒的有限数值");
+  }
+  if (raw.length === 0) return [];
   const windows: RawWindow[] = [];
   for (const item of raw) {
     if (typeof item !== "object" || item === null) continue;
@@ -301,7 +305,17 @@ function normalizeWindows(
       merged.push({ ...window });
     }
   }
-  return merged.map(({ start_s, end_s, reason, priority }) => ({ start_s, end_s, reason, priority }));
+  // 等分合并后的长窗口，保留完整区间，且避免末尾产生不足 1 秒的小片段。
+  return merged.flatMap(({ start_s, end_s, reason, priority }) => {
+    const count = Math.ceil((end_s - start_s) / maxWindowSeconds);
+    const step = (end_s - start_s) / count;
+    return Array.from({ length: count }, (_, index) => ({
+      start_s: start_s + index * step,
+      end_s: index === count - 1 ? end_s : start_s + (index + 1) * step,
+      reason,
+      priority,
+    }));
+  });
 }
 
 /** 解析模型回执；越界、重叠、超量都在这里收敛，抛 FramePlanError 表示不可用 */

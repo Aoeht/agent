@@ -84,7 +84,7 @@ describeWithFfmpeg("真实 ffmpeg 抽帧", () => {
       outDir: path.join(workDir, "frames"),
       durationS: 12,
       budget,
-      options: { sceneThreshold: 0.9, concurrency: 2 },
+      options: { sceneThreshold: 0.9, concurrency: 2, selection: { coverageMinGapS: 180 } },
     });
 
     expect(result.frames.length).toBeGreaterThanOrEqual(2);
@@ -149,5 +149,30 @@ describeWithFfmpeg("真实 ffmpeg 抽帧", () => {
     const coverage = result.windows.filter((window) => window.source === "coverage");
     expect(coverage.length).toBeGreaterThan(0);
     expect(result.frames.length).toBeLessThanOrEqual(budget.max_frames);
+  });
+
+  test("CLI 接受模型空计划并生成全片覆盖 manifest", async () => {
+    const snapshotPath = path.join(workDir, "snapshot.json");
+    const planPath = path.join(workDir, "empty-plan.json");
+    const outDir = path.join(workDir, "empty-plan-output");
+    await fs.writeFile(snapshotPath, JSON.stringify({
+      schema: "bili-snapshot/v1", bvid: "BV1FRAMETEST", fetched_at: "2026-11-04T00:00:00Z",
+      video: { title: "空计划", duration_s: 12, tags: [] }, danmaku: [], comments: [],
+    }));
+    await fs.writeFile(planPath, JSON.stringify({ windows: [] }));
+    const proc = Bun.spawn([process.execPath, "run", "src/frame/cli.ts",
+      "--bvid", "BV1FRAMETEST", "--snapshot", snapshotPath, "--video", videoPath,
+      "--plan", planPath, "--out", outDir, "--author-level", "clean", "--no-scenes",
+    ], { stdout: "pipe", stderr: "pipe" });
+    const [code, stdout, stderr] = await Promise.all([
+      proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text(),
+    ]);
+    expect({ code, error: code === 0 ? "" : stdout + stderr }).toEqual({ code: 0, error: "" });
+    const manifest = JSON.parse(await fs.readFile(path.join(outDir, "manifest.json"), "utf8"));
+    expect(manifest.policy_version).toBe("frames/v4");
+    expect(manifest.windows).toHaveLength(4);
+    expect(manifest.frames).toHaveLength(4);
+    expect(manifest.grids).toHaveLength(1);
+    expect(manifest.frames.at(-1).t).toBeGreaterThan(9);
   });
 });

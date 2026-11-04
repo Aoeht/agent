@@ -111,11 +111,24 @@ describe("规划解析", () => {
     expect(plan.windows[0]!.end_s).toBe(130);
   });
 
-  test("空数组与无 JSON 都抛可读错误", () => {
-    expect(() => parseFramePlan('{"windows":[]}', { bvid: "BV1FRAMETEST", durationS: 120 }))
-      .toThrow(FramePlanError);
+  test("空计划合法，格式错误或全非法窗口仍报错", () => {
+    expect(parseFramePlan('{"windows":[]}', { bvid: "BV1FRAMETEST", durationS: 120 }).windows).toEqual([]);
+    expect(() => parseFramePlan('{"windows":[{"start_s":"abc"}]}', { bvid: "BV1FRAMETEST" })).toThrow(FramePlanError);
+    expect(() => parseFramePlan('{}', { bvid: "BV1FRAMETEST" })).toThrow(FramePlanError);
     expect(() => parseFramePlan("没有 JSON", { bvid: "BV1FRAMETEST", durationS: 120 }))
       .toThrow(FramePlanError);
+  });
+
+  test("合并后的长窗口重新拆分，完整覆盖原区间且不突破长度上限", () => {
+    const plan = parseFramePlan(JSON.stringify({ windows: [
+      { start_s: 0, end_s: 120, priority: 0.8, reason: "前段" },
+      { start_s: 119, end_s: 239, priority: 0.9, reason: "后段" },
+    ] }), { bvid: "BV1FRAMETEST", durationS: 300, maxWindows: 2 });
+    expect(plan.windows).toHaveLength(2);
+    expect(plan.windows[0]!.start_s).toBe(0);
+    expect(plan.windows.at(-1)!.end_s).toBe(239);
+    expect(plan.windows[0]!.end_s).toBe(plan.windows[1]!.start_s);
+    expect(plan.windows.every((w) => w.end_s - w.start_s <= 120 && w.priority === 0.9)).toBe(true);
   });
 
   test("非法窗口被跳过，剩余窗口仍可用", () => {

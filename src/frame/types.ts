@@ -21,7 +21,7 @@ export interface FrameWindow {
 
 export interface FramePlan {
   bvid: string;
-  /** 采样策略版本：换策略必须改它，否则旧结果不可复现 */
+  /** 采样策略版本：换策略必须改它，以便区分历史产物 */
   policy_version: string;
   /** 窗口规划提示词版本：换提示词必须改它 */
   planner_version: string;
@@ -92,7 +92,7 @@ export interface FrameBundle {
   policy: FramePolicyInfo;
 }
 
-export const FRAME_POLICY_VERSION = "frames/v3";
+export const FRAME_POLICY_VERSION = "frames/v4";
 export const PLANNER_PROMPT_VERSION = "planner/v2";
 
 /** 一个窗口最多拼几张（九宫格上限） */
