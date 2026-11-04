@@ -169,7 +169,7 @@ describeWithFfmpeg("真实 ffmpeg 抽帧", () => {
     ]);
     expect({ code, error: code === 0 ? "" : stdout + stderr }).toEqual({ code: 0, error: "" });
     const manifest = JSON.parse(await fs.readFile(path.join(outDir, "manifest.json"), "utf8"));
-    expect(manifest.policy_version).toBe("frames/v6");
+    expect(manifest.policy_version).toBe("frames/v7");
     expect(manifest.windows).toHaveLength(4);
     expect(manifest.frames).toHaveLength(4);
     expect(manifest.grids).toHaveLength(1);
@@ -180,6 +180,7 @@ describeWithFfmpeg("真实 ffmpeg 抽帧", () => {
     const snapshotPath = path.join(workDir, "history-snapshot.json");
     const transcriptPath = path.join(workDir, "asr.json");
     const findingsPath = path.join(workDir, "findings.jsonl");
+    const reviewsPath = path.join(workDir, "manual-reviews.jsonl");
     const outDir = path.join(workDir, "history-output");
     await fs.writeFile(snapshotPath, JSON.stringify({
       bvid: "BV1FRAMETEST", fetched_at: "2026-11-04T00:00:00Z",
@@ -195,9 +196,13 @@ describeWithFfmpeg("真实 ffmpeg 抽帧", () => {
       subject: "BV1AbCdEfGh2", dedupe_key: "BV1AbCdEfGh2:author", evidence: "历史签名原文",
       author_risk: { owner_mid: 123, risk_level: "high" },
     }) + "\n");
+    await fs.writeFile(reviewsPath, JSON.stringify({
+      finding_id: "historical-author", decision: "confirmed", reviewed_at: "2026-01-02T00:00:00Z", reason: "人工核对历史签名原文",
+    }) + "\n");
     const proc = Bun.spawn([process.execPath, "run", "src/frame/cli.ts",
       "--bvid", "BV1FRAMETEST", "--snapshot", snapshotPath, "--video", videoPath,
       "--transcript", transcriptPath, "--findings", findingsPath,
+      "--author-reviews", reviewsPath, "--author-history-days", "120",
       "--out", outDir, "--heuristic", "--no-scenes", "--no-profile",
     ], { stdout: "pipe", stderr: "pipe" });
     const [code, stdout, stderr] = await Promise.all([
@@ -207,7 +212,7 @@ describeWithFfmpeg("真实 ffmpeg 抽帧", () => {
     const manifest = JSON.parse(await fs.readFile(path.join(outDir, "manifest.json"), "utf8"));
     expect(manifest.policy.author_level).toBe("high");
     expect(manifest.policy.max_grids).toBe(20);
-    expect(manifest.policy.author_score).toBeLessThan(30);
+    expect(manifest.policy.author_score).toBe(50);
     expect(manifest.inputs.transcript_source).toBe("asr");
     expect(manifest.inputs.transcript_segments).toBe(1);
     expect(manifest.inputs.data_coverage.duration_s).toBe(12);
@@ -216,6 +221,8 @@ describeWithFfmpeg("真实 ffmpeg 抽帧", () => {
     expect(manifest.windows[0].focus_times).toContain(3);
     expect(manifest.frames.some((frame: { t: number; reason: string }) => frame.t === 3 && frame.reason === "focus")).toBe(true);
     expect(manifest.inputs.author_history.records[0].id).toBe("historical-author");
+    expect(manifest.inputs.author_history.records[0].status).toBe("confirmed");
+    expect(manifest.inputs.author_history.model_max_age_days).toBe(120);
     expect(manifest.windows.some((window: { reason: string }) => window.reason.includes("得分 2"))).toBe(true);
   });
 });

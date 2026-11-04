@@ -66,6 +66,7 @@ export interface FrameGrid {
 
 /** 本次抽帧采用的预算与来源，便于复现和解释"为什么只看了这么多张" */
 export interface FramePolicyInfo {
+  /** 以下作者档位/分数仅控制抽帧预算，不是 scanner 的作者风险结论 */
   author_level: AuthorRiskLevel;
   author_score: number | null;
   author_reasons: string[];
@@ -102,7 +103,7 @@ export interface FrameBundle {
   policy: FramePolicyInfo;
 }
 
-export const FRAME_POLICY_VERSION = "frames/v6";
+export const FRAME_POLICY_VERSION = "frames/v7";
 export const PLANNER_PROMPT_VERSION = "planner/v4";
 
 /** 一个窗口最多拼几张（九宫格上限） */

@@ -49,6 +49,8 @@ interface CliArgs {
   snapshot?: string;
   transcript?: string;
   findings?: string;
+  authorReviews?: string;
+  authorHistoryDays?: number;
   video?: string;
   planFile?: string;
   heuristic: boolean;
@@ -70,6 +72,8 @@ function usage(): string {
     "  --snapshot <path>     快照文件，默认 dataset/<BV号>.json",
     "  --transcript <path>   本次使用的 SRT / transcript JSON（覆盖快照转写）",
     "  --findings <path>     作者历史 JSONL，默认 .agent-data/findings.jsonl",
+    "  --author-reviews <path> 人工确认/撤销 JSONL，默认 <findings路径>.author-reviews.jsonl",
+    "  --author-history-days <n> 未复核模型历史有效天数，默认 90",
     "  --plan <path>         模型规划回执（JSON 或带代码块的原文）",
     "  --heuristic           不调模型，直接用确定性粗定位窗口（冒烟用）",
     "  --print-prompt        只输出窗口规划提示词并退出",
@@ -94,6 +98,14 @@ function parseArgs(argv: string[]): CliArgs {
   const maxWindowsRaw = valueOf("--max-windows");
   const maxGridsRaw = valueOf("--max-grids");
   const probeEveryRaw = valueOf("--probe-every");
+  const historyDaysRaw = valueOf("--author-history-days");
+  const authorHistoryDays = historyDaysRaw === undefined ? undefined : Number(historyDaysRaw);
+  if (argv.includes("--author-history-days") && (authorHistoryDays === undefined || !Number.isFinite(authorHistoryDays) || authorHistoryDays <= 0)) {
+    throw new Error("--author-history-days 必须是正数");
+  }
+  if (argv.includes("--author-reviews") && (!valueOf("--author-reviews") || valueOf("--author-reviews")!.startsWith("--"))) {
+    throw new Error("--author-reviews 需要文件路径");
+  }
   const maxWindows = maxWindowsRaw === undefined ? undefined : Number.parseInt(maxWindowsRaw, 10);
   const maxGrids = maxGridsRaw === undefined ? undefined : Number.parseInt(maxGridsRaw, 10);
   const probeEveryS = probeEveryRaw === undefined ? undefined : Number.parseFloat(probeEveryRaw);
@@ -115,6 +127,8 @@ function parseArgs(argv: string[]): CliArgs {
     ...(valueOf("--snapshot") === undefined ? {} : { snapshot: valueOf("--snapshot")! }),
     ...(valueOf("--transcript") === undefined ? {} : { transcript: valueOf("--transcript")! }),
     ...(valueOf("--findings") === undefined ? {} : { findings: valueOf("--findings")! }),
+    ...(valueOf("--author-reviews") === undefined ? {} : { authorReviews: valueOf("--author-reviews")! }),
+    ...(authorHistoryDays === undefined ? {} : { authorHistoryDays }),
     ...(valueOf("--video") === undefined ? {} : { video: valueOf("--video")! }),
     ...(valueOf("--plan") === undefined ? {} : { planFile: valueOf("--plan")! }),
     heuristic: argv.includes("--heuristic"),
@@ -211,6 +225,8 @@ async function main(): Promise<void> {
   const authorHistory = await loadAuthorHistory(ownerMid, {
     excludeBvid: args.bvid,
     ...(args.findings === undefined ? {} : { storePath: path.resolve(args.findings) }),
+    ...(args.authorReviews === undefined ? {} : { reviewsPath: path.resolve(args.authorReviews) }),
+    ...(args.authorHistoryDays === undefined ? {} : { modelMaxAgeDays: args.authorHistoryDays }),
   });
   const authorRisk = scoreAuthor({ ...snapshot.author, history_level: authorHistory.level });
   const level = args.authorLevel ?? authorRisk.level;
@@ -279,7 +295,7 @@ async function main(): Promise<void> {
     );
   }
   console.log(
-    `作者档位 ${level}（分数 ${authorRisk.score ?? "未知"}，预算 ${budget.max_grids} 张 / 单窗 ${budget.per_window_max} 帧）` +
+    `作者抽帧档位 ${level}（预算优先分 ${authorRisk.score ?? "未知"}，预算 ${budget.max_grids} 张 / 单窗 ${budget.per_window_max} 帧）` +
     `${args.authorLevel === undefined ? "" : "［手动覆盖］"}`,
   );
   console.log(

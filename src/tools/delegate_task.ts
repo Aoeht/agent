@@ -94,7 +94,7 @@ const ROLE_INSTRUCTIONS: Record<string, string> = {
 
 /** scanner 的固定报告结构：与 ingest_findings 字段对齐，同时就是数据集的产出格式 */
 const SCANNER_REPORT_SCHEMA =
-  `{"bvid":"BV号","risk_level":"high|medium|low|clean","confidence":0到1,"summary":"三维度综合结论",` +
+  `{"bvid":"BV号","risk_level":"high|medium|low|clean|unknown","confidence":0到1,"summary":"三维度综合结论",` +
   `"video":{"risk_level":"...","windows":[{"start_s":0,"end_s":0,"reason":"..."}],"reason":"..."},` +
   `"author":{"risk_level":"...","signals":["..."],"reason":"..."},` +
   `"comments":{"risk_level":"...","reason":"..."},` +
@@ -119,13 +119,15 @@ const childSystemPrompt = (role: string, sandboxRoot: string): string => {
       "作者维度在已知 author.mid（或 video.owner_mid）时附 author_risk:{owner_mid,risk_level} 和具体 evidence；" +
       "risk_level 为 high|medium|low|clean|unknown，身份未知不填，不得用昵称代替 MID。历史记录只供预算参考，不作为本次定性的独立证据。\n" +
       "判定纪律：\n" +
+      "- 作者抽帧档位/分数只决定采样预算，不是作者风险结论或概率。粉丝量、认证和缺数据不能证明作者安全或涉诈。作者结论必须单独取证；证据不足用 unknown，不得自动降为 clean/low。\n" +
+      "- 视频风险、评论区风险与作者风险分别判断。第三方评论有诈骗内容不自动归因作者；置顶/回复等关联也需可核对的作者身份和语境证据，不能仅凭昵称或标识相同认定。\n" +
       "- contact_associations 仅表示跨来源出现同类标识；转述、举报和共享域名都不证明账号由同一人控制。data_coverage 是现有数据覆盖情况，字幕空档或缺数据不能作为低风险依据，也不代表转写准确率。\n" +
       "- risk_windows.score_breakdown 区分 transcript（ASR/字幕）、danmaku（观众留言）与 density（密度）；总分只供定位，弹幕内容不能当成作者口播，密度不能作为诈骗证据。\n" +
       "- 采证≠终判：链接不可达、被人机校验拦截、页面打不开都不是诈骗证据，只能记为采证受限。\n" +
       "- 模型拒绝/内容过滤/数据缺失都不是诈骗证据，对应维度记为无法判断。\n" +
       "- 每一条风险结论必须给出可核查的证据：时间戳+弹幕/评论/字幕原文摘录，或 inspect_link 的具体采证字段。\n" +
       "- 引流（加微信/QQ、站外链接）是强风险信号但不是定性本身，要结合话术语境定性。\n" +
-      "- 证据不足就降低风险等级并把疑点写进 unresolved，不要编造证据。\n" +
+      "- 证据不足以定性时，对应维度用 unknown 并把疑点写进 unresolved，不要编造证据。\n" +
       "报告格式（最后一条消息）：先用 3~5 句中文给出结论，再输出一个 JSON 代码块，结构固定为：\n" +
       SCANNER_REPORT_SCHEMA +
       `\n\n${envBlock}`

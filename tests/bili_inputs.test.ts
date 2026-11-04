@@ -67,7 +67,7 @@ test("作者结论落库后按 MID 聚合；缺证据、异账号、当前视频
       }] });
     }
     await fs.appendFile(storePath, '{bad line\n');
-    const history = await loadAuthorHistory("123", { storePath, excludeBvid: "BV1CURRENT00" });
+    const history = await loadAuthorHistory("123", { storePath, excludeBvid: "BV1CURRENT00", now: Date.parse("2026-11-04T00:00:00Z") });
     expect(history.level).toBe("medium");
     expect(history.records).toHaveLength(1);
     expect(history.records[0]!.bvid).toBe(bvid);
