@@ -62,12 +62,14 @@ export function localizeRisks(
   options: LocalizeOptions = {},
 ): LocalizeResult {
   const bucketS = options.bucketS ?? 10;
+  if (!Number.isFinite(bucketS) || bucketS <= 0) throw new Error("bucketS 必须是有限正数");
   const topK = options.topK ?? 6;
   const maxHits = options.maxHitsPerWindow ?? 10;
   const excerptChars = options.excerptChars ?? 500;
 
   const validDanmaku = danmaku.filter((d) => Number.isFinite(d.t) && d.t >= 0 && d.text.trim());
-  const validTranscript = transcript.filter((s) => Number.isFinite(s.start_s) && s.text.trim());
+  const validTranscript = transcript.filter((s) => Number.isFinite(s.start_s) && Number.isFinite(s.end_s)
+    && s.start_s >= 0 && s.end_s > s.start_s && s.text.trim());
   const maxTime = Math.max(0, ...validDanmaku.map((d) => d.t), ...validTranscript.map((s) => s.end_s));
   const bucketCount = Math.max(1, Math.ceil((maxTime + 0.001) / bucketS));
 
@@ -75,8 +77,10 @@ export function localizeRisks(
   const bucketTexts: string[][] = Array.from({ length: bucketCount }, () => []);
   const bucketDanmaku: TimedText[][] = Array.from({ length: bucketCount }, () => []);
   const totals = new Map<string, KeywordHit>();
+  const bucketTerms = Array.from({ length: bucketCount }, () => new Map<string, { count: number; weight: number }>());
+  const linkWeights = new Array<number>(bucketCount).fill(0);
 
-  const accumulate = (text: string): { weight: number; hasLink: boolean; terms: string[] } => {
+  const accumulate = (text: string, assignments: Array<{ bucket: number; fraction: number }>): string[] => {
     const hits = scanKeywords(text);
     const links = extractLinks(text, "localize");
     for (const hit of hits) {
@@ -85,11 +89,17 @@ export function localizeRisks(
       if (prev) prev.count += hit.count;
       else totals.set(key, { ...hit });
     }
-    return {
-      weight: hits.reduce((sum, h) => sum + h.weight * Math.min(h.count, MAX_PER_TERM), 0),
-      hasLink: links.length > 0,
-      terms: hits.map((h) => h.term),
-    };
+    for (const { bucket, fraction } of assignments) {
+      for (const hit of hits) {
+        const prev = bucketTerms[bucket]!.get(hit.term);
+        bucketTerms[bucket]!.set(hit.term, {
+          count: (prev?.count ?? 0) + Math.min(hit.count, MAX_PER_TERM) * fraction,
+          weight: hit.weight,
+        });
+      }
+      if (links.length > 0) linkWeights[bucket]! += fraction;
+    }
+    return hits.map((h) => h.term);
   };
 
   for (const entry of validDanmaku) {
@@ -97,21 +107,27 @@ export function localizeRisks(
     bucketTexts[bucket]!.push(entry.text);
     bucketDanmaku[bucket]!.push(entry);
   }
-  const transcriptAssignments: Array<{ segment: TimedSegment; bucket: number; terms: string[] }> = [];
+  for (let bucket = 0; bucket < bucketCount; bucket += 1) {
+    accumulate(bucketTexts[bucket]!.join("\n"), [{ bucket, fraction: 1 }]);
+  }
+  const transcriptAssignments: Array<{ segment: TimedSegment; terms: string[] }> = [];
   for (const segment of validTranscript) {
-    const bucket = Math.min(Math.floor(segment.start_s / bucketS), bucketCount - 1);
-    transcriptAssignments.push({ segment, bucket, terms: scanKeywords(segment.text).map((h) => h.term) });
-    bucketTexts[bucket]!.push(segment.text);
+    const assignments: Array<{ bucket: number; fraction: number }> = [];
+    // 半开区间 [start, end)：恰在桶边界结束的字幕不污染下一个桶。
+    for (let bucket = Math.floor(segment.start_s / bucketS); bucket < Math.ceil(segment.end_s / bucketS); bucket += 1) {
+      const overlap = Math.min(segment.end_s, (bucket + 1) * bucketS) - Math.max(segment.start_s, bucket * bucketS);
+      assignments.push({ bucket, fraction: overlap / (segment.end_s - segment.start_s) });
+    }
+    transcriptAssignments.push({ segment, terms: accumulate(segment.text, assignments) });
   }
 
   const avgDanmaku = validDanmaku.length / bucketCount;
   const scores = new Array<number>(bucketCount).fill(0);
   const hasLinkByBucket = new Array<boolean>(bucketCount).fill(false);
   for (let i = 0; i < bucketCount; i += 1) {
-    const { weight, hasLink } = accumulate(bucketTexts[i]!.join("\n"));
-    let score = weight;
-    if (hasLink) {
-      score += LINK_BONUS;
+    let score = [...bucketTerms[i]!.values()].reduce((sum, hit) => sum + hit.weight * Math.min(hit.count, MAX_PER_TERM), 0);
+    if (linkWeights[i]! > 0) {
+      score += LINK_BONUS * Math.min(1, linkWeights[i]!);
       hasLinkByBucket[i] = true;
     }
     // 密度突增：弹幕明显高于均值往往是集体反应（嘲讽/警告/引流互动），值得看

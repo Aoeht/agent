@@ -15,7 +15,7 @@ test("关键词与链接命中的窗口粗定位", () => {
   expect(result.windows).toHaveLength(1);
   const w = result.windows[0]!;
   expect(w.start_s).toBe(0);
-  expect(w.end_s).toBe(10);
+  expect(w.end_s).toBe(30);
   expect(w.has_link).toBe(true);
   expect(w.danmaku_hits.map((h) => h.text)).toContain("加微信领福利");
   expect(w.transcript_hits[0]?.terms).toContain("粉丝群");
@@ -23,6 +23,37 @@ test("关键词与链接命中的窗口粗定位", () => {
   const terms = result.keyword_totals.map((k) => k.term);
   expect(terms).toContain("加微信");
   expect(terms).toContain("粉丝群");
+});
+
+test("长 ASR 覆盖完整区间，词频和链接权重不因分桶数膨胀", () => {
+  for (const bucketS of [5, 10, 20]) {
+    const result = localizeRisks([], [{ start_s: 0, end_s: 35, text: "加微信 https://example.com" }], { bucketS });
+    expect(result.windows).toHaveLength(1);
+    expect(result.windows[0]!.start_s).toBe(0);
+    expect(result.windows[0]!.end_s).toBe(Math.ceil(35 / bucketS) * bucketS);
+    expect(result.windows[0]!.score).toBeCloseTo(4, 10);
+    expect(result.windows[0]!.has_link).toBe(true);
+    expect(result.windows[0]!.transcript_hits).toHaveLength(1);
+    expect(result.keyword_totals.find((hit) => hit.term === "加微信")!.count).toBe(1);
+  }
+});
+
+test("跨桶窄区间与整桶边界采用半开区间，非法时间不参与定位", () => {
+  expect(localizeRisks([], [{ start_s: 9, end_s: 11, text: "贷款" }]).windows[0])
+    .toMatchObject({ start_s: 0, end_s: 20, score: 3 });
+  expect(localizeRisks([], [{ start_s: 10, end_s: 20, text: "贷款" }]).windows[0])
+    .toMatchObject({ start_s: 10, end_s: 20, score: 3 });
+  expect(localizeRisks([], [
+    { start_s: -1, end_s: 5, text: "贷款" }, { start_s: 5, end_s: 5, text: "贷款" },
+    { start_s: 8, end_s: 2, text: "贷款" }, { start_s: 0, end_s: Infinity, text: "贷款" },
+  ]).windows).toEqual([]);
+  expect(() => localizeRisks([], [], { bucketS: 0 })).toThrow();
+});
+
+test("同桶 ASR 与弹幕仍共享每词计分上限，原始词频完整保留", () => {
+  const result = localizeRisks([{ t: 1, text: "贷款贷款贷款" }], [{ start_s: 1, end_s: 9, text: "贷款贷款" }]);
+  expect(result.windows[0]!.score).toBe(9);
+  expect(result.keyword_totals[0]!.count).toBe(5);
 });
 
 test("相邻命中与隔一桶的命中都合并进同一窗口", () => {

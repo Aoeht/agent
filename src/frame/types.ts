@@ -14,7 +14,7 @@ export interface FrameWindow {
   reason: string;
   /** 0~1，规划器认为的优先级；预算紧张时优先保高优先级窗口 */
   priority?: number;
-  /** 窗口内命中可疑弹幕的时间点（秒）：抽帧以这些点为中心补帧 */
+  /** 可疑弹幕时间点与 ASR/字幕命中区间代表点（秒），供重点取帧 */
   focus_times?: number[];
   /** 窗口来源：模型/人工规划、启发式、全片覆盖探针 */
   source?: "plan" | "heuristic" | "coverage";
@@ -98,7 +98,7 @@ export interface FrameBundle {
   policy: FramePolicyInfo;
 }
 
-export const FRAME_POLICY_VERSION = "frames/v4";
+export const FRAME_POLICY_VERSION = "frames/v5";
 export const PLANNER_PROMPT_VERSION = "planner/v2";
 
 /** 一个窗口最多拼几张（九宫格上限） */

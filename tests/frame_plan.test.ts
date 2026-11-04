@@ -6,7 +6,11 @@ import {
   FramePlanError,
   heuristicWindows,
   parseFramePlan,
+  attachFocusTimes,
+  collectFocusTimes,
 } from "../src/frame/plan";
+import { selectFrameCandidates } from "../src/frame/select";
+import { frameBudgetFor } from "../src/frame/policy";
 
 function snapshot(overrides: Partial<VideoSnapshot> = {}): VideoSnapshot {
   return {
@@ -142,6 +146,36 @@ describe("规划解析", () => {
 });
 
 describe("启发式冒烟窗口", () => {
+  test("无弹幕 ASR 产生 focus，启发式与模型窗口共用且重复挂载幂等", () => {
+    const input = snapshot({ transcript: { source: "asr", segments: [
+      { start_s: 20, end_s: 24, text: "加微信领资料" },
+    ] } });
+    const heuristic = heuristicWindows(input);
+    expect(heuristic[0]!.focus_times).toEqual([22]);
+    const model = attachFocusTimes(input, [{ start_s: 10, end_s: 30, reason: "核对" }]);
+    expect(model[0]!.focus_times).toEqual([22]);
+    expect(attachFocusTimes(input, model)).toEqual(model);
+    const selected = selectFrameCandidates({ windows: model, budget: { ...frameBudgetFor("clean"), max_frames: 1 } });
+    expect(selected.selected[0]).toMatchObject({ t: 22, reason: "focus" });
+  });
+
+  test("ASR focus 在重叠区间内部取点，长段最多三点，边界与无关文本不产生点", () => {
+    const points = collectFocusTimes([], { start_s: 20, end_s: 60 }, [
+      { start_s: 0, end_s: 90, text: "加微信" },
+      { start_s: 0, end_s: 20, text: "贷款" },
+      { start_s: 60, end_s: 70, text: "贷款" },
+      { start_s: 25, end_s: 30, text: "正常讲解" },
+      { start_s: 30, end_s: 28, text: "贷款" },
+    ]);
+    expect(points).toHaveLength(3);
+    expect(points[0]).toBeGreaterThan(20);
+    expect(points.at(-1)).toBeLessThan(60);
+    expect(points[1]).toBe(40);
+    expect(collectFocusTimes([{ t: 22, text: "加微信" }], { start_s: 20, end_s: 30 }, [
+      { start_s: 20, end_s: 24, text: "https://example.com" },
+    ])).toEqual([22]);
+  });
+
   test("命中弹幕/字幕时返回覆盖命中点的时间窗", () => {
     const windows = heuristicWindows(
       snapshot({

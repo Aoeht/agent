@@ -169,7 +169,7 @@ describeWithFfmpeg("真实 ffmpeg 抽帧", () => {
     ]);
     expect({ code, error: code === 0 ? "" : stdout + stderr }).toEqual({ code: 0, error: "" });
     const manifest = JSON.parse(await fs.readFile(path.join(outDir, "manifest.json"), "utf8"));
-    expect(manifest.policy_version).toBe("frames/v4");
+    expect(manifest.policy_version).toBe("frames/v5");
     expect(manifest.windows).toHaveLength(4);
     expect(manifest.frames).toHaveLength(4);
     expect(manifest.grids).toHaveLength(1);
@@ -210,6 +210,8 @@ describeWithFfmpeg("真实 ffmpeg 抽帧", () => {
     expect(manifest.policy.author_score).toBeLessThan(30);
     expect(manifest.inputs.transcript_source).toBe("asr");
     expect(manifest.inputs.transcript_segments).toBe(1);
+    expect(manifest.windows[0].focus_times).toContain(3);
+    expect(manifest.frames.some((frame: { t: number; reason: string }) => frame.t === 3 && frame.reason === "focus")).toBe(true);
     expect(manifest.inputs.author_history.records[0].id).toBe("historical-author");
     expect(manifest.windows.some((window: { reason: string }) => window.reason.includes("得分 2"))).toBe(true);
   });

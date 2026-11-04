@@ -12,6 +12,7 @@ import {
   normalizeTranscript,
   type VideoSnapshot,
   type DanmakuEntry,
+  type TimedSegment,
 } from "../bili/snapshot";
 import { extractLinks } from "../bili/links";
 import { localizeRisks, type RiskWindow } from "../bili/localize";
@@ -69,9 +70,12 @@ function selectTranscriptLines(
 ): string[] {
   const segments = normalizeTranscript(snapshot).filter((segment) => segment.text.trim());
   if (segments.length === 0) return [];
+  const overlaps = (segment: TimedSegment) => candidateWindows.some(
+    (window) => segment.start_s < window.end_s && segment.end_s > window.start_s,
+  );
   const prioritized = [
-    ...segments.filter((segment) => insideWindow(segment.start_s, candidateWindows)),
-    ...segments.filter((segment) => !insideWindow(segment.start_s, candidateWindows)),
+    ...segments.filter(overlaps),
+    ...segments.filter((segment) => !overlaps(segment)),
   ];
   const lines: string[] = [];
   let used = 0;
@@ -370,31 +374,44 @@ export async function planWindowsWithModel(
   });
 }
 
-/** 命中关键词或链接的弹幕时间点：这些点会作为抽帧中心 */
+/** 弹幕命中点与字幕命中区间的代表点；没有词级时间戳时不把句首当关键词时刻。 */
 export function collectFocusTimes(
   danmaku: DanmakuEntry[],
   window: { start_s: number; end_s: number },
+  transcript: TimedSegment[] = [],
 ): number[] {
-  return danmaku
+  const points = danmaku
     .filter(
       (entry) =>
         entry.t >= window.start_s &&
-        entry.t <= window.end_s &&
+        entry.t < window.end_s &&
         (scanKeywords(entry.text).length > 0 || extractLinks(entry.text, "frame_focus").length > 0),
     )
     .map((entry) => entry.t);
+  for (const segment of transcript) {
+    if (!Number.isFinite(segment.start_s) || !Number.isFinite(segment.end_s)
+      || segment.start_s < 0 || segment.end_s <= segment.start_s) continue;
+    const start = Math.max(window.start_s, segment.start_s);
+    const end = Math.min(window.end_s, segment.end_s);
+    if (!(end > start) || (scanKeywords(segment.text).length === 0
+      && extractLinks(segment.text, "frame_focus").length === 0)) continue;
+    const count = Math.min(3, Math.ceil((end - start) / 10));
+    for (let i = 0; i < count; i += 1) points.push(start + (i + 0.5) * (end - start) / count);
+  }
+  return [...new Set(points)].sort((a, b) => a - b);
 }
 
-/** 把窗口内命中的可疑弹幕时间点挂到窗口上；已有 focus_times 时合并去重 */
+/** 合并弹幕、ASR/字幕重点与已有 focus_times；重复挂载不增加重复点。 */
 export function attachFocusTimes(
   snapshot: VideoSnapshot,
   windows: FrameWindow[],
 ): FrameWindow[] {
+  const transcript = normalizeTranscript(snapshot);
   return windows.map((window) => {
     const merged = [
       ...new Set([
         ...(window.focus_times ?? []),
-        ...collectFocusTimes(snapshot.danmaku, window),
+        ...collectFocusTimes(snapshot.danmaku, window, transcript),
       ]),
     ].sort((a, b) => a - b);
     return { ...window, ...(merged.length === 0 ? {} : { focus_times: merged }) };
@@ -428,7 +445,7 @@ export function heuristicWindows(
         end_s: window.end_s,
         reason: `启发式粗定位：得分 ${window.score}${window.has_link ? "，含链接" : ""}`,
         priority: Math.min(1, window.score / 10),
-        focus_times: collectFocusTimes(snapshot.danmaku, window),
+        focus_times: collectFocusTimes(snapshot.danmaku, window, segments),
       }));
   }
   const duration = estimateDuration(snapshot);

@@ -2,7 +2,7 @@
 /**
  * 候选帧选择：把窗口、视觉状态时间线、场景硬切和作者预算收敛成一组时间点。
  *
- * 优先级：focus（可疑弹幕） > 场景 > 文字带变化 > 状态切换 > 连续变化间隔。
+ * 优先级：focus（弹幕/ASR） > 场景 > 文字带变化 > 状态切换 > 连续变化间隔。
  * 基础覆盖预留少量预算，其余在重点窗口间按 priority 分配；同分帧均匀取样。
  * 普通候选用 dHash 跨窗口去重，文字变化和基础覆盖不被整图哈希否决。
  */
@@ -442,7 +442,7 @@ export function selectFrameCandidates(params: SelectFramesParams): SelectionResu
   }
   const capacities = windows.map((_, index) =>
     Math.min(budget.per_window_max, byWindow.get(index + 1)?.length ?? 0));
-  // 命中可疑弹幕的窗口优先于普通窗口：预算只够一张时先看可疑点
+  // 命中弹幕或 ASR 的窗口优先于普通窗口：预算只够一张时先看可疑点
   const priorityWindows = windows.map((window) =>
     (window.focus_times?.length ?? 0) > 0
       ? { ...window, priority: Math.max(window.priority ?? 0.5, 0.8) }
