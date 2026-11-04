@@ -69,7 +69,11 @@ export interface MemoryRecallOptions {
 // v1 只保留摘要前 4000 字符，必须重读源文件才能恢复尾部信息。
 const SIDECAR_VERSION = 2;
 const DEFAULT_TOP_K = 3;
-const DEFAULT_MIN_SIMILARITY = 0.35;
+/**
+ * 实测于 qwen3.7-text-embedding-flash（`bun run eval:memory --real`）：无关文本对的余弦
+ * 噪声地板约 0.39，命中的证据句最低约 0.62。取两者之间，换模型时按同法重标。
+ */
+const DEFAULT_MIN_SIMILARITY = 0.45;
 const DEFAULT_EXCERPT_CHARS = 600;
 
 export class MemoryRecall {

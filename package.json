@@ -8,6 +8,7 @@
     "team": "bun run src/team.ts",
     "typecheck": "tsc --noEmit",
     "eval:memory": "bun run benchmarks/memory_recall_eval.ts",
+    "eval:longmem": "bun run benchmarks/longmem_eval.ts",
     "eval:scanner": "bun run benchmarks/scanner_eval.ts",
     "eval:rag": "bun run benchmarks/rag_eval.ts",
     "trace:report": "bun run benchmarks/trace_report.ts",
