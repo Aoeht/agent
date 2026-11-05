@@ -13,7 +13,6 @@ Environment:
     BILI_HUB_PORT         bind port (default 8765)
     BILI_HUB_TOKEN        bearer token; required unless BILI_HUB_ALLOW_ANON=1
     BILI_HUB_ALLOW_ANON   "1" allows unauthenticated access when no token is set (debug only)
-    BILI_TRANSCRIPT_DIR   optional directory of <BV>.json / <BV>.srt, first page only
 
 The process never writes to the database: connections use mode=ro and query_only.
 """
@@ -28,7 +27,6 @@ import sqlite3
 import sys
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 LOG = logging.getLogger("bili-hub")
@@ -116,20 +114,28 @@ def build_video(view: dict) -> dict:
     )
 
 
-def build_author(profile, card) -> dict:
+def build_author(profile, card, statistics=None) -> dict:
     profile = profile or {}
     card = card or {}
+    statistics = statistics or {}
     inner = card.get("card") or {}
     official = profile.get("official") or inner.get("official_verify") or {}
-    official_type = official.get("type")
-    if not isinstance(official_type, int) or official_type < 0:
-        official_type = 0
+    raw_official_type = official.get("type")
+    # 站方原始 -1/0/1（无/个人/机构）→ 项目契约 0/1/2
+    if not isinstance(raw_official_type, int) or raw_official_type < -1:
+        raw_official_type = -1
+    official_type = raw_official_type + 1
     fans = card.get("follower")
     if fans is None:
         fans = inner.get("fans")
     attention = inner.get("attention")
     if attention is None:
         attention = card.get("following")
+    archive = statistics.get("archive") or {}
+    video_count = card.get("archive_count")
+    if not isinstance(video_count, int):
+        video_count = inner.get("archive_count")
+    total_views = archive.get("view")
     return clean(
         {
             "mid": profile.get("mid") or inner.get("mid"),
@@ -139,6 +145,8 @@ def build_author(profile, card) -> dict:
             "official_type": official_type,
             "official_desc": official.get("desc") or "",
             "sign": profile.get("sign") or inner.get("sign") or "",
+            "video_count": video_count,
+            "total_views": total_views,
         }
     )
 
@@ -147,33 +155,6 @@ def build_tags(page) -> list:
     if not isinstance(page, list):
         return []
     return [tag["tag_name"] for tag in page if isinstance(tag, dict) and tag.get("tag_name")][:50]
-
-
-def build_transcript(bvid: str) -> dict:
-    directory = os.environ.get("BILI_TRANSCRIPT_DIR")
-    if not directory:
-        return {"source": "none"}
-    if not BV_RE.fullmatch(bvid):
-        raise ValueError("invalid transcript bvid")
-    for extension in ("json", "srt"):
-        file = Path(directory) / (bvid + "." + extension)
-        try:
-            text = file.read_text(encoding="utf-8-sig")
-        except FileNotFoundError:
-            continue
-        if extension == "srt":
-            if not text.strip():
-                raise ValueError("empty transcript: %s" % file)
-            return {"source": "srt", "srt": text}
-        data = json.loads(text)
-        if not isinstance(data, dict) or data.get("bvid", bvid) != bvid or data.get("page", 1) != 1:
-            raise ValueError("transcript identity/page mismatch: %s" % file)
-        if data.get("source") not in ("asr", "cc", "srt"):
-            raise ValueError("invalid transcript source: %s" % file)
-        if not data.get("segments") and not data.get("srt"):
-            raise ValueError("empty transcript: %s" % file)
-        return {key: data[key] for key in ("source", "segments", "srt") if key in data}
-    return {"source": "none"}
 
 
 def build_danmaku(conn, cid) -> list:
@@ -251,10 +232,14 @@ def assemble(conn, bvid) -> dict | None:
         "bvid": bvid,
         "fetched_at": collected_at,
         "video": video,
-        "author": build_author(pages.get("uploader_profile"), pages.get("uploader_card")),
+        "author": build_author(
+            pages.get("uploader_profile"),
+            pages.get("uploader_card"),
+            pages.get("uploader_statistics"),
+        ),
         "danmaku": build_danmaku(conn, cid),
         "comments": build_comments(conn, snapshot_id, bvid),
-        "transcript": build_transcript(bvid),
+        "transcript": {"source": "none"},
     }
 
 

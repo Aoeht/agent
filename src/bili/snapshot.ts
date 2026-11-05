@@ -14,6 +14,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { parseSrt } from "./srt";
+import { AuthorVideoSchema } from "./author_videos";
 
 /** 从任意输入（BV 号 / 视频链接 / 含 BV 的文本）中提取 BV 号 */
 export function resolveBvid(input: string): string {
@@ -51,6 +52,8 @@ export const AuthorSchema = z.object({
   video_count: z.number().optional(),
   /** 累计播放量（采集侧 statistics.archive.view） */
   total_views: z.number().optional(),
+  /** 按发布时间倒序、标题去重后的最近最多 50 条作品元数据 */
+  recent_videos: z.array(AuthorVideoSchema).max(50).optional(),
 });
 
 export const DanmakuEntrySchema = z.object({

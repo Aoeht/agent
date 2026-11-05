@@ -128,6 +128,9 @@ REPL 与 Web 共用同一套斜杠命令：`/help` `/model` `/prompts` `/prompt`
 | `BILI_HUB_URL` / `BILI_HUB_TOKEN` | — / — | 采集服务器地址与可选 Bearer 口令，`bili_pull` 用 |
 | `BILI_DATASET_DIR` | `dataset` | 视频快照目录，`bili_pull` 写入、`bili_collect` 读取 |
 
+采集服务器侧的只读 Hub 参考实现见 [`server/bili_hub_api.py`](server/bili_hub_api.py)：直接读采集 sqlite，
+按 `bili-snapshot/v1` 提供列表与单视频快照，默认只监听 `127.0.0.1:8765` 并要求 Bearer 口令。
+
 MCP 服务器 = 内置默认（`src/mcp/config.ts`）⊕ 项目根 `.mcp.json`（`AGENT_MCP_CONFIG` 可改路径），改文件无需重启。
 
 ## 开发

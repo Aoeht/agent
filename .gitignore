@@ -13,6 +13,8 @@ coverage
 text_stamp/
 # B 站视频风控快照（采集流程产物，含平台内容，不入库；格式见 docs/视频诈骗扫描.md）
 dataset/
+# 采集库（video_metadata/observations.sqlite3，约 2GB，含平台内容，绝不入库）
+video_metadata/
 # logs
 logs
 *.log
