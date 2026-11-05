@@ -19,7 +19,7 @@
  */
 import fs from "node:fs/promises";
 import path from "node:path";
-import { scoreAuthor, type AuthorRiskLevel } from "../bili/author_risk";
+import { scoreAuthor, scoreAuthorWithModel, type AuthorRiskLevel } from "../bili/author_risk";
 import { loadSnapshot, loadTranscriptFile, normalizeTranscript, resolveBvid } from "../bili/snapshot";
 import { loadAuthorHistory } from "../bili/author_history";
 import { measureDataCoverage } from "../bili/coverage";
@@ -51,6 +51,7 @@ interface CliArgs {
   findings?: string;
   authorReviews?: string;
   authorHistoryDays?: number;
+  authorRules: boolean;
   video?: string;
   planFile?: string;
   heuristic: boolean;
@@ -74,6 +75,7 @@ function usage(): string {
     "  --findings <path>     作者历史 JSONL，默认 .agent-data/findings.jsonl",
     "  --author-reviews <path> 人工确认/撤销 JSONL，默认 <findings路径>.author-reviews.jsonl",
     "  --author-history-days <n> 未复核模型历史有效天数，默认 90",
+    "  --author-rules        作者预算仅用离线规则（默认调用语义模型，AUTHOR_RISK_MODEL 可选模型）",
     "  --plan <path>         模型规划回执（JSON 或带代码块的原文）",
     "  --heuristic           不调模型，直接用确定性粗定位窗口（冒烟用）",
     "  --print-prompt        只输出窗口规划提示词并退出",
@@ -132,6 +134,7 @@ function parseArgs(argv: string[]): CliArgs {
     ...(valueOf("--video") === undefined ? {} : { video: valueOf("--video")! }),
     ...(valueOf("--plan") === undefined ? {} : { planFile: valueOf("--plan")! }),
     heuristic: argv.includes("--heuristic"),
+    authorRules: argv.includes("--author-rules"),
     printPrompt: argv.includes("--print-prompt"),
     ...(valueOf("--out") === undefined ? {} : { outDir: valueOf("--out")! }),
     ...(maxWindows === undefined ? {} : { maxWindows }),
@@ -228,7 +231,11 @@ async function main(): Promise<void> {
     ...(args.authorReviews === undefined ? {} : { reviewsPath: path.resolve(args.authorReviews) }),
     ...(args.authorHistoryDays === undefined ? {} : { modelMaxAgeDays: args.authorHistoryDays }),
   });
-  const authorRisk = scoreAuthor({ ...snapshot.author, history_level: authorHistory.level });
+  const authorInput = { ...snapshot.author, history_level: authorHistory.level };
+  const authorRisk = args.authorRules || args.authorLevel !== undefined
+    ? scoreAuthor(authorInput)
+    : await scoreAuthorWithModel(authorInput, { cacheDir: path.join(datasetDir, ".author-semantic-cache") });
+  if (authorRisk.semantic?.status === "fallback") console.error(`作者语义分析未成功，回退规则：${authorRisk.semantic.failure}`);
   const level = args.authorLevel ?? authorRisk.level;
   const budget = frameBudgetFor(level, args.maxGrids === undefined ? {} : { maxGrids: args.maxGrids });
 
@@ -278,6 +285,7 @@ async function main(): Promise<void> {
       author_level: level,
       author_score: authorRisk.score,
       author_reasons: authorRisk.reasons,
+      author_scoring: authorRisk.semantic ?? { status: "rules" },
       max_grids: budget.max_grids,
       per_window_max: budget.per_window_max,
       selected_frames: frames.length,

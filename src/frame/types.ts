@@ -3,7 +3,7 @@
  * 抽帧阶段的数据结构：窗口规划 → 视觉画像 → 确定性采样 → 九宫格拼图。
  * 抽帧与视觉判读分离：这里只生产帧和拼图，不下任何风险结论。
  */
-import type { AuthorRiskLevel } from "../bili/author_risk";
+import type { AuthorRiskLevel, AuthorRiskScore } from "../bili/author_risk";
 import type { VideoProfileSummary } from "./profile";
 import type { AuthorHistory } from "../bili/author_history";
 import type { measureDataCoverage } from "../bili/coverage";
@@ -70,6 +70,7 @@ export interface FramePolicyInfo {
   author_level: AuthorRiskLevel;
   author_score: number | null;
   author_reasons: string[];
+  author_scoring?: AuthorRiskScore["semantic"] | { status: "rules" };
   max_grids: number;
   per_window_max: number;
   selected_frames: number;
@@ -103,7 +104,7 @@ export interface FrameBundle {
   policy: FramePolicyInfo;
 }
 
-export const FRAME_POLICY_VERSION = "frames/v7";
+export const FRAME_POLICY_VERSION = "frames/v10";
 export const PLANNER_PROMPT_VERSION = "planner/v4";
 
 /** 一个窗口最多拼几张（九宫格上限） */

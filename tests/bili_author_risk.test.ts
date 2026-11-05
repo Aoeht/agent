@@ -55,3 +55,16 @@ test("reasons 解释限幅、缺失及文本线索，不将预算分称为风险
     expect(result.reasons.some((r) => r.includes(reason))).toBe(true);
   }
 });
+
+test("最近作品标题词典只在规则路径计分：每条命中 +3、封顶 +6，标题线索也算文本线索", () => {
+  const videos = [{ title: "加微信领取福利" }, { title: "私信领福利" }, { title: "普通日常" }];
+  const result = scoreAuthor({ fans: 1000, recent_videos: videos });
+  expect(result.score).toBe(56);
+  expect(result.reasons.some((r) => r.includes("2 条标题含联系方式"))).toBe(true);
+  const capped = scoreAuthor({ fans: 1000, recent_videos: Array.from({ length: 5 }, (_, i) => ({ title: `加微信 第${i}期` })) });
+  expect(capped.score).toBe(56);
+  const noFans = scoreAuthor({ recent_videos: [{ title: "加微信领取福利" }] });
+  expect(noFans).toMatchObject({ score: 53, level: "medium" });
+  expect(noFans.reasons.some((r) => r.includes("缺少粉丝数"))).toBe(true);
+  expect(scoreAuthor({ fans: 1000, sign: "加微信", recent_videos: videos }).score).toBe(68);
+});
