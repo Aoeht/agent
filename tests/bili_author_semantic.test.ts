@@ -6,6 +6,7 @@ import type OpenAI from "openai";
 import { scoreAuthor, scoreAuthorWithModel } from "../src/bili/author_risk";
 
 function clientFor(content: unknown, finish_reason = "stop") {
+  if (content && typeof content === "object" && "evidence" in content && Array.isArray(content.evidence)) content = { ...content, evidence: content.evidence.map((e: any) => ({ ...e, evidence_id: e.evidence_id ?? (e.field.startsWith("recent_videos.") ? `video_${e.video_index}` : e.field) })) };
   const requests: any[] = [];
   const client = { chat: { completions: { create: async (request: unknown) => {
     requests.push(request);
@@ -13,6 +14,30 @@ function clientFor(content: unknown, finish_reason = "stop") {
   } } } } as unknown as OpenAI;
   return { client, requests };
 }
+
+test("失败诊断保留截断元数据和具体引用错误，不改变回退预算", async () => {
+  const input = { fans: 22, sign: "原始签名", recent_videos: [{ title: "原始标题", duration_s: 90 }] };
+  const response = { choices: [{ finish_reason: "length", message: { content: "x".repeat(17000) } }],
+    usage: { prompt_tokens: 100, completion_tokens: 2000, total_tokens: 2100 } };
+  const client = { chat: { completions: { create: async () => response } } } as unknown as OpenAI;
+  const truncated = await scoreAuthorWithModel(input, { client });
+  expect(truncated.semantic?.diagnostics).toMatchObject({ finish_reason: "length", refused: false, content_truncated: true,
+    usage: { completion_tokens: 2000 } });
+  expect(truncated.semantic?.diagnostics?.content?.length).toBe(16000);
+  expect(truncated.score).toBe(scoreAuthor(input).score);
+  const bad = await scoreAuthorWithModel(input, { client: clientFor({ risk_level: "medium", reason: "测试", evidence: [
+    { field: "sign", video_index: 1, quote: "改写签名" },
+    { field: "recent_videos.title", video_index: 2, quote: "原始标题" },
+    { field: "recent_videos.duration_s", video_index: 1, quote: "1分30秒" },
+  ] }).client });
+  expect(bad.semantic?.diagnostics?.validation_errors?.map(e => e.code)).toEqual([
+    "unexpected_video_index", "quote_not_in_source", "video_index_out_of_range", "value_mismatch",
+  ]);
+  expect(bad.semantic?.assessment).toBeUndefined();
+  expect((await scoreAuthorWithModel(input, { client: clientFor("bad json").client })).semantic?.diagnostics?.validation_errors)
+    .toEqual([{ path: "$", code: "invalid_json" }]);
+  expect((await scoreAuthorWithModel(input, { client: clientFor({ risk_level: "clean", reason: "正常", evidence: [] }).client })).semantic?.diagnostics).toBeUndefined();
+});
 
 test("语义替代硬匹配：否定私信不再重复加词分，历史下限仍生效", async () => {
   const input = { fans: 22, attention: 0, sign: "投资经验；私信你的都是骗子" };
@@ -22,6 +47,19 @@ test("语义替代硬匹配：否定私信不再重复加词分，历史下限�
   expect(result).toMatchObject({ score: 55, level: "medium", semantic: { status: "model" } });
   expect((await scoreAuthorWithModel({ ...input, history_level: "high" }, { client: fake.client })).level).toBe("high");
   expect(JSON.parse(fake.requests[0].messages[1].content)).toEqual({ name: "", sign: input.sign, recent_videos: [] });
+});
+
+test("显式 ID 还原序号，错误或缺失 ID 不绕过原文校验", async () => {
+  const input = { recent_videos: [{ title: "普通标题" }, { title: "收益保证" }] };
+  const output = { risk_level: "high", reason: "收益承诺", evidence: [{ field: "recent_videos.title", evidence_id: "video_2", quote: "收益保证" }] };
+  const fake = clientFor(output);
+  const result = await scoreAuthorWithModel(input, { client: fake.client });
+  expect(result.semantic?.assessment?.evidence[0]?.video_index).toBe(2);
+  expect(fake.requests[0].max_tokens).toBe(4000);
+  for (const id of ["video_1", "video_51", undefined]) {
+    const raw = JSON.stringify({ ...output, evidence: [{ ...output.evidence[0], evidence_id: id }] });
+    expect((await scoreAuthorWithModel(input, { client: clientFor(raw).client })).semantic?.failure).toBe("invalid_evidence");
+  }
 });
 
 test("没有词表命中也调用模型；缺粉丝也能语义上调", async () => {
@@ -68,8 +106,8 @@ test("仅有作品也调用模型，证据必须绑定正确作品和字段，�
   ] };
   const fake = clientFor(assessment);
   const result = await scoreAuthorWithModel(input, { client: fake.client });
-  expect(result).toMatchObject({ level: "high", semantic: { status: "model", prompt_version: "author-semantic/v3" } });
-  expect(JSON.parse(fake.requests[0].messages[1].content).recent_videos).toEqual(result.semantic?.recent_videos);
+  expect(result).toMatchObject({ level: "high", semantic: { status: "model", prompt_version: "author-semantic/v5" } });
+  expect(JSON.parse(fake.requests[0].messages[1].content).recent_videos).toEqual(result.semantic?.recent_videos.map((v, i) => ({ ...v, evidence_id: `video_${i + 1}` })));
   for (const evidence of [
     { field: "recent_videos.title", video_index: 2, quote: "先交费用" },
     { field: "recent_videos.title", quote: "先交费用" },
@@ -87,6 +125,17 @@ test("语义成功时标题由语义计分，不叠加标题词典分", async ()
   const result = await scoreAuthorWithModel(input, { client: fake.client });
   expect(result.score).toBe(74);
   expect(scoreAuthor(input).score).toBe(53);
+});
+
+test("大号语义 clean 降档进 low；小号、边界与缺粉丝数不降", async () => {
+  const assess = (sign: string) => clientFor({ risk_level: "clean", reason: "未见可疑内容", evidence: [{ field: "sign", quote: sign }] }).client;
+  const big = await scoreAuthorWithModel({ fans: 50_000, sign: "普通简介" }, { client: assess("普通简介") });
+  expect(big).toMatchObject({ score: 38, level: "low" });
+  expect(big.reasons.some((r) => r.includes("大号降档") && r.endsWith("-12"))).toBe(true);
+  expect((await scoreAuthorWithModel({ fans: 10_000, sign: "普通简介" }, { client: assess("普通简介") })).level).toBe("low");
+  expect((await scoreAuthorWithModel({ fans: 22, attention: 0, sign: "普通简介" }, { client: assess("普通简介") }))).toMatchObject({ score: 55, level: "medium" });
+  expect((await scoreAuthorWithModel({ sign: "普通简介" }, { client: assess("普通简介") }))).toMatchObject({ score: 50, level: "medium" });
+  expect((await scoreAuthorWithModel({ fans: Infinity, sign: "普通简介" }, { client: assess("普通简介") }))).toMatchObject({ score: 50, level: "medium" });
 });
 
 test("同资料落盘缓存命中不重复请求；坏缓存与 TTL=0 走真实请求", async () => {

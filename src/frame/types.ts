@@ -104,7 +104,7 @@ export interface FrameBundle {
   policy: FramePolicyInfo;
 }
 
-export const FRAME_POLICY_VERSION = "frames/v10";
+export const FRAME_POLICY_VERSION = "frames/v11";
 export const PLANNER_PROMPT_VERSION = "planner/v4";
 
 /** 一个窗口最多拼几张（九宫格上限） */

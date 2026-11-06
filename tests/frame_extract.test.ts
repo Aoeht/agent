@@ -169,7 +169,7 @@ describeWithFfmpeg("真实 ffmpeg 抽帧", () => {
     ]);
     expect({ code, error: code === 0 ? "" : stdout + stderr }).toEqual({ code: 0, error: "" });
     const manifest = JSON.parse(await fs.readFile(path.join(outDir, "manifest.json"), "utf8"));
-    expect(manifest.policy_version).toBe("frames/v10");
+    expect(manifest.policy_version).toBe("frames/v11");
     expect(manifest.windows).toHaveLength(4);
     expect(manifest.frames).toHaveLength(4);
     expect(manifest.grids).toHaveLength(1);
