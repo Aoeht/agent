@@ -10,7 +10,7 @@ import { PgKnowledgeStore, PgVectorCache, closePgPools } from "../src/rag/pg_sto
 import { createRagSearchTool } from "../src/tools/rag_search";
 import { createVectorCache } from "../src/rag/store_factory";
 import { indexDocuments } from "../src/rag/index_documents";
-import type { TavilyResponse, TavilySearchRequest } from "../src/tools/tavily_client";
+import type { TavilyResponse, TavilySearchRequest } from "../src/utils/tavily_client";
 
 let failures = 0;
 function check(condition: boolean, label: string, detail?: unknown): void {

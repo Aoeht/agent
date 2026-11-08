@@ -1,14 +1,10 @@
 // tests/inspect_link.test.ts
 import { test, expect } from "bun:test";
-import {
-  classifyNetworkFailure,
-  createInspectLinkTool,
-  detectProtection,
-  extractHtmlFeatures,
-  htmlToText,
-  isPrivateAddress,
-} from "../src/tools/inspect_link";
-import type { FetchLike, LookupLike } from "../src/tools/inspect_link";
+import { classifyNetworkFailure, createInspectLinkTool } from "../src/tools/inspect_link";
+import type { FetchLike } from "../src/tools/inspect_link";
+import { detectProtection, isPrivateAddress } from "../src/utils/web_guard";
+import type { LookupLike } from "../src/utils/web_guard";
+import { extractHtmlFeatures, htmlToText } from "../src/utils/html_text";
 
 const PUBLIC_LOOKUP: LookupLike = async (hostname) => [
   { address: hostname.endsWith("6") ? "2606:2800:220:1:248:1893:25c8:1946" : "93.184.216.34", family: hostname.endsWith("6") ? 6 : 4 },

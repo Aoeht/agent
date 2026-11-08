@@ -5,7 +5,8 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import readline from "node:readline/promises";
 import type { ToolRuntime } from "../core/types";
-import { assertPublicHost, detectProtection, extractHtmlFeatures } from "./inspect_link";
+import { assertPublicHost, detectProtection } from "../utils/web_guard";
+import { extractHtmlFeatures } from "../utils/html_text";
 import { captureVisibleScreenshot } from "./browser_screenshot";
 
 /** 独立浏览器上下文，不读取个人配置。路由检查是纵深防护，不是 OS 网络沙箱。 */

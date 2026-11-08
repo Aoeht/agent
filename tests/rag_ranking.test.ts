@@ -12,7 +12,7 @@ import { KnowledgeStore } from "../src/rag/knowledge_store";
 import { tokenize } from "../src/rag/tokenizer";
 import { createRagSearchTool } from "../src/tools/rag_search";
 import { ToolRegistry } from "../src/core/registry";
-import type { TavilyResponse, TavilySearchRequest } from "../src/tools/tavily_client";
+import type { TavilyResponse, TavilySearchRequest } from "../src/utils/tavily_client";
 
 let failures = 0;
 function check(condition: boolean, label: string, detail?: unknown): void {

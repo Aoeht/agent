@@ -11,7 +11,7 @@ import { KnowledgeStore, type TrustLevel } from "../src/rag/knowledge_store";
 import { HttpReranker, RERANK_MAX_DOCUMENTS, resolveRerankEndpoint, type Reranker } from "../src/rag/rerank";
 import { createQueryRewriterFromEnv, sanitizeRewrite, type QueryRewriter } from "../src/rag/rewrite";
 import { createRagSearchTool } from "../src/tools/rag_search";
-import type { TavilyResponse, TavilyResult, TavilySearchRequest } from "../src/tools/tavily_client";
+import type { TavilyResponse, TavilyResult, TavilySearchRequest } from "../src/utils/tavily_client";
 
 let failures = 0;
 function check(condition: boolean, label: string, detail?: unknown): void {

@@ -1,7 +1,8 @@
 import { test, expect } from "bun:test";
 import { Agent } from "../src/core/agent";
 import { ToolRegistry } from "../src/core/registry";
-import { createInspectLinkTool, detectProtection, isPrivateAddress } from "../src/tools/inspect_link";
+import { createInspectLinkTool } from "../src/tools/inspect_link";
+import { detectProtection, isPrivateAddress } from "../src/utils/web_guard";
 
 test("正常 CDN 页面和验证码组件不等于挑战页", () => {
   expect(detectProtection({ "cf-ray": "ray", "cf-cache-status": "HIT" }, "<h1>内容</h1>").blocked).toBe(false);

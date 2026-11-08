@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { ToolDefinition, defineTool } from "../core/types";
-import { tavilySearch } from "./tavily_client";
+import { tavilySearch } from "../utils/tavily_client";
 import { UNTRUSTED_DATA_NOTICE } from "../core/untrusted";
 
 const SearchParamsSchema = z.object({

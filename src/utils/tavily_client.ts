@@ -1,4 +1,4 @@
-// src/tools/tavily_client.ts
+// src/utils/tavily_client.ts（自 tools/ 下沉：rag 联网入库与 tavily_search 工具共用，消除 rag→tools 反向依赖）
 import { z } from "zod";
 
 const TAVILY_URL = "https://api.tavily.com/search";

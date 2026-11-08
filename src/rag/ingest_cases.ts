@@ -17,8 +17,8 @@ import { createKnowledgeStore } from "./store_factory";
 import { indexDocuments } from "./index_documents";
 import { closePgPools } from "./pg_store";
 import { fraudHits } from "./fraud_terms";
-import { tavilySearch } from "../tools/tavily_client";
-import { htmlToText } from "../tools/inspect_link";
+import { tavilySearch } from "../utils/tavily_client";
+import { htmlToText } from "../utils/html_text";
 
 const args = process.argv.slice(2);
 const TARGET = Number.parseInt(args.find((a) => !a.startsWith("--")) ?? "120", 10);

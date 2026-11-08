@@ -10,7 +10,7 @@ import { tokenize } from "../src/rag/tokenizer";
 import { chunkText } from "../src/rag/chunker";
 import { Bm25Index } from "../src/rag/bm25";
 import { KnowledgeStore, normalizeSource } from "../src/rag/knowledge_store";
-import { tavilySearch, TavilyError, TavilyResponse, TavilySearchRequest } from "../src/tools/tavily_client";
+import { tavilySearch, TavilyError, TavilyResponse, TavilySearchRequest } from "../src/utils/tavily_client";
 import { createRagSearchTool } from "../src/tools/rag_search";
 
 let failures = 0;

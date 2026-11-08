@@ -13,7 +13,7 @@ import { QueryRewriter } from "../rag/rewrite";
 import { RagTraceEvent, RagTraceInput, RagTraceSink } from "../rag/trace";
 import { docIsFraudRelated } from "../rag/fraud_terms";
 import { UNTRUSTED_DATA_NOTICE } from "../core/untrusted";
-import { tavilySearch, TavilyResponse, TavilySearchRequest } from "./tavily_client";
+import { tavilySearch, TavilyResponse, TavilySearchRequest } from "../utils/tavily_client";
 
 const RagSearchParamsSchema = z.object({
   query: z.string().trim().min(1, "query 不能为空").describe("检索查询，用于匹配知识库或实时情报"),
