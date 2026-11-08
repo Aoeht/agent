@@ -11,6 +11,7 @@ import { createKnowledgeStore, createVectorCache, VectorCacheLike } from "../rag
 import { Reranker } from "../rag/rerank";
 import { QueryRewriter } from "../rag/rewrite";
 import { RagTraceEvent, RagTraceInput, RagTraceSink } from "../rag/trace";
+import { docIsFraudRelated } from "../rag/fraud_terms";
 import { UNTRUSTED_DATA_NOTICE } from "../core/untrusted";
 import { tavilySearch, TavilyResponse, TavilySearchRequest } from "./tavily_client";
 
@@ -56,6 +57,12 @@ export interface RagSearchOptions {
   reranker?: Reranker | null;
   /** 送重排的候选数上限，缺省 20；超出的部分保持原排序跟在其后 */
   rerankCandidates?: number;
+  /**
+   * 联网结果入库闸门（缺省开）：只把反诈语义相关（fraud_terms 命中）的网页写进知识缓存。
+   * 知识库是本工具跨会话共用的资产，agent 会话里查什么都联网，不开闸会把无关网页沉淀成"知识"。
+   * 显式传 false 关闭（通用检索场景或测试）。
+   */
+  webIngestGate?: boolean;
   /**
    * 检索 trace 落盘通道；传入才记录（bootstrap 按 RAG_TRACE 环境变量接线），缺省不记录。
    * 每次调用一行 JSONL：阶段耗时、通道命中量、错误与结果元信息摘要（不含块正文）。
@@ -117,14 +124,15 @@ export function createRagSearchTool(options: RagSearchOptions = {}): ToolDefinit
   const rewriter = options.rewriter ?? undefined;
   const reranker = options.reranker ?? undefined;
   const rerankCandidates = options.rerankCandidates ?? 20;
+  const webIngestGate = options.webIngestGate ?? true;
   const traceSink = options.traceSink;
   const vectors = embeddings ? (options.vectorCache ?? createVectorCache(embeddings, options.cacheDir)) : undefined;
   /** 熔断：embedding 调用失败后退回纯词法，冷却期满自动重试（长驻 REPL 的一次网络抖动不该永久关闭语义通道） */
   const VECTOR_RETRY_COOLDOWN_MS = 60_000;
   let vectorDisabledUntil = 0;
 
-  /** 按块缓存分词结果：块 id 稳定且文本未变时直接复用，revision 变化不再全量 tokenize */
-  const tokenCache = new Map<string, { text: string; tokens: string[] }>();
+  /** 按块缓存分词结果：块文本与所属标题都未变时直接复用，revision 变化不再全量 tokenize */
+  const tokenCache = new Map<string, { text: string; title: string; tokens: string[] }>();
   let indexed: IndexState | undefined;
 
   async function getIndex(): Promise<IndexState> {
@@ -139,15 +147,19 @@ export function createRagSearchTool(options: RagSearchOptions = {}): ToolDefinit
 
     const index = indexed?.index ?? new Bm25Index();
     for (const id of [...index.keys()]) if (!chunks.has(id)) index.remove(id);
-    for (const [id, { text }] of chunks) {
+    for (const [id, { doc, text }] of chunks) {
+      const title = doc.title?.trim() ?? "";
       const cached = tokenCache.get(id);
-      if (cached?.text === text) {
+      if (cached?.text === text && cached.title === title) {
         // 分词可复用：只有该块还没进索引时才补一条
         if (!index.has(id)) index.add({ id, tokens: cached.tokens });
         continue;
       }
-      const tokens = tokenize(text);
-      tokenCache.set(id, { text, tokens });
+      // 标题词整份重复一次进索引（每词计 3 次）：块文本不含所属标题，官方通报的关键手法词
+      // （杀猪盘/机票退改签）常只在标题出现，不带标题上下文会漏召回；tf 饱和下这是温和加权
+      const titleTokens = title === "" ? [] : tokenize(title);
+      const tokens = [...tokenize(text), ...titleTokens, ...titleTokens];
+      tokenCache.set(id, { text, title, tokens });
       index.add({ id, tokens });
     }
     for (const id of [...tokenCache.keys()]) if (!chunks.has(id)) tokenCache.delete(id);
@@ -259,8 +271,13 @@ export function createRagSearchTool(options: RagSearchOptions = {}): ToolDefinit
     }
   }
 
-  // 写路径：联网取回 → 入库 → 为每篇新文档挑出与查询最贴近的块；跨语言对不上词时按 Tavily 分退回首块
-  async function ingestWeb(query: string, need: number, vectorErrors: string[], signal?: AbortSignal): Promise<Candidate[]> {
+  // 写路径：联网取回 → 语义闸门 → 入库 → 为每篇新文档挑出与查询最贴近的块；跨语言对不上词时按 Tavily 分退回首块
+  async function ingestWeb(
+    query: string,
+    need: number,
+    vectorErrors: string[],
+    signal?: AbortSignal
+  ): Promise<{ candidates: Candidate[]; rejectedCount: number }> {
     const response = await webSearch({
       query,
       maxResults: need,
@@ -268,8 +285,13 @@ export function createRagSearchTool(options: RagSearchOptions = {}): ToolDefinit
       includeRawContent: true,
       ...(signal ? { signal } : {}),
     });
+    // 入库闸门：知识缓存是跨会话资产，只留反诈语义相关的网页，其余只参与本次作答不入库
+    const accepted = webIngestGate
+      ? response.results.filter((r) => docIsFraudRelated(r.title, (r.rawContent || r.content || "").trim()))
+      : response.results;
+    const rejectedCount = response.results.length - accepted.length;
     const saved = await store.upsert(
-      response.results.map((r) => ({
+      accepted.map((r) => ({
         source: r.url,
         title: r.title,
         content: r.rawContent || r.content,
@@ -327,7 +349,7 @@ export function createRagSearchTool(options: RagSearchOptions = {}): ToolDefinit
       seenDocs.add(candidate.doc.id);
       onePerDoc.push(candidate);
     }
-    return onePerDoc.concat(ordered);
+    return { candidates: onePerDoc.concat(ordered), rejectedCount };
   }
 
   return defineTool({
@@ -400,7 +422,7 @@ export function createRagSearchTool(options: RagSearchOptions = {}): ToolDefinit
           use_cache: params.use_cache,
           latency_ms: elapsed(traceStarted),
           stages_ms: stageMs,
-          counts: { ...traceCounts },
+          counts: { ...traceCounts, ...(webRejected > 0 ? { web_rejected: webRejected } : {}) },
           ...(rewrittenQuery ? { rewritten_query: rewrittenQuery } : {}),
           ...(reranker ? { rerank_model: reranker.model } : {}),
           ...(rewriteError || rerankError || semanticErrors.length > 0 || webError
@@ -470,14 +492,16 @@ export function createRagSearchTool(options: RagSearchOptions = {}): ToolDefinit
 
       // 3. 本地不足时联网补充；失败时有本地结果就带着错误说明返回，没有才抛给模型
       let webError: string | undefined;
+      let webRejected = 0;
       if (selected.length < params.top_k) {
         mark = performance.now();
         try {
           const fetched = await ingestWeb(await ensureRewrite(), params.top_k - selected.length, semanticErrors, runtime?.signal);
           stageMs.web = elapsed(mark);
-          traceCounts.web_fetched = fetched.length;
-          remember(fetched);
-          take(fetched);
+          webRejected = fetched.rejectedCount;
+          traceCounts.web_fetched = fetched.candidates.length;
+          remember(fetched.candidates);
+          take(fetched.candidates);
         } catch (error) {
           stageMs.web = elapsed(mark);
           if (runtime?.signal?.aborted) throw error;

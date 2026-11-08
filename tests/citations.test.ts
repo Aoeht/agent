@@ -217,7 +217,8 @@ test("真实 RAG 多轮检索：跨工具去重、同源多块共用全局编号
     expect(result.citations[1]!.title).toBe("https://example.com/new");
     const messages = result.messages.filter(m => m.role === "tool");
     const payload = (i: number) => JSON.parse(String(messages[i]!.content).split("\n\n").slice(1).join("\n\n"));
-    expect(payload(1).results.map((r: any) => r.ref)).toEqual([1, 2]);
+    // 标题注入让带标题的"重复来源"块更长，长度归一下近平局排序互换：new 先出（ref 2），existing 复用全局 [1]
+    expect(payload(1).results.map((r: any) => r.ref)).toEqual([2, 1]);
     expect(payload(2).results.map((r: any) => r.ref)).toEqual([3, 3]);
     expect(payload(2).sources).toHaveLength(1);
     expect(payload(2).results.every((r: any) => r.chunk_id && r.content)).toBe(true);

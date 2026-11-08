@@ -4,6 +4,7 @@
 delete process.env.EMBEDDING_MODEL;
 delete process.env.RAG_PG_URL; // 同理：不让默认装配悄悄切到 PostgreSQL，PG 路径由 rag_pg.test.ts 专门测
 import fs from "node:fs/promises";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { tokenize } from "../src/rag/tokenizer";
 import { chunkText } from "../src/rag/chunker";
@@ -358,12 +359,22 @@ async function testRagTool() {
   check(web.calls.length === 1, "本地足够时不联网", web.calls.length);
   check(second.results[0]?.origin === "cache" && second.results[0].content.includes("客服"), "命中本地缓存", second);
 
-  // 3. use_cache=false 强制联网，但不清空已有缓存
-  const otherWeb = fakeWeb([{ title: "红烧肉", url: "https://food.example/r", content: COOKING_DOC }]);
+  // 3. use_cache=false 强制联网，但不清空已有缓存（入库闸门默认开，stub 用反诈内容）
+  const otherWeb = fakeWeb([{ title: "刷单诈骗通报", url: "https://law.example/scam2", content: POLICY_DOC }]);
   const refreshTool = createRagSearchTool({ cacheDir: dir, webSearch: otherWeb });
-  await refreshTool.execute({ query: "红烧肉做法", top_k: 1, use_cache: false });
+  await refreshTool.execute({ query: "电信诈骗新手法通报", top_k: 1, use_cache: false });
   const merged = JSON.parse(await fs.readFile(path.join(dir, "knowledge.json"), "utf-8"));
   check(otherWeb.calls.length === 1 && merged.docs.length === 3, "use_cache=false 合并写入而不是覆盖", merged.docs.length);
+
+  // 3b. 入库闸门：非反诈网页只参与本次作答，不写进知识缓存
+  const gateDir = dirFor("gate");
+  const gated = (await createRagSearchTool({
+    cacheDir: gateDir,
+    webSearch: fakeWeb([{ title: "红烧肉", url: "https://food.example/r", content: COOKING_DOC }]),
+  }).execute({ query: "红烧肉做法", top_k: 1 })) as RagOutput;
+  const gateFile = path.join(gateDir, "knowledge.json");
+  const gateDocs = existsSync(gateFile) ? (JSON.parse(await fs.readFile(gateFile, "utf-8")).docs as unknown[]).length : 0;
+  check(gated.result_count === 0 && gateDocs === 0, "入库闸门拦下非反诈网页：不误作答、缓存不脏", { result_count: gated.result_count, docs: gateDocs });
 
   // 4. 跨语言：词对不上时仍返回 Tavily 判定相关的新文档（取首块）
   const englishWeb = fakeWeb([{ title: "Refund scam", url: "https://en.example/s", content: "Scammers pose as customer service agents and offer refunds." }]);

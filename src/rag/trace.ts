@@ -38,6 +38,8 @@ export interface RagTraceEvent {
     pool: number;
     /** 联网取回的文档数 */
     web_fetched: number;
+    /** 被入库闸门拦下的网页数（闸门开启且有拦截时才出现） */
+    web_rejected?: number;
     /** 最终返回条数 */
     results: number;
   };
