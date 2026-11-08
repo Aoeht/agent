@@ -165,7 +165,10 @@ export function registerSessionTools(
   registry.register(createIngestFindingsTool());
   // 反诈经验库沉淀：scanner 报告的 novel_pattern 经主对话调用落成经验卡草稿，
   // 语义查重防重复、跨视频计数达标自动转正；入库与向量同步复用 rag 管线
-  registry.register(createRecordPatternTool({ mainModel: options.config?.model }));
+  // mainModel 缺省时不传该键（exactOptionalPropertyTypes 下可选属性不能显式收 undefined）
+  registry.register(
+    createRecordPatternTool({ ...(options.config?.model !== undefined ? { mainModel: options.config.model } : {}) })
+  );
   // B 站视频快照读数：读取 dataset/<BV>.json（独立采集流程产物）做证据预处理，
   // 供 scanner 子代理与主对话直接调用；快照缺失时报错并指引，不影响其它工具
   registry.register(createBiliCollectTool());
