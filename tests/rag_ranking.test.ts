@@ -152,20 +152,22 @@ async function testTrustWeighting() {
 
 async function testTavilyScoreUsage() {
   const dir = dirFor("web-score");
-  // 两篇英文文档：本地词法都对不上中文查询，只能靠 Tavily score 决定先后
+  // 两篇英文反诈文档：本地词法都对不上中文查询，只能靠 Tavily score 决定先后；
+  // 再混一篇 Tavily 分最高的非反诈页，验证入库闸门把它拦下（既不入库也不参与本次作答）
   const web = fakeWeb([
-    { title: "Low relevance", url: "https://low.example/a", content: "A generic consumer protection notice.", score: 0.21 },
+    { title: "Gardening", url: "https://noise.example/n", content: "Totally unrelated English text about gardening.", score: 0.95 },
+    { title: "Prize scam", url: "https://low.example/a", content: "Scammers claim you won a prize and ask for a handling fee first.", score: 0.21 },
     { title: "Refund scam", url: "https://high.example/b", content: "Scammers pose as support agents and push fake refunds.", score: 0.93 },
   ]);
-  const out = (await makeTool(dir, web).execute({ query: "退款诈骗", top_k: 2 })) as RagOutput;
-  check(out.result_count === 2, "跨语言场景仍返回两条", out.result_count);
+  const out = (await makeTool(dir, web).execute({ query: "退款诈骗", top_k: 3 })) as RagOutput;
+  check(out.result_count === 2, "跨语言场景返回两条反诈结果，非反诈高分页被闸门拦下", out.result_count);
   check(out.results[0]?.source === "https://high.example/b", "Tavily 高分文档排在前面", out.results.map((r) => [r.source, r.web_score]));
   check(out.results[0]?.web_score === 0.93 && out.results[1]?.web_score === 0.21, "web_score 透传原始相关性分", out.results.map((r) => r.web_score));
 
-  // 有词法命中时 BM25 优先，web_score 只是附带信息
+  // 有词法命中时 BM25 优先，web_score 只是附带信息（对照文档是反诈相关但词法对不上的英文页）
   const mixedWeb = fakeWeb([
     { title: "命中词法", url: "https://lexical.example/c", content: SCAM_DOC, score: 0.3 },
-    { title: "无词法命中", url: "https://nolocal.example/d", content: "Totally unrelated English text about gardening.", score: 0.95 },
+    { title: "无词法命中", url: "https://nolocal.example/d", content: "Scammers pose as bank staff and push screen sharing apps to watch victims.", score: 0.95 },
   ]);
   const mixed = (await makeTool(dir, mixedWeb).execute({ query: "客服退款诈骗 屏幕共享", top_k: 2 })) as RagOutput;
   check(mixed.results[0]?.source === "https://lexical.example/c", "本地能对上词的文档不被 Tavily 高分挤掉", mixed.results.map((r) => [r.source, r.web_score]));

@@ -285,7 +285,8 @@ export function createRagSearchTool(options: RagSearchOptions = {}): ToolDefinit
       includeRawContent: true,
       ...(signal ? { signal } : {}),
     });
-    // 入库闸门：知识缓存是跨会话资产，只留反诈语义相关的网页，其余只参与本次作答不入库
+    // 入库闸门：知识缓存是跨会话资产，只留反诈语义相关的网页；被拦下的既不入库也不参与本次作答，
+    // 防止不相关的"高分"网页挤占 top_k（对反诈问答没有价值的来源宁可少答）
     const accepted = webIngestGate
       ? response.results.filter((r) => docIsFraudRelated(r.title, (r.rawContent || r.content || "").trim()))
       : response.results;
