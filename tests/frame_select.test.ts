@@ -62,7 +62,8 @@ describe("召回回归", () => {
     expect(windows.some((window) => window.source === "coverage" && window.end_s > 100)).toBe(true);
     const empty = appendCoverageWindows([], 120, budget);
     expect(empty).toHaveLength(4);
-    expect(selectFrameCandidates({ windows: empty, budget }).selected).toHaveLength(4);
+    // 覆盖窗按窗长铺探针（30s 窗约 4 帧），空计划全片约 7.4s 一帧
+    expect(selectFrameCandidates({ windows: empty, budget }).selected).toHaveLength(16);
   });
 
   test("覆盖预留不被大量重点窗口挤掉，且覆盖跨越全片", () => {
@@ -75,7 +76,8 @@ describe("召回回归", () => {
     const windows = [...planned, ...coverage];
     const result = selectFrameCandidates({ windows, budget: { ...frameBudgetFor("clean"), max_frames: 10 } });
     expect(result.selected).toHaveLength(10);
-    expect(result.selected.filter((item) => item.window_index > 20).map((item) => item.t)).toEqual([205, 395]);
+    // 覆盖窗均匀铺探针后，每窗配额 1 帧取同分中间点（不再是段中点 205/395）
+    expect(result.selected.filter((item) => item.window_index > 20).map((item) => item.t)).toEqual([204.5, 394.5]);
     const single = selectFrameCandidates({ windows, budget: { ...frameBudgetFor("clean"), max_frames: 1 } });
     expect(single.selected).toHaveLength(1);
     expect(single.selected[0]!.window_index).toBeLessThanOrEqual(20);
@@ -89,7 +91,8 @@ describe("召回回归", () => {
       windows: [0, 10].map((start_s) => ({ start_s, end_s: start_s + 10, reason: "覆盖", source: "coverage" })),
       budget: frameBudgetFor("clean"), profile,
     });
-    expect(result.selected.map((item) => item.t)).toEqual([8, 18]);
+    // 变化峰值（8/18）以更高分保留，均匀探针补齐其余格位
+    expect(result.selected.map((item) => item.t)).toEqual([1.5, 4.5, 7.5, 8, 11.5, 14.5, 17.5, 18]);
   });
 
   test("文字变化不被整图哈希抹掉，限额覆盖文字变化的首尾", () => {
@@ -127,26 +130,55 @@ describe("候选去重", () => {
 
   test("相同画面的普通候选被去重，focus 永远保留", () => {
     const kept = dedupeByHash([
-      candidate(1, "interval", 40, "0000000000000000"),
-      candidate(2, "interval", 40, "0000000000000000"),
+      candidate(1, "state", 70, "0000000000000000"),
+      candidate(2, "state", 70, "0000000000000000"),
       candidate(3, "focus", 100, "0000000000000000"),
     ]);
-    expect(kept.map((item) => item.reason).sort()).toEqual(["focus", "interval"]);
+    expect(kept.map((item) => item.reason).sort()).toEqual(["focus", "state"]);
   });
 
   test("硬切只去近乎相同的帧，普通帧允许更大距离", () => {
     const base = "0".repeat(16);
     const near = `${"0".repeat(15)}f`;
     const normal = dedupeByHash([
-      candidate(1, "interval", 40, base),
-      candidate(2, "interval", 40, near),
+      candidate(1, "state", 70, base),
+      candidate(2, "state", 70, near),
     ]);
     expect(normal).toHaveLength(1);
     const withScene = dedupeByHash([
-      candidate(1, "interval", 40, base),
+      candidate(1, "state", 70, base),
       candidate(2, "scene", 80, near),
     ]);
     expect(withScene).toHaveLength(2);
+  });
+
+  test("interval 探针不做整图哈希去重：静态视频后出现的叠加不被坍缩", () => {
+    const kept = dedupeByHash([
+      candidate(1, "interval", 40, "0000000000000000"),
+      candidate(4, "interval", 40, "0000000000000000"),
+      candidate(7, "interval", 40, "0000000000000000"),
+    ]);
+    expect(kept).toHaveLength(3);
+  });
+
+  test("短窗口按窗长加密探针：开头出现的叠加不被跳过", () => {
+    const result = selectFrameCandidates({
+      windows: [{ start_s: 0, end_s: 12, reason: "试看开头" }],
+      budget: frameBudgetFor("medium"),
+    });
+    // probeStep = min(30, 12/4) = 3 → 探针 1/4/7/10 + 窗尾 11.5
+    expect(result.selected.map((item) => item.t)).toEqual([1, 4, 7, 10, 11.5]);
+  });
+
+  test("覆盖窗口均匀铺探针，不再每窗一帧", () => {
+    const result = selectFrameCandidates({
+      windows: [{ start_s: 30.5, end_s: 40.4, reason: "覆盖", source: "coverage" }],
+      budget: frameBudgetFor("medium"),
+    });
+    const ts = result.selected.map((item) => item.t);
+    expect(ts.length).toBeGreaterThanOrEqual(3);
+    // 段内后段（如 38s 起的证据窗）也有落点
+    expect(ts.some((t) => t >= 38)).toBe(true);
   });
 });
 
@@ -268,7 +300,8 @@ describe("黑屏过滤", () => {
       profile,
       sceneTimes: new Map(),
     });
-    expect(result.selected.map((item) => item.t)).toEqual([2]);
+    // 黑屏 0.5s 不出现；多探针后窗口保留 1.5/2/4.5/7.5，首个可见点 2 仍在其中
+    expect(result.selected.map((item) => item.t)).toEqual([1.5, 2, 4.5, 7.5]);
   });
 });
 

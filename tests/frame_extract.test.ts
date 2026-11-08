@@ -169,9 +169,10 @@ describeWithFfmpeg("真实 ffmpeg 抽帧", () => {
     ]);
     expect({ code, error: code === 0 ? "" : stdout + stderr }).toEqual({ code: 0, error: "" });
     const manifest = JSON.parse(await fs.readFile(path.join(outDir, "manifest.json"), "utf8"));
-    expect(manifest.policy_version).toBe("frames/v11");
+    expect(manifest.policy_version).toBe("frames/v12");
     expect(manifest.windows).toHaveLength(4);
-    expect(manifest.frames).toHaveLength(4);
+    // frames/v12：覆盖窗按窗长铺探针，12s 短片约 2s 一帧（v11 为每窗 1 帧）
+    expect(manifest.frames).toHaveLength(6);
     expect(manifest.grids).toHaveLength(1);
     expect(manifest.frames.at(-1).t).toBeGreaterThan(9);
   });

@@ -240,7 +240,10 @@ function windowCandidates(
 
   const isCoverage = window.source === "coverage";
   if (!isCoverage) {
-    for (let t = start + 1; t < end - 0.05; t += probeEveryS) add(t, "interval", SCORE.probe);
+    // 短窗口按窗长收敛探针间隔（最长 span/4）：12s 的"试看开头"窗只按 30s 间隔探针
+    // 会漏掉开头几秒才出现的二维码/联系方式叠加。
+    const probeStep = Math.min(probeEveryS, Math.max(2, (end - start) / 4));
+    for (let t = start + 1; t < end - 0.05; t += probeStep) add(t, "interval", SCORE.probe);
     add(Math.max(start, end - 0.5), "interval", SCORE.probe);
 
     if (profile !== undefined && profile.samples.length > 0) {
@@ -280,13 +283,20 @@ function windowCandidates(
       for (const t of evenlyPick(textTimes, textMax)) add(t, "text", SCORE.text);
     }
   } else {
-    // 每段选变化最明显的可见点；同分靠近中点，无画像时直接取中点。
+    // 覆盖窗口均匀铺探针，不只取一个代表点：段内的短证据窗（开头二维码、
+    // 中途出现的联系方式）靠间隔采样兜底，预算由配额统一约束。
+    // 间隔随窗长收敛在 3~20s；变化最明显的可见点仍优先保留。
+    const span = end - start;
+    const step = Math.min(20, Math.max(3, span / 4));
     const midpoint = (start + end) / 2;
     const representative = profile?.samples
       .filter((sample) => sample.t >= start && sample.t < end && sample.luminance >= blackLuminance)
       .sort((a, b) => (b.change + b.text_change) - (a.change + a.text_change)
         || Math.abs(a.t - midpoint) - Math.abs(b.t - midpoint))[0];
-    add(representative?.t ?? midpoint, "interval", SCORE.probe);
+    // 代表点比盲探针高 10 分：配额只有 1 帧时保变化峰值，不被均匀探针挤掉
+    if (representative) add(representative.t, "interval", SCORE.probe + 10);
+    for (let t = start + step / 2; t < end - 0.05; t += step) add(t, "interval", SCORE.probe);
+    if (candidates.length === 0) add(midpoint, "interval", SCORE.probe);
   }
 
   if (candidates.length === 0) {
@@ -319,7 +329,11 @@ export function dedupeByHash(
   const kept: FrameCandidate[] = [];
   const keptHashes: Array<{ hash: string; bits: bigint; strict: boolean }> = [];
   for (const candidate of ordered) {
-    if (candidate.reason === "focus" || candidate.reason === "text" || candidate.hash === undefined) {
+    // interval 探针不做整图哈希去重：静态视频里后出现的二维码/文字叠加
+    // 与首帧哈希几乎相同，去重会把整窗坍缩成 1 帧；探针分数最低，
+    // 预算紧张时本来就会被配额挤掉，保留它只是花掉闲置额度。
+    if (candidate.reason === "focus" || candidate.reason === "text"
+      || candidate.reason === "interval" || candidate.hash === undefined) {
       kept.push(candidate);
       continue;
     }
@@ -452,12 +466,32 @@ export function selectFrameCandidates(params: SelectFramesParams): SelectionResu
     window.source === "coverage" && capacities[index]! > 0 ? [index] : []);
   const planCapacities = capacities.map((capacity, index) => windows[index]!.source === "coverage" ? 0 : capacity);
   const planCapacity = planCapacities.reduce((sum, capacity) => sum + capacity, 0);
-  const reserved = Math.min(coverageIndexes.length, budget.max_frames, Math.max(
+  const coverageDemand = coverageIndexes.reduce((sum, index) => sum + capacities[index]!, 0);
+  const reserved = Math.min(coverageDemand, budget.max_frames, Math.max(
     budget.max_frames - planCapacity,
     Math.min(Math.ceil(budget.max_frames * 0.2), Math.max(0, budget.max_frames - 1)),
   ));
   const quotas = allocateQuotas(priorityWindows, planCapacities, budget.max_frames - reserved);
-  for (const index of evenlyPick(coverageIndexes, reserved)) quotas[index] = 1;
+  // 覆盖配额分两步：先给均匀选取的覆盖窗各保底 1 帧（跨越全片），
+  // 再把剩余预留逐轮加深——静态短视频的段内叠加靠第二三轮探针兜底。
+  let left = reserved;
+  const pickedCoverage = evenlyPick(coverageIndexes, Math.min(coverageIndexes.length, left));
+  for (const index of pickedCoverage) {
+    if (left <= 0) break;
+    quotas[index] = 1;
+    left -= 1;
+  }
+  while (left > 0) {
+    let progressed = false;
+    for (const index of pickedCoverage) {
+      if (left <= 0) break;
+      if ((quotas[index] ?? 0) >= capacities[index]!) continue;
+      quotas[index] = (quotas[index] ?? 0) + 1;
+      left -= 1;
+      progressed = true;
+    }
+    if (!progressed) break;
+  }
 
   const selected: FrameCandidate[] = [];
   for (let index = 0; index < windows.length; index += 1) {
