@@ -3,7 +3,7 @@
  * 语料清理 CLI：备份 → 按"诈骗语义"分类 → 可选执行删除。
  *
  *   bun run rag:prune              只出报告与备份，一个字都不删
- *   bun run rag:prune --apply      删掉未命中语义的文档（internal 一律删，网页按正文判定）
+ *   bun run rag:prune --apply      删掉未命中语义的文档（internal 一律保留，网页按正文判定）
  *
  * 判定看正文而不是标题：繁体「虛假投資平台名單」这类标题用简体关键词匹配不到，
  * 而正文里有诈骗语义的文档必须留下。备份写在 .rag-cache/backups/（已 gitignore），
@@ -26,7 +26,8 @@ const store = createKnowledgeStore();
 const docs = await store.list();
 const chunksOf = (list: typeof docs) => list.reduce((n, d) => n + d.chunks.length, 0);
 
-const keep = docs.filter((d) => d.trust === "web" && docIsFraudRelated(d.title, bodyOf(d)));
+/** internal 是人工导入的权威资料，一律保留；网页按正文反诈语义判定 */
+const keep = docs.filter((d) => d.trust === "internal" || docIsFraudRelated(d.title, bodyOf(d)));
 const drop = docs.filter((d) => !keep.includes(d));
 
 const dir = path.join(".rag-cache", "backups", new Date().toISOString().slice(0, 10));
