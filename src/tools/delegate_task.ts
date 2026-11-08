@@ -99,6 +99,7 @@ const SCANNER_REPORT_SCHEMA =
   `"author":{"risk_level":"...","signals":["..."],"reason":"..."},` +
   `"comments":{"risk_level":"...","reason":"..."},` +
   `"links":[{"url":"...","verdict":"采证结论","signals":["..."]}],` +
+  `"novel_pattern":null或{"name":"套路名","scripts":["话术摘录"],"signals":["风险信号"],"evidence":"时间戳+原文摘录"},` +
   `"unresolved":["..."]}`;
 
 const childSystemPrompt = (role: string, sandboxRoot: string): string => {
@@ -113,7 +114,8 @@ const childSystemPrompt = (role: string, sandboxRoot: string): string => {
       "固定流程：\n" +
       "1. bili_collect 读快照拿证据（风险窗口/命中评论/链接候选/作者卡片）。快照缺失或所有维度都无数据时直接结束，报告无法扫描。\n" +
       "2. 对提取到的链接逐一 inspect_link 采证（至多 5 条，优先标题/简介、置顶与高赞评论里的）；采证受限（不可达/被拦截）如实记录，不作定性。\n" +
-      "3. rag_search 对照反诈知识库中的已知套路（1~2 次）。\n" +
+      "3. rag_search 对照反诈知识库中的已知套路（1~2 次）。发现疑似知识库未覆盖的新套路时，" +
+      "在报告 novel_pattern 字段做标记（套路名/话术摘录/风险信号/证据），只标记不定性；是否沉淀进经验库由主对话决定。\n" +
       "4. 得出三维度结论后逐条 ingest_findings 落库：source 填 scan_video，subject 填 BV 号，" +
       "dedupe_key 分别填 BV号:video、BV号:author、BV号:comments。\n" +
       "作者维度在已知 author.mid（或 video.owner_mid）时附 author_risk:{owner_mid,risk_level} 和具体 evidence；" +
