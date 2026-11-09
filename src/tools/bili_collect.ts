@@ -167,6 +167,9 @@ async function collectEvidence(bvid: string, datasetDir: string): Promise<string
           ...(video.owner_name !== undefined ? { owner_name: video.owner_name } : {}),
           ...(video.owner_mid !== undefined ? { owner_mid: video.owner_mid } : {}),
           tags: video.tags.slice(0, 20),
+          // 统计缺失代表未采到/稿件下架，不是零；availability 如实透传，供判定时"不当作低风险依据"
+          ...(video.stat !== undefined ? { stat: video.stat } : {}),
+          ...(video.availability !== undefined ? { availability: video.availability } : {}),
         }
       : null,
     author: author

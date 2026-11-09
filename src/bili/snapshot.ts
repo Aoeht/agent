@@ -37,6 +37,18 @@ export const VideoMetaSchema = z.object({
   owner_name: z.string().optional(),
   owner_mid: z.number().optional(),
   tags: z.array(z.string()).default([]),
+  /** 稿件可见性备注（如"稿件已不可见（B站删除/屏蔽）"）；缺失表示本次采集时可见 */
+  availability: z.string().optional(),
+  /** 采集侧的播放/互动统计（views/likes/coins/favorites/shares/comment_count）；缺失表示未采到，不是零 */
+  stat: z.object({
+    view: z.number().nonnegative().optional(),
+    like: z.number().nonnegative().optional(),
+    coin: z.number().nonnegative().optional(),
+    favorite: z.number().nonnegative().optional(),
+    share: z.number().nonnegative().optional(),
+    reply: z.number().nonnegative().optional(),
+    danmaku: z.number().nonnegative().optional(),
+  }).optional(),
 });
 
 export const AuthorSchema = z.object({
