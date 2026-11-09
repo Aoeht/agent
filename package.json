@@ -13,6 +13,7 @@
     "eval:frames": "bun run benchmarks/scanner_frame_coverage.ts",
     "eval:rag": "bun run benchmarks/rag_eval.ts",
     "trace:report": "bun run benchmarks/trace_report.ts",
+    "trace:view": "bun run benchmarks/trace_view.ts",
     "test:memory": "bun test tests/memory tests/context_compression",
     "test:scanner": "bun test tests/scanner tests/bili_snapshot tests/bili_collect",
     "fmt": "bun fmt src/",
