@@ -27,6 +27,7 @@ import { createBiliCollectTool } from "../src/tools/bili_collect";
 import { createIngestFindingsTool } from "../src/tools/ingest_findings";
 import { createInspectLinkTool } from "../src/tools/inspect_link";
 import { createRagSearchTool } from "../src/tools/rag_search";
+import { createReadImageTool } from "../src/tools/read_image";
 import { cannedCases, cannedReports } from "./scanner/fixtures";
 
 // ---------- 口径与归一 ----------
@@ -408,18 +409,22 @@ export interface ScannerSourceRegistryOptions {
   datasetDir: string;
   /** ingest_findings 落盘位置：评测一律指向评测工作目录，绝不写真实 .agent-data/findings.jsonl */
   findingsStorePath: string;
+  /** read_image 的沙箱根：九宫格需放在该目录内（评测侧一般用 workDir） */
+  sandboxRoot: string;
   /** 测试注入的假工具；缺省用真实工厂（datasetDir 由评测侧固定，子代理不可指定任意路径） */
   biliCollect?: ToolDefinition;
   inspectLink?: ToolDefinition;
   ragSearch?: ToolDefinition;
+  readImage?: ToolDefinition;
 }
 
-/** scanner 白名单之外的 4 个领域工具的注册来源：默认真实工具 + 评测侧的隔离配置 */
+/** scanner 白名单之外领域工具的注册来源：默认真实工具 + 评测侧的隔离配置 */
 export function createScannerSourceRegistry(options: ScannerSourceRegistryOptions): ToolRegistry {
   const registry = new ToolRegistry();
   registry.register(options.biliCollect ?? createBiliCollectTool({ datasetDir: options.datasetDir }));
   registry.register(options.ragSearch ?? createRagSearchTool());
   registry.register(options.inspectLink ?? createInspectLinkTool());
+  registry.register(options.readImage ?? createReadImageTool({ sandboxRoot: options.sandboxRoot }));
   registry.register(createIngestFindingsTool({ storePath: options.findingsStorePath }));
   return registry;
 }
@@ -433,7 +438,7 @@ export interface LiveScanPredictorOptions {
   client?: OpenAI;
   budget?: DelegateBudget;
   maxIterations?: number;
-  tools?: { biliCollect?: ToolDefinition; inspectLink?: ToolDefinition; ragSearch?: ToolDefinition };
+  tools?: { biliCollect?: ToolDefinition; inspectLink?: ToolDefinition; ragSearch?: ToolDefinition; readImage?: ToolDefinition };
 }
 
 export function createLiveScanPredictor(options: LiveScanPredictorOptions): ScanPredictor & { registry: ToolRegistry } {
@@ -442,6 +447,7 @@ export function createLiveScanPredictor(options: LiveScanPredictorOptions): Scan
   const source = createScannerSourceRegistry({
     datasetDir: options.datasetDir,
     findingsStorePath: path.join(options.workDir, "findings.jsonl"),
+    sandboxRoot: options.workDir,
     ...(options.tools ?? {}),
   });
   const delegate = createDelegateTaskTool({
@@ -453,7 +459,7 @@ export function createLiveScanPredictor(options: LiveScanPredictorOptions): Scan
     ...(options.budget ? { budget: options.budget } : {}),
   });
   const predict = async (c: ScannerGoldCase): Promise<ScanOutcome> => {
-    const observation = await delegate.execute({ role: "scanner", goal: `扫描 ${c.id} 的诈骗风险，报告风险等级与证据。` });
+    const observation = await delegate.execute({ role: "scanner", goal: `扫描 ${c.id} 的诈骗风险，报告风险等级与证据。工作区 frames/${c.id}/ 下如有九宫格请逐张查看。` });
     const raw = typeof observation === "string" ? observation : JSON.stringify(observation);
     const report = parseScannerReport(raw);
     await fs.mkdir(rawDir, { recursive: true });

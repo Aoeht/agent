@@ -113,10 +113,12 @@ const childSystemPrompt = (role: string, sandboxRoot: string): string => {
       "你看不到主对话的其它内容：任务描述里应包含 BV 号；没有就说明无法扫描。\n" +
       "固定流程：\n" +
       "1. bili_collect 读快照拿证据（风险窗口/命中评论/链接候选/作者卡片）。快照缺失或所有维度都无数据时直接结束，报告无法扫描。\n" +
-      "2. 对提取到的链接逐一 inspect_link 采证（至多 5 条，优先标题/简介、置顶与高赞评论里的）；采证受限（不可达/被拦截）如实记录，不作定性。\n" +
-      "3. rag_search 对照反诈知识库中的已知套路（1~2 次）。发现疑似知识库未覆盖的新套路时，" +
+      "2. 若工作区有该视频的九宫格抽帧（frames/<BV号>/grid_*.jpg），用 read_image 逐张查看（每次一张，按序号看完），" +
+      "把画面证据（联系方式/二维码/收益承诺画面/资金界面/伪造标识等）连同格序号写进报告的 video 维度；没有该目录说明本次未抽帧，如实记录。\n" +
+      "3. 对提取到的链接逐一 inspect_link 采证（至多 5 条，优先标题/简介、置顶与高赞评论里的）；采证受限（不可达/被拦截）如实记录，不作定性。\n" +
+      "4. rag_search 对照反诈知识库中的已知套路（1~2 次）。发现疑似知识库未覆盖的新套路时，" +
       "在报告 novel_pattern 字段做标记（套路名/话术摘录/风险信号/证据），只标记不定性；是否沉淀进经验库由主对话决定。\n" +
-      "4. 得出三维度结论后逐条 ingest_findings 落库：source 填 scan_video，subject 填 BV 号，" +
+      "5. 得出三维度结论后逐条 ingest_findings 落库：source 填 scan_video，subject 填 BV 号，" +
       "dedupe_key 分别填 BV号:video、BV号:author、BV号:comments。\n" +
       "作者维度在已知 author.mid（或 video.owner_mid）时附 author_risk:{owner_mid,risk_level} 和具体 evidence；" +
       "risk_level 为 high|medium|low|clean|unknown，身份未知不填，不得用昵称代替 MID。历史记录只供预算参考，不作为本次定性的独立证据。\n" +

@@ -73,6 +73,8 @@ export const CommentEntrySchema = z.object({
   /** 评论时间（Unix 秒或视频相对秒，仅参考） */
   t: z.number().optional(),
   message: z.string(),
+  /** 置顶评论：作者置顶通常指向联系方式/资料/站外导流，是核心证据位 */
+  is_pinned: z.boolean().optional(),
   replies: z.array(ReplyEntrySchema).max(200).optional(),
 });
 
