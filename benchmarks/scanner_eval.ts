@@ -459,7 +459,17 @@ export function createLiveScanPredictor(options: LiveScanPredictorOptions): Scan
     ...(options.budget ? { budget: options.budget } : {}),
   });
   const predict = async (c: ScannerGoldCase): Promise<ScanOutcome> => {
-    const observation = await delegate.execute({ role: "scanner", goal: `扫描 ${c.id} 的诈骗风险，报告风险等级与证据。工作区 frames/${c.id}/ 下如有九宫格请逐张查看。` });
+    // 子代理没有列目录能力，任务描述必须给出九宫格的确切文件名
+    const gridDir = path.join(options.workDir, "frames", c.id);
+    const gridFiles = await fs.readdir(gridDir).catch(() => [] as string[]);
+    const grids = gridFiles.filter((f) => /^grid_\d+\.jpg$/i.test(f)).sort();
+    const gridHint = grids.length
+      ? `工作区 frames/${c.id}/ 下有九宫格：${grids.join("、")}，请用 read_image 按序号逐张查看。`
+      : "本次没有该视频的九宫格抽帧目录。";
+    const observation = await delegate.execute({
+      role: "scanner",
+      goal: `扫描 ${c.id} 的诈骗风险，报告风险等级与证据。${gridHint}`,
+    });
     const raw = typeof observation === "string" ? observation : JSON.stringify(observation);
     const report = parseScannerReport(raw);
     await fs.mkdir(rawDir, { recursive: true });
