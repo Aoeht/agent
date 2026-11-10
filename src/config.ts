@@ -4,7 +4,7 @@
  * 换模型、调预算、改迭代数不再需要动源码。
  *
  * 可用环境变量：
- *   AGENT_MODEL                    主模型（默认 glm-5.2）
+ *   AGENT_MODEL                    主模型（默认 deepseek-v4.1-flash-1017）
  *   AGENT_SUMMARY_MODEL            历史压缩摘要用的模型（默认 qwen3.6-plus）
  *   AGENT_MAX_ITERATIONS           单次 run 的最大 ReAct 迭代数，0/负数表示不限（默认 0）
  *   AGENT_TEMPERATURE              采样温度（默认 0.1）
@@ -45,6 +45,9 @@
 import path from "node:path";
 import type { RunBudgetLimits } from "./core/run_budget";
 import { parseThinkingEffort, type ThinkingEffort } from "./utils/thinking_effort";
+
+/** 主模型缺省值：DashScope 兼容端点上的 DeepSeek flash，AGENT_MODEL 可覆盖 */
+export const DEFAULT_AGENT_MODEL = "deepseek-v4.1-flash-1017";
 
 /** 跨会话记忆目录：AGENT_MEMORY_DIR 可改，缺省落在工作区 .agent-memory（与 .agent-sessions 同级） */
 export function resolveMemoryDir(): string {
@@ -143,7 +146,7 @@ export function loadAgentConfig(): AgentRunConfig {
   const toolSearchRaw = process.env.AGENT_TOOL_SEARCH?.trim().toLowerCase();
 
   return {
-    model: process.env.AGENT_MODEL ?? "glm-5.2",
+    model: process.env.AGENT_MODEL ?? DEFAULT_AGENT_MODEL,
     summaryModel: process.env.AGENT_SUMMARY_MODEL ?? "qwen3.6-plus",
     // 默认不设轮数上限：长任务的完成度优先，花费由 token / 工具次数预算兜底
     maxIterations: Math.max(0, intEnv("AGENT_MAX_ITERATIONS", 0)),

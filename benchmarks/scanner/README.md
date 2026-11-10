@@ -13,7 +13,8 @@ bun benchmarks/scanner_eval.ts --self-check
 bun benchmarks/scanner_eval.ts --replay --output work/scanner-eval
 
 # ③ 实跑：对「有快照且有标注」的 BV 逐个真跑 scanner（走真实 delegate 白名单管道）
-bun benchmarks/scanner_eval.ts --live --dataset dataset --model qwen3.8-flash [--limit 5] [--only BVxxx] [--force]
+#    主模型缺省 deepseek-v4.1-flash-1017；--model 可临时换模型
+bun benchmarks/scanner_eval.ts --live --dataset dataset [--model m] [--limit 5] [--only BVxxx] [--force]
 ```
 
 live 模式的隔离保证（都落在 `--output` 工作目录内，默认 `work/scanner-eval`）：

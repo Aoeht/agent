@@ -112,7 +112,7 @@ REPL 与 Web 共用同一套斜杠命令：`/help` `/model` `/prompts` `/prompt`
 | 变量 | 默认 | 作用 |
 |---|---|---|
 | `OPENAI_API_KEY` / `OPENAI_BASE_URL` | — | 模型服务凭证（必填） |
-| `AGENT_MODEL` | `glm-5.2` | 主模型 |
+| `AGENT_MODEL` | `deepseek-v4.1-flash-1017` | 主模型 |
 | `AGENT_SUMMARY_MODEL` | `qwen3.6-plus` | 压缩 / 命名 / 记忆提取用的摘要模型 |
 | `AGENT_MAX_TOTAL_TOKENS` | `500000` | 单次运行的 token 预算 |
 | `AGENT_MAX_TOOL_CALLS` | `40` | 单次运行的工具调用上限 |
