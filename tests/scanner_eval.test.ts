@@ -6,7 +6,8 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
-import { runScannerEval, parseScannerReport, normalizeLevel, pairOutcome, createLiveScanPredictor, loadLabels, describeGridWindows } from "../benchmarks/scanner_eval";
+import { runScannerEval, parseScannerReport, normalizeLevel, pairOutcome, createLiveScanPredictor, loadLabels, collectVisionImages } from "../benchmarks/scanner_eval";
+import { DEFAULT_VISION_MODEL } from "../src/bili/vision_notes";
 import { cannedCases, cannedReports, cannedExpected } from "../benchmarks/scanner/fixtures";
 import { PlanStore } from "../src/core/plan_store";
 import { defineTool } from "../src/core/types";
@@ -133,22 +134,86 @@ describe("标注文件加载", () => {
   });
 });
 
-describe("九宫格时间窗口标注", () => {
-  test("按 manifest 给每张图带上窗口序号与秒级区间；缺失信息只保留文件名", async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "scanner-grids-"));
-    await fs.writeFile(path.join(dir, "manifest.json"), JSON.stringify({
-      windows: [{ start_s: 0, end_s: 33 }, { start_s: 34, end_s: 60 }],
+describe("视觉转写的取图与标注", () => {
+  test("抽帧 CLI 的 grids 子目录与跨窗口格位映射；全部评论多图保留完整正文", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "scanner-windows-"));
+    try {
+      const bvid = "BV1Window001";
+      const gridDir = path.join(root, "frames", bvid);
+      const dataset = path.join(root, "dataset");
+      await fs.mkdir(path.join(gridDir, "grids"), { recursive: true });
+      await fs.mkdir(dataset, { recursive: true });
+      await fs.writeFile(path.join(gridDir, "grids", "grid_001.jpg"), "image");
+      await fs.writeFile(path.join(gridDir, "manifest.json"), JSON.stringify({
+        windows: [{ start_s: 10, end_s: 20 }, { start_s: 40, end_s: 50 }],
+        frames: [{ path: "frame1.jpg", window_index: 1 }, { path: "frame2.jpg", window_index: 2 }],
+        grids: [{ path: "grids/grid_001.jpg", window_indexes: [1, 2], cells: [
+          { index: 1, t: 12, frame_path: "frame1.jpg" }, { index: 2, t: 45, frame_path: "frame2.jpg" },
+        ] }],
+      }));
+      await fs.writeFile(path.join(dataset, "comment.jpg"), "image");
+      const message = "正文".repeat(80) + "这是举报截图";
+      await fs.writeFile(path.join(dataset, bvid + ".json"), JSON.stringify({
+        comments: Array.from({ length: 4 }, () => ({ message, localPicPath: ["comment.jpg", "comment.jpg"] })),
+      }));
+      const images = await collectVisionImages(root, dataset, bvid);
+      expect(images).toHaveLength(9);
+      expect(images[0]!.label).toContain("抽帧窗口 10s–20s：grid_001.jpg，格位 1");
+      expect(images[0]!.label).toContain("抽帧窗口 40s–50s：grid_001.jpg，格位 2");
+      expect(images[8]!.label).toContain(message);
+      expect(images[8]!.label).toContain("图片 2/2");
+      expect(images[8]!.label).toContain(":comment:4");
+    } finally { await fs.rm(root, { recursive: true, force: true }); }
+  });
+  test("九宫格带窗口标签；评论图置顶优先、赞数降序、全量评论、缺图留痕", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "scanner-vision-"));
+    const workDir = path.join(root, "work");
+    const datasetDir = path.join(root, "dataset");
+    const bvid = "BV1Vision001";
+    const gridDir = path.join(workDir, "frames", bvid);
+    await fs.mkdir(gridDir, { recursive: true });
+    await fs.writeFile(path.join(gridDir, "grid_001.jpg"), "jpeg");
+    await fs.writeFile(path.join(gridDir, "grid_002.jpg"), "jpeg");
+    await fs.writeFile(path.join(gridDir, "manifest.json"), JSON.stringify({
       grids: [
-        { path: "grids/grid_001.jpg", window_indexes: [1, 2], cells: [{ t: 2 }, { t: 10 }, { t: 33 }] },
+        { path: "grids/grid_001.jpg", window_indexes: [1, 2], cells: [{ t: 2 }, { t: 33 }] },
         { path: "grids/grid_002.jpg", cells: [{ t: 3665 }, { t: 3700 }] },
       ],
     }));
-    expect(await describeGridWindows(dir, ["grid_001.jpg", "grid_002.jpg", "grid_003.jpg"]))
-      .toBe("grid_001.jpg（窗口 1–2，0:02–0:33）、grid_002.jpg（1:01:05–1:01:40）、grid_003.jpg");
-    // 没有 manifest 时退化为纯文件名
-    const bare = await fs.mkdtemp(path.join(os.tmpdir(), "scanner-grids-bare-"));
-    expect(await describeGridWindows(bare, ["grid_001.jpg"])).toBe("grid_001.jpg");
-    await fs.rm(dir, { recursive: true, force: true });
+    await fs.mkdir(path.join(workDir, "images", bvid), { recursive: true });
+    await fs.writeFile(path.join(workDir, "images", bvid, "pin.jpg"), "jpeg");
+    await fs.writeFile(path.join(workDir, "images", bvid, "hot.jpg"), "jpeg");
+    await fs.mkdir(datasetDir, { recursive: true });
+    await fs.writeFile(path.join(datasetDir, `${bvid}.json`), JSON.stringify({
+      schema: "bili-snapshot/v1",
+      bvid,
+      fetched_at: "2026-10-24T00:00:00Z",
+      comments: [
+        { like: 0, message: "置顶：加微信 abc123 领资料", is_pinned: true, localPicPath: [`images/${bvid}/pin.jpg`] },
+        { like: 999, message: "普通高赞评论", localPicPath: [`images/${bvid}/hot.jpg`] },
+        { like: 5, message: "带图评论", localPicPath: [`images/${bvid}/missing.jpg`] },
+        { like: 1, message: "无图评论" },
+      ],
+    }));
+
+    const missing: string[] = [];
+    const images = await collectVisionImages(workDir, datasetDir, bvid, message => missing.push(message));
+    expect(missing).toHaveLength(1);
+    expect(images.map(image => image.label)).toEqual([
+      "抽帧 grid_001.jpg（窗口 1–2，0:02–0:33）",
+      "抽帧 grid_002.jpg（1:01:05–1:01:40）",
+      "评论 BV1Vision001:comment:1；评论图（置顶评论「置顶：加微信 abc123 领资料」，图片 1/1）",
+      "评论 BV1Vision001:comment:2；评论图（评论「普通高赞评论」，赞 999，图片 1/1）",
+    ]);
+    expect(images.every(image => path.isAbsolute(image.path))).toBe(true);
+
+    // 没有 manifest/评论图时只为九宫格给出"窗口未知"标签
+    const bare = await fs.mkdtemp(path.join(os.tmpdir(), "scanner-vision-bare-"));
+    await fs.mkdir(path.join(bare, "frames", bvid), { recursive: true });
+    await fs.writeFile(path.join(bare, "frames", bvid, "grid_001.jpg"), "jpeg");
+    const bareImages = await collectVisionImages(bare, path.join(bare, "dataset"), bvid);
+    expect(bareImages.map(image => image.label)).toEqual(["抽帧 grid_001.jpg（窗口未知）"]);
+    await fs.rm(root, { recursive: true, force: true });
     await fs.rm(bare, { recursive: true, force: true });
   });
 });
@@ -182,8 +247,7 @@ describe("live 管道接线（假 client 走真实 delegate 白名单与发现�
         completions: {
           create: async (params: any) => {
             requests.push(params);
-            const step = steps[requests.length - 1]!;
-            if (!step) throw new Error(`意外的第 ${requests.length} 次模型请求`);
+            const step = steps[(requests.length - 1) % steps.length]!;
             return {
               choices: [{
                 message: {
@@ -205,13 +269,36 @@ describe("live 管道接线（假 client 走真实 delegate 白名单与发现�
     const workDir = path.join(root, "work");
     const datasetDir = path.join(root, "dataset");
     await fs.mkdir(datasetDir, { recursive: true });
-    // 九宫格 + manifest：任务描述里应出现覆盖时间窗
+    // 九宫格 + manifest：视觉观察文本里应出现覆盖时间窗；文件内容需是真实 JPEG 头（转写要嗅探格式）
     const gridDir = path.join(workDir, "frames", bvid);
     await fs.mkdir(gridDir, { recursive: true });
-    await fs.writeFile(path.join(gridDir, "grid_001.jpg"), "jpeg");
+    await fs.writeFile(path.join(gridDir, "grid_001.jpg"), Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0]));
     await fs.writeFile(path.join(gridDir, "manifest.json"), JSON.stringify({
       grids: [{ path: "grids/grid_001.jpg", window_indexes: [1], cells: [{ t: 2 }, { t: 33 }] }],
     }));
+    const visionRequests: any[] = [];
+    const visionClient: any = {
+      chat: {
+        completions: {
+          create: async (params: any) => {
+            visionRequests.push(params);
+            const count = (params.messages[1].content as any[]).filter((part: any) => part.type === "image_url").length;
+            return {
+              choices: [{
+                message: {
+                  content: JSON.stringify({ observations: Array.from({ length: count }, (_, index) => ({
+                    id: `image_${index + 1}`,
+                    details: `画面要点：第 ${index + 1} 格人物与横幅；可辨认文字：微信 abc123；风险要素：二维码；不确定项：无`,
+                  })) }),
+                },
+                finish_reason: "stop",
+              }],
+              usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+            };
+          },
+        },
+      },
+    };
     const fakeBiliCollect = defineTool({
       name: "bili_collect",
       description: "假证据预处理：返回合成证据",
@@ -230,6 +317,7 @@ describe("live 管道接线（假 client 走真实 delegate 白名单与发现�
     const predictor = createLiveScanPredictor({
       datasetDir, workDir, model: "m",
       client,
+      visionClient,
       budget: { maxTotalTokens: 100_000, maxToolCalls: 10, maxWallClockMs: 30_000 },
       tools: { biliCollect: fakeBiliCollect, ragSearch: fakeRagSearch },
     });
@@ -269,9 +357,26 @@ describe("live 管道接线（假 client 走真实 delegate 白名单与发现�
     const childSystem = requests[0]!.messages[0].content as string;
     expect(childSystem).toContain("诈骗风险扫描");
     expect(childSystem).toContain("采证≠终判");
-    // 任务描述注入了九宫格的覆盖时间窗
+    // 视觉模型已转写：任务描述带观察文本与时间窗，子代理不再接收任何图片
     const childTask = requests[0]!.messages.map((m: any) => m.content).join("\n");
-    expect(childTask).toContain("grid_001.jpg（窗口 1，0:02–0:33）");
+    expect(childTask).toContain("视觉观察");
+    expect(JSON.stringify(requests[0].messages)).toContain("抽帧 grid_001.jpg（窗口 1，0:02–0:33）");
+    expect(requests[0].messages.some((m: any) => m.role === "assistant" && m.content.includes("视觉模型观察记录"))).toBe(true);
+    expect(JSON.stringify(requests[0].messages)).toContain("微信 abc123");
+    expect(childTask).toContain("不要调用 read_image");
+    const delegateImageParts = requests[0]!.messages.flatMap((m: any) =>
+      Array.isArray(m.content) ? m.content.filter((part: any) => part.type === "image_url") : []);
+    expect(delegateImageParts).toHaveLength(0);
+    expect(visionRequests).toHaveLength(1);
+    expect(visionRequests[0].model).toBe(DEFAULT_VISION_MODEL);
+    const cache = JSON.parse(await fs.readFile(path.join(workDir, "vision", `${bvid}.json`), "utf-8"));
+    expect(cache.model).toBe(DEFAULT_VISION_MODEL);
+    expect(cache.images[0].label).toBe("抽帧 grid_001.jpg（窗口 1，0:02–0:33）");
+    expect(cache.notes).toContain("风险要素：二维码");
+
+    // 第二次运行命中缓存：不再调用视觉模型
+    await predictor({ id: bvid, category: "接线测试", gold: { video: "medium", author: "clean", comments: "unknown", overall: "medium" } });
+    expect(visionRequests).toHaveLength(1);
 
     await fs.rm(root, { recursive: true, force: true });
   });

@@ -115,13 +115,12 @@ const childSystemPrompt = (role: string, sandboxRoot: string): string => {
       "1. bili_collect 读快照拿证据（风险窗口/全部评论/链接候选/作者卡片）。快照缺失或所有维度都无数据时直接结束，报告无法扫描。" +
       "comments 是快照里的全部评论（含 replies 楼中楼），命中风险的评论/楼中楼就近带 hits/links；置顶评论带 is_pinned，" +
       "评论图带 local_images（工作区相对路径）。置顶评论必须纳入评论维度证据，并通读全部评论而不是只看前几条。\n" +
-      "2. 若任务描述列出了九宫格文件名（frames/<BV号>/ 下的 grid_*.jpg），任务描述会给每张图标注覆盖时间窗" +
-      "（如 grid_001.jpg（窗口 1–2，0:02–0:33）），把画面证据连同该时间窗与格序号写进报告；" +
-      "在**同一条消息里**为每张图各发一个 read_image 调用" +
-      "（不要猜测文件名，以任务描述给出的为准；一次最多 8 张，超过就分批），下一轮一次性观察全部九宫格，" +
-      "把画面证据（联系方式/二维码/收益承诺画面/资金界面/伪造标识等）连同格序号写进报告的 video 维度；不要重复读取同一张图。" +
-      "任务描述或工作区没有九宫格，说明本次未抽帧，如实记录。" +
-      "带图评论的 local_images 最多挑 2~3 张置顶/高赞评论图，和九宫格放在同一批里 read_image；其余评论按文本理解，不要逐张读。\n" +
+      "2. 画面证据：任务描述已给出「视觉观察」文本时，直接采用——把观察中的画面要点/风险要素连同其时间窗与格序号" +
+      "写进报告 video 维度，评论图观察写进 comments 维度；这种情况你无法查看图片，不要调用 read_image。" +
+      "只有在任务描述只列出九宫格文件名、且你确实有图片通道时，才在**同一条消息里**为每张图各发一个 read_image 调用" +
+      "（不要猜测文件名，以任务描述给出的为准；一次最多 8 张，超过就分批），下一轮一次性观察全部九宫格，避免重复读取同一张图。" +
+      "任务描述或工作区没有九宫格/视觉观察，说明本次未抽帧，如实记录。" +
+      "带图评论按评论分组读取全部可用图片，保留正文与图片顺序；超限分批并明确覆盖范围。无图片通道时只引用已提供的观察记录，不重读。\n" +
       "3. 对提取到的链接逐一 inspect_link 采证（至多 5 条，优先标题/简介、置顶与高赞评论里的）；采证受限（不可达/被拦截）如实记录，不作定性。\n" +
       "4. rag_search 对照反诈知识库中的已知套路（1~2 次）。发现疑似知识库未覆盖的新套路时，" +
       "在报告 novel_pattern 字段做标记（套路名/话术摘录/风险信号/证据），只标记不定性；是否沉淀进经验库由主对话决定。\n" +
@@ -184,15 +183,17 @@ export function createDelegateTaskTool(options: DelegateTaskToolOptions) {
       const registry = args.role === "scanner"
         ? createScannerRegistry(options.sourceRegistry, planStore)
         : createTeamRegistry(options.sourceRegistry, planStore);
+      if (options.config.visionCapable === false || runtime?.visualObservations !== undefined) registry.unregister("read_image");
       // 预算决策独立成函数（resolveDelegateBudget）：显式注入原样尊重，scanner 默认放宽墙钟
       const effectiveBudget = resolveDelegateBudget(args.role, options);
       const delegateId = randomUUID().slice(0, 8);
       const agent = new Agent({
+        initialObservations: runtime?.visualObservations,
         model: options.config.model,
         ...(options.client ? { client: options.client } : {}),
         ...(options.config.summaryModel ? { summaryModel: options.config.summaryModel } : {}),
         temperature: options.config.temperature ?? 0.1,
-        visionCapable: options.config.visionCapable ?? true,
+        visionCapable: runtime?.visualObservations !== undefined ? false : options.config.visionCapable ?? true,
         maxIterations: Math.min(options.config.maxIterations && options.config.maxIterations > 0
           ? options.config.maxIterations : 24, 24),
         ...(options.config.contextWindow !== undefined ? { contextWindow: options.config.contextWindow } : {}),

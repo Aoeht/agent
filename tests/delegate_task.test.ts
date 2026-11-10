@@ -171,7 +171,8 @@ test("委派子代理遵守视觉关闭配置", async () => {
     expect(requests).toHaveLength(2);
     expect(requests[0].messages[0].content).toContain("图片通道已关闭");
     const result = requests[1].messages.find((message: any) => message.role === "tool" && message.tool_call_id === "img");
-    expect(JSON.parse(result.content).imageChannel).toBe(false);
+    expect(JSON.parse(result.content).error).toBeDefined();
+    expect(requests[0].tools.some((t: any) => t.function.name === "read_image")).toBe(false);
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
