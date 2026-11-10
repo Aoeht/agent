@@ -74,12 +74,24 @@ export const DanmakuEntrySchema = z.object({
 });
 
 export const ReplyEntrySchema = z.object({
+  /** 仅用于重建父子树，不输出给模型 */
+  rpid: z.string().optional(),
+  /** 直接父节点 rpid（主楼或另一条回复）；缺失或指向未抓到的节点时按主楼子回复处理 */
+  parent: z.string().optional(),
+  mid: z.union([z.string(), z.number()]).optional(),
   uname: z.string().optional(),
   like: z.number().optional(),
+  t: z.number().optional(),
   message: z.string(),
+  /** 该回复由 UP 发布（采集侧 is_up） */
+  is_up: z.boolean().optional(),
+  reply_count: z.number().optional(),
 });
 
 export const CommentEntrySchema = z.object({
+  /** 主楼 rpid：树形输出里线程的唯一标识，楼内回复不再带 rpid */
+  rpid: z.string().optional(),
+  mid: z.union([z.string(), z.number()]).optional(),
   uname: z.string().optional(),
   like: z.number().optional(),
   /** 评论时间（Unix 秒或视频相对秒，仅参考） */
@@ -87,11 +99,16 @@ export const CommentEntrySchema = z.object({
   message: z.string(),
   /** 置顶评论：作者置顶通常指向联系方式/资料/站外导流，是核心证据位 */
   is_pinned: z.boolean().optional(),
+  /** API 声明的楼中楼总数，用来标注本次抓取是否完整 */
+  reply_count: z.number().optional(),
+  /** UP 主回复过该楼 */
+  upreply: z.boolean().optional(),
   /** 评论附图本地相对路径（相对数据集根，如 images/BV.../xxx.jpg），供 read_image 查看 */
   localPicPath: z.array(z.string()).optional(),
   /** 评论附图原始 URL */
   pics: z.array(z.string()).optional(),
-  replies: z.array(ReplyEntrySchema).max(200).optional(),
+  /** 平铺的楼中楼，parent 字段用于重建树；上限 500 条/楼 */
+  replies: z.array(ReplyEntrySchema).max(500).optional(),
 });
 
 export const TranscriptSchema = z.object({
@@ -118,6 +135,7 @@ export type VideoMeta = z.infer<typeof VideoMetaSchema>;
 export type AuthorInfo = z.infer<typeof AuthorSchema>;
 export type DanmakuEntry = z.infer<typeof DanmakuEntrySchema>;
 export type CommentEntry = z.infer<typeof CommentEntrySchema>;
+export type ReplyEntry = z.infer<typeof ReplyEntrySchema>;
 export type TimedSegment = z.infer<typeof TimedSegmentSchema>;
 export type VideoSnapshot = z.infer<typeof SnapshotSchema>;
 

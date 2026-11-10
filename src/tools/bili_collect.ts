@@ -16,6 +16,8 @@ import {
   loadSnapshot,
   normalizeTranscript,
   resolveBvid,
+  type CommentEntry,
+  type ReplyEntry,
   type VideoSnapshot,
 } from "../bili/snapshot";
 import { extractLinks, type ExtractedLink } from "../bili/links";
@@ -31,6 +33,11 @@ export interface BiliCollectToolOptions {
 /** 输出体量上限：仅超限时压缩弹幕/字幕摘录（评论永远全量），并置 size_trimmed 留痕 */
 const OUTPUT_CHAR_LIMIT = 24_000;
 
+/** 单个楼中楼（主楼+回复）的字符上限；超出按顺序截断并注明未展示条数 */
+const THREAD_CHAR_LIMIT = 1_000;
+/** 根 -> R1 -> R1.1 共三层；更深的回复保留血统标签（R1.1.1）压平在同一条二层回复之后 */
+const MAX_THREAD_DEPTH = 2;
+
 const trunc = (text: string, max: number): string => (text.length > max ? `${text.slice(0, max)}…` : text);
 
 export function createBiliCollectTool(options: BiliCollectToolOptions = {}) {
@@ -39,7 +46,8 @@ export function createBiliCollectTool(options: BiliCollectToolOptions = {}) {
     name: "bili_collect",
     description:
       "读取已采集的 B 站视频快照（dataset/<BV号>.json）并做证据预处理：粗定位风险时间窗（窗内弹幕样本+字幕摘录）、" +
-      "输出全部评论（含楼中楼，命中风险的评论就地标注 hits/links，置顶与评论图带标记）、" +
+      "输出全部评论树（根评论带 rpid 与用户名/mid，楼中楼按 root/parent 最多三层，单楼不超过 1000 字符，" +
+      "命中词与链接就地标注，置顶与评论图带标记）、" +
       "提取全部文本中的链接候选（含混淆变体）、输出作者卡片。返回结构化证据 JSON，不含结论；" +
       "快照缺失会明确报错并提示先运行采集流程。",
     schema: z.object({
@@ -110,36 +118,11 @@ async function collectEvidence(bvid: string, datasetDir: string): Promise<string
   }
   for (const segment of transcriptSegments) collectLinks(segment.text, "transcript");
 
-  // 全量评论：一条不裁（含楼中楼与评论图），风险命中就地标注，由模型自己通读判定
-  const allComments = comments.map((comment) => {
-    const hits = scanKeywords(comment.message).map((h) => h.term);
-    const links = extractLinks(comment.message, "comment").map((l) => l.normalized);
-    const localImages = comment.localPicPath ?? [];
-    const imageCount = Math.max(localImages.length, comment.pics?.length ?? 0);
-    const replies = (comment.replies ?? []).map((reply) => {
-      const replyHits = scanKeywords(reply.message).map((h) => h.term);
-      const replyLinks = extractLinks(reply.message, "comment").map((l) => l.normalized);
-      return {
-        ...(reply.uname !== undefined ? { uname: reply.uname } : {}),
-        ...(reply.like !== undefined ? { like: reply.like } : {}),
-        message: reply.message,
-        ...(replyHits.length ? { hits: replyHits } : {}),
-        ...(replyLinks.length ? { links: replyLinks } : {}),
-      };
-    });
-    return {
-      ...(comment.uname !== undefined ? { uname: comment.uname } : {}),
-      ...(comment.like !== undefined ? { like: comment.like } : {}),
-      ...(comment.t !== undefined ? { t: comment.t } : {}),
-      ...(comment.is_pinned ? { is_pinned: true } : {}),
-      ...(imageCount ? { image_count: imageCount } : {}),
-      ...(localImages.length ? { local_images: localImages } : {}),
-      message: comment.message,
-      ...(hits.length ? { hits } : {}),
-      ...(links.length ? { links } : {}),
-      ...(replies.length ? { replies } : {}),
-    };
-  });
+  // 评论以树形文本交给模型：根评论带 rpid，楼内按 root/parent 重建最多三层，保留用户名与 mid
+  const commentThreads = comments.map((comment) => renderCommentThread(comment, scanKeywords, extractLinks));
+  const replyCaptured = comments.reduce((sum, comment) => sum + (comment.replies?.length ?? 0), 0);
+  const truncatedThreads = commentThreads.filter((thread) => thread.truncated).length;
+  if (truncatedThreads > 0) notes.push(`${truncatedThreads} 个楼中楼超过 ${THREAD_CHAR_LIMIT} 字符，已按顺序截断`);
 
   const evidence = {
     bvid,
@@ -178,12 +161,13 @@ async function collectEvidence(bvid: string, datasetDir: string): Promise<string
     comment_stats: {
       count: comments.length,
       pinned_count: comments.filter((comment) => comment.is_pinned).length,
-      reply_count: comments.reduce((sum, comment) => sum + (comment.replies?.length ?? 0), 0),
+      reply_count: replyCaptured,
+      truncated_threads: truncatedThreads,
     },
     title_desc_hits: titleDescHits.map((h) => ({ term: h.term, category: h.category, count: h.count })),
     risk_windows: localization.windows,
     keyword_totals: localization.keyword_totals.slice(0, 30),
-    comments: allComments,
+    comment_threads: commentThreads.map((thread) => thread.text),
     links: [...linkMap.values()]
       .sort((a, b) => Number(b.short) - Number(a.short) || a.normalized.localeCompare(b.normalized))
       .slice(0, 25)
@@ -198,6 +182,210 @@ async function collectEvidence(bvid: string, datasetDir: string): Promise<string
   };
 
   return capOutput(evidence);
+}
+
+interface RenderedThread {
+  text: string;
+  truncated: boolean;
+}
+
+const commentDate = (t?: number): string => {
+  if (typeof t !== "number" || !Number.isFinite(t) || t <= 0) return "";
+  return new Date(t * 1000).toISOString().slice(0, 10);
+};
+
+const commentUser = (uname: string | undefined, mid: string | number | undefined): string =>
+  `${uname?.trim() || "匿名"}${mid === undefined || mid === "" ? "" : `(mid=${mid})`}`;
+
+/** 命中词/链接就地标注在节点末尾，保持与旧证据一致的提示语义 */
+function commentTags(
+  hits: { term: string }[],
+  links: ExtractedLink[],
+): string {
+  const parts: string[] = [];
+  const terms = [...new Set(hits.map((hit) => hit.term))];
+  if (terms.length) parts.push(`[命中：${terms.join("、")}]`);
+  const urls = [...new Set(links.map((link) => link.normalized))];
+  if (urls.length) parts.push(`[链接：${urls.join("、")}]`);
+  return parts.length ? ` ${parts.join("")}` : "";
+}
+
+/** 树结构已标明回复对象，去掉正文里指向同一对象的“回复 @X :”/“@X ”前缀；指向别人的保留 */
+function stripReplyPrefix(text: string, parentName?: string): string {
+  if (!parentName) return text;
+  const target = parentName.trim();
+  const reply = text.match(/^回[复復覆]\s*@([^:：]+?)\s*[:：]\s*/);
+  if (reply) {
+    const names = reply[1]!.split(/[、,，\s]+/).filter(Boolean);
+    if (names.length === 0 || names.some((name) => name !== target)) return text;
+    return text.slice(reply[0].length).trim() || text;
+  }
+  const mention = text.match(/^@([^\s:：]+)[\s:：]+/);
+  if (mention && mention[1] === target) {
+    return text.slice(mention[0].length).trim() || text;
+  }
+  return text;
+}
+
+function replyLine(
+  reply: ReplyEntry,
+  label: string,
+  prefix: string,
+  parentName: string | undefined,
+  scan: (text: string) => { term: string }[],
+  extract: (text: string, source: string) => ExtractedLink[],
+): string {
+  const parts = [`${prefix}${label} ${commentUser(reply.uname, reply.mid)}`];
+  if (reply.is_up) parts.push("UP");
+  if (typeof reply.like === "number") parts.push(`赞${reply.like}`);
+  const date = commentDate(reply.t);
+  if (date) parts.push(date);
+  const text = stripReplyPrefix(reply.message.trim(), parentName);
+  return `${parts.join(" ")}：${text}${commentTags(scan(text), extract(text, "comment"))}`;
+}
+
+/**
+ * 把一条主楼的平铺回复按 parent 重建成树形文本：
+ * 根（带 rpid）-> R1 -> R1.1，缩进最多三层；更深的回复以 ↳ 压平在同一层，
+ * 标签保留完整父链（R1.1.1.1 即回复 R1.1.1），紧跟其父节点输出；
+ * 正文里指向同一父节点的“回复 @X :”前缀属于重复信息，去掉后保留原文的其余部分。
+ * 单楼总字符数不超过 THREAD_CHAR_LIMIT，超出按顺序丢弃尾部回复并注明条数。
+ */
+function renderCommentThread(
+  root: CommentEntry,
+  scan: (text: string) => { term: string }[],
+  extract: (text: string, source: string) => ExtractedLink[],
+): RenderedThread {
+  const replies = root.replies ?? [];
+  const headerParts = [`[#${root.rpid?.trim() || "-"}]`, commentUser(root.uname, root.mid)];
+  if (typeof root.like === "number") headerParts.push(`赞${root.like}`);
+  const rootDate = commentDate(root.t);
+  if (rootDate) headerParts.push(rootDate);
+  if (root.is_pinned) headerParts.push("置顶");
+  const localImages = root.localPicPath ?? [];
+  const imageCount = Math.max(localImages.length, root.pics?.length ?? 0);
+  if (imageCount) {
+    headerParts.push(`评论图${imageCount}张${localImages.length ? `：${localImages.join("；")}` : ""}`);
+  }
+  if (replies.length) {
+    const declared = typeof root.reply_count === "number" ? root.reply_count : undefined;
+    headerParts.push(
+      declared === undefined
+        ? `楼中楼${replies.length}条`
+        : replies.length >= declared
+          ? `楼中楼${replies.length}条（完整）`
+          : `楼中楼${replies.length}/${declared}条（不完整）`,
+    );
+    if (root.upreply) headerParts.push("UP回复过");
+  }
+  const header = headerParts.join(" ");
+  const bodyTags = commentTags(scan(root.message), extract(root.message, "comment"));
+  if (replies.length === 0) {
+    return { text: `${header}\n  ${root.message.trim()}${bodyTags}`, truncated: false };
+  }
+
+  // 有楼中楼时整楼共享 1k 字符预算：先保根评论，再按顺序放回复
+  const bodyBudget = THREAD_CHAR_LIMIT - header.length - 1 - 2 - bodyTags.length;
+  let body = root.message.trim();
+  if (body.length > Math.max(0, bodyBudget - 1)) {
+    body = body.slice(0, Math.max(0, bodyBudget - 1)) + "…";
+  }
+  const lines = [header, `  ${body}${bodyTags}`];
+
+  const rootRpid = root.rpid?.trim();
+  const byId = new Map<string, ReplyEntry>();
+  for (const reply of replies) {
+    const id = reply.rpid?.trim();
+    if (id) byId.set(id, reply);
+  }
+
+  // parent 链（直接父在前、顶层在后），用于确定每条回复挂在哪一层
+  const chainOf = new Map<ReplyEntry, ReplyEntry[]>();
+  for (const reply of replies) {
+    const chain: ReplyEntry[] = [];
+    let cur = reply;
+    const seen = new Set<string>();
+    while (true) {
+      const parentId = cur.parent?.trim();
+      if (!parentId || parentId === rootRpid || !byId.has(parentId)) break;
+      const curId = cur.rpid?.trim();
+      if (curId) {
+        if (seen.has(curId)) break;
+        seen.add(curId);
+      }
+      cur = byId.get(parentId)!;
+      chain.push(cur);
+      if (chain.length > MAX_THREAD_DEPTH + 8) break;
+    }
+    chainOf.set(reply, chain);
+  }
+
+  const direct: ReplyEntry[] = [];
+  const childrenOf = new Map<string, ReplyEntry[]>();
+  const parentNameOf = new Map<ReplyEntry, string | undefined>();
+  for (const reply of replies) {
+    const parent = chainOf.get(reply)![0];
+    if (!parent) {
+      direct.push(reply);
+      parentNameOf.set(reply, root.uname);
+      continue;
+    }
+    parentNameOf.set(reply, parent.uname);
+    const parentId = parent.rpid?.trim() ?? "";
+    const list = childrenOf.get(parentId) ?? [];
+    list.push(reply);
+    childrenOf.set(parentId, list);
+  }
+
+  // 标签沿真实父链累加：R1.2.1.1 明确表示“回复 R1.2.1”，不会落到祖先的兄弟层
+  const labelOf = new Map<string, string>();
+  const labelTree = (reply: ReplyEntry, label: string, seen: Set<string>): void => {
+    const id = reply.rpid?.trim() ?? "";
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    labelOf.set(id, label);
+    (childrenOf.get(id) ?? []).forEach((kid, index) => {
+      labelTree(kid, `${label}.${index + 1}`, seen);
+    });
+  };
+  const seenLabels = new Set<string>();
+  direct.forEach((reply, index) => labelTree(reply, `R${index + 1}`, seenLabels));
+
+  const nodeLines: string[] = [];
+  const renderedIds = new Set<string>();
+  const emit = (reply: ReplyEntry, prefix: string): void => {
+    const id = reply.rpid?.trim() ?? "";
+    if (id && renderedIds.has(id)) return;
+    if (id) renderedIds.add(id);
+    const label = labelOf.get(id) ?? "R?";
+    nodeLines.push(replyLine(reply, label, prefix, parentNameOf.get(reply), scan, extract));
+    for (const kid of childrenOf.get(id) ?? []) {
+      const depth = labelOf.get(kid.rpid?.trim() ?? "")?.split(".").length ?? 0;
+      emit(kid, depth <= 2 ? "  │  └ " : "  │  ↳ ");
+    }
+  };
+  direct.forEach((reply) => emit(reply, "  ├ "));
+
+  let used = lines.join("\n").length;
+  const rendered: string[] = [];
+  for (const line of nodeLines) {
+    if (used + 1 + line.length > THREAD_CHAR_LIMIT) break;
+    rendered.push(line);
+    used += 1 + line.length;
+  }
+  let dropped = replies.length - rendered.length;
+  let text = lines.concat(rendered).join("\n");
+  if (dropped > 0) {
+    let note = `  …（本楼另有 ${dropped} 条回复未展示）`;
+    while (rendered.length > 0 && text.length + 1 + note.length > THREAD_CHAR_LIMIT) {
+      rendered.pop();
+      dropped += 1;
+      note = `  …（本楼另有 ${dropped} 条回复未展示）`;
+      text = lines.concat(rendered).join("\n");
+    }
+    if (text.length + 1 + note.length <= THREAD_CHAR_LIMIT) text += `\n${note}`;
+  }
+  return { text, truncated: dropped > 0 };
 }
 
 /** 输出体量守护：评论（含楼中楼）全量输出、绝不裁剪；仅在超限时压缩弹幕/字幕摘录并留痕 */
