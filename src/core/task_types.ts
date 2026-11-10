@@ -34,6 +34,14 @@ export const TaskSchema = z.object({
   criteriaSource: z.enum(["host", "agent"]).optional(),
   verification: VerificationSchema,
   runs: z.array(z.object({ id: z.string(), input: z.string(), startedAt: z.string(), endedAt: z.string().optional(), stopReason: z.string().optional() })),
+  /** 崩溃续跑用：每完成一轮工具覆盖写入的紧凑进度（不是历史，只留最后一轮；正常收尾清除） */
+  progress: z.object({
+    iteration: z.number().int().min(1),
+    note: z.string(),
+    tools: z.array(z.object({ tool: z.string(), arguments: z.string() })),
+    tokens: z.number().int().min(0),
+    at: z.string(),
+  }).optional(),
   actions: z.array(z.object({
     id: z.string(), runId: z.string(), tool: z.string(), arguments: z.string(),
     /**

@@ -953,11 +953,14 @@ export class Agent {
     // Fresh plain chat has no task state worth injecting. Include actual work or
     // resumed durable instructions, without repeating the very first user message.
     const needsTaskContext = this.activeTask && (this.activeTask.criteria.length || this.activeTask.plan.length ||
-      this.activeTask.actions.length || ((this.config.sessionStore || this.config.taskStore) && this.activeTask.runs.length > 1));
+      this.activeTask.actions.length || this.activeTask.progress !== undefined ||
+      ((this.config.sessionStore || this.config.taskStore) && this.activeTask.runs.length > 1));
     const taskBlock: Message[] = this.activeTask && needsTaskContext ? [
       { role: "user", content: wrapUntrustedData("持久化任务记录（已返回的操作不要盲目重放；按现状核对后继续）", JSON.stringify({
         id: this.activeTask.id, goal: this.activeTask.goal, criteria: this.activeTask.criteria,
         plan: this.activeTask.plan, verification: this.activeTask.verification,
+        // 上次进程中断前最后完成的一轮工具（崩溃续跑的依据；正常收尾时账本已清掉此字段）
+        ...(this.activeTask.progress ? { interruptedProgress: this.activeTask.progress } : {}),
         recentInstructions: this.activeTask.runs.slice(-10).map(run => run.input),
         historyAccess: "更早的指令和操作可用 read_task_state 分页读取",
         actions: this.activeTask.actions.slice(-20),
@@ -1415,6 +1418,20 @@ export class Agent {
 
         steps.push(currentStepInfo);
         this.events.emit("step", { step: currentStepInfo });
+
+        // 崩溃续跑的进度快照：每轮覆盖写入账本（只留最后一轮，finish() 清除）。
+        // 进程死掉后，下一次 run 的任务块能看到"上次跑到第几轮、最后在想什么"，
+        // 不必把完整 ReAct 过程写进会话历史；正常收尾或本轮出错收尾都不会残留
+        this.activeTask = this.taskStore.recordProgress({
+          iteration: iterations,
+          note: clipText(llmContent ?? "", 500),
+          tools: allowedToolCalls.map((toolCall) => ({
+            tool: toolCall.function.name,
+            arguments: clipText(toolCall.function.arguments, 200),
+          })),
+          tokens: budget.totalTokens,
+          at: new Date().toISOString(),
+        });
       }
 
       // 强制收尾：显式迭代上限耗尽或预算越线且未被取消时，禁用工具再要一次最终答案

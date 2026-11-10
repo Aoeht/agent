@@ -216,6 +216,10 @@ export class TaskStore {
     });
   }
   setPlan(plan: PlanStep[]): TaskRecord { return this.update(task => { task.plan = structuredClone(plan); }); }
+  /** 崩溃续跑用：每完成一轮工具覆盖一次，只留最后一轮；finish() 时清除——账本里还有 progress 就意味着上次进程死在半路 */
+  recordProgress(progress: NonNullable<TaskRecord["progress"]>): TaskRecord {
+    return this.update(task => { task.progress = progress; });
+  }
   setWaiting(waiting?: TaskRecord["waiting"]): TaskRecord {
     return this.update(task => {
       if (waiting) { task.waiting = waiting; task.state = waiting.kind === "input" ? "waiting_input" : "waiting_approval"; }
@@ -281,6 +285,7 @@ export class TaskStore {
       task.stopReason = outcome.stopReason;
       task.lastAnswer = answer;
       delete task.waiting;
+      delete task.progress;
       task.state = outcome.taskStatus === "verified" ? "completed"
         : outcome.taskStatus === "blocked" ? "blocked"
         : outcome.stopReason === "cancelled" ? "cancelled"
