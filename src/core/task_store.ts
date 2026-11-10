@@ -222,6 +222,21 @@ export class TaskStore {
       else { delete task.waiting; task.state = "running"; }
     });
   }
+  /**
+   * 进程重启后的恢复展示（server 专用）：清掉上一次执行器遗留的"等审批/等输入"标记。
+   * 只在属主已死时才清——活着的审批由 bridge 的内存 Promise 兜着，不是遗留。
+   * 返回清理后的任务；没有遗留时原样返回。
+   */
+  clearStaleWaiting(): TaskRecord | undefined {
+    return this.transaction(records => {
+      const task = records.at(-1);
+      this.recover(task);
+      if (!task?.waiting || task.owner) return task;
+      delete task.waiting;
+      task.updatedAt = now();
+      return task;
+    });
+  }
   setCriteria(criteria: AcceptanceCriterion[]): TaskRecord {
     return this.update(task => {
       if (!task.workspace) throw new Error("未配置验收工作区");

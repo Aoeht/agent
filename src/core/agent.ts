@@ -384,6 +384,8 @@ export class Agent {
   private modelOverride: string | undefined;
   readonly taskStore: TaskStore;
   private activeTask: TaskRecord | undefined;
+  /** 正在执行的工具调用（工具内部发起等审批/等输入时，把"卡在等谁"写进账本，见 runToolCall 的 bindWaiting） */
+  private waitingCall: { actionId: string; callId: string; tool: string; arguments: string; startedAtMs: number } | undefined;
   private running = false;
   /** 工具心跳间隔：默认 5s，测试可缩短以验证 progress 事件 */
   private readonly toolProgressIntervalMs: number;
@@ -700,7 +702,22 @@ export class Agent {
       }
       const wrapHuman = (kind: "input" | "approval", callback: NonNullable<ToolRuntime["askUser"]>) =>
         async (prompt: string, signal: AbortSignal) => {
-          this.activeTask = this.taskStore.setWaiting({ kind, prompt });
+          // 记下"卡在等谁"：进程死在等批准时，账本里能恢复展示是哪次调用没等到（sessions.subscribe 消费）
+          const pending = this.waitingCall;
+          const runId = this.activeTask?.runs.at(-1)?.id;
+          this.activeTask = this.taskStore.setWaiting({
+            kind, prompt,
+            ...(pending && runId ? {
+              call: {
+                actionId: pending.actionId,
+                callId: pending.callId,
+                tool: pending.tool,
+                arguments: pending.arguments,
+                runId,
+                startedAt: new Date(pending.startedAtMs).toISOString(),
+              },
+            } : {}),
+          });
           this.events.emit("task_update", { task: this.activeTask });
           try { return await callback(prompt, signal); }
           finally {
@@ -1194,6 +1211,22 @@ export class Agent {
               maxTokens: this.config.toolResultMaxTokens ?? 2000,
               countTokens: text => this.tokenCounter.estimateText(text, this.config.model),
             } };
+            // 等审批/等输入发生在工具执行内部：把"当前调用"绑到 this.waitingCall 上，
+            // 外层 wrapHuman 写账本时才知道停在哪次调用。并发批次各自带各自的 marker，
+            // 收尾只清自己的（晚收尾的工具不能抹掉先收尾工具留下的标记）
+            const bindWaiting = (key: "requestHuman" | "askUser"): void => {
+              const callback = callRuntime[key];
+              if (!callback) return;
+              callRuntime[key] = async (prompt, signal) => {
+                const marker = { actionId, callId: toolCall.id, tool: toolName,
+                  arguments: toolCall.function.arguments, startedAtMs: startedAt };
+                this.waitingCall = marker;
+                try { return await callback(prompt, signal); }
+                finally { if (this.waitingCall === marker) this.waitingCall = undefined; }
+              };
+            };
+            bindWaiting("requestHuman");
+            bindWaiting("askUser");
             if (this.visionEnabled) {
               callRuntime.emitImage = ({ dataUrl, label }) => {
                 if (!acceptingImages || runtime?.signal?.aborted) return false;

@@ -488,7 +488,27 @@ export class SessionManager {
       if (!subscribed) return;
       listener(hello);
       const entry = this.entry(sessionId);
-      const task = this.taskStoreFor(entry).current();
+      const store = this.taskStoreFor(entry);
+      let task = store.current();
+      // 进程重启恢复：账本里留着"等审批/等输入"而桥里没有在飞请求 → 上次进程死在等批准，
+      // 原卡随内存 Promise 一起消失。发一次提示让用户核对后重新发起，并清掉遗留标记，
+      // 免得每次重连都重复弹
+      if (task?.waiting && !task.owner && this.options.bridge.pendingEventsFor(sessionId).length === 0) {
+        const waiting = task.waiting;
+        task = store.clearStaleWaiting() ?? task;
+        listener({
+          type: "approval_recovered",
+          kind: waiting.kind,
+          message: waiting.prompt,
+          ...(waiting.call ? {
+            toolName: waiting.call.tool,
+            arguments: waiting.call.arguments.slice(0, 500),
+            startedAt: waiting.call.startedAt,
+          } : {}),
+          goal: task.goal,
+          taskState: task.state,
+        });
+      }
       if (task) listener({ type: "task_update", task });
       for (const event of this.options.bridge.pendingEventsFor(sessionId)) {
         listener(event);

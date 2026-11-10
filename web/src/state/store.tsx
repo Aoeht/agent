@@ -371,6 +371,19 @@ export function applyEvent(s: SessionUIState, e: ServerEvent): SessionUIState {
         status: "awaiting_input",
         pendingInput: { id: e.id, source: e.source, prompt: e.prompt },
       };
+    case "approval_recovered":
+      return {
+        ...s,
+        items: [
+          ...s.items,
+          notice(
+            e.kind === "approval"
+              ? `♻️ 进程重启：上次未决的审批已失效${e.toolName ? `（${e.toolName}）` : ""}——该调用未执行。任务已标记中断待核对，请核对后重新发起。`
+              : "♻️ 进程重启：上次的澄清提问已失效，请重新发起。",
+            "warn"
+          ),
+        ],
+      };
     case "run_end": {
       const citations = e.citations && e.citations.length > 0 ? e.citations : undefined;
       const items = [...s.items];

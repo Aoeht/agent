@@ -255,6 +255,21 @@ export const ServerEventSchema = z.discriminatedUnion("type", [
     source: z.string().optional(),
     prompt: z.string(),
   }),
+  /**
+   * 进程重启恢复：账本里留有上一次执行器死在"等审批/等输入"的调用记录，而桥里没有
+   * 在飞请求——原始审批卡随内存 Promise 一起消失了。此事件只做恢复展示，让用户
+   * 核对任务后重新发起；没有可应答的 id（不可 POST /approvals/:id）。
+   */
+  z.object({
+    type: z.literal("approval_recovered"),
+    kind: z.enum(["input", "approval"]),
+    message: z.string(),
+    toolName: z.string().optional(),
+    arguments: z.string().optional(),
+    startedAt: z.string().optional(),
+    goal: z.string().optional(),
+    taskState: z.string().optional(),
+  }),
   z.object({
     type: z.literal("run_end"),
     task: TaskSchema.optional(),

@@ -19,7 +19,15 @@ export type Verification = z.infer<typeof VerificationSchema>;
 export const TaskSchema = z.object({
   id: z.string(), goal: z.string(), createdAt: z.string(), updatedAt: z.string(),
   state: z.enum(["running", "waiting_input", "waiting_approval", "answered", "completed", "incomplete", "blocked", "cancelled", "failed", "interrupted", "superseded"]),
-  waiting: z.object({ kind: z.enum(["input", "approval"]), prompt: z.string() }).optional(),
+  waiting: z.object({
+    kind: z.enum(["input", "approval"]),
+    prompt: z.string(),
+    /** 卡在等谁：唯一的调用上下文，进程重启后靠它恢复展示（老记录没有此字段） */
+    call: z.object({
+      actionId: z.string(), callId: z.string(), tool: z.string(), arguments: z.string(),
+      runId: z.string(), startedAt: z.string(),
+    }).optional(),
+  }).optional(),
   workspace: z.string().optional(),
   plan: z.array(z.object({ content: z.string(), status: z.enum(["pending", "in_progress", "completed"]) })),
   criteria: z.array(AcceptanceCriterionSchema),
