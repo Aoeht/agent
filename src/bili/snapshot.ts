@@ -74,9 +74,9 @@ export const DanmakuEntrySchema = z.object({
 });
 
 export const ReplyEntrySchema = z.object({
-  /** 仅用于重建父子树，不输出给模型 */
+  /** 原始回复 ID：用于父子关系与证据引用 */
   rpid: z.string().optional(),
-  /** 直接父节点 rpid（主楼或另一条回复）；缺失或指向未抓到的节点时按主楼子回复处理 */
+  /** 直接父节点 rpid（主楼或另一条回复）；缺失或未采集时保留未知关系，不推断为主楼子回复 */
   parent: z.string().optional(),
   mid: z.union([z.string(), z.number()]).optional(),
   uname: z.string().optional(),
@@ -89,7 +89,7 @@ export const ReplyEntrySchema = z.object({
 });
 
 export const CommentEntrySchema = z.object({
-  /** 主楼 rpid：树形输出里线程的唯一标识，楼内回复不再带 rpid */
+  /** 主楼 rpid：树形输出里线程的唯一标识，楼内回复同时保留原始 rpid */
   rpid: z.string().optional(),
   mid: z.union([z.string(), z.number()]).optional(),
   uname: z.string().optional(),

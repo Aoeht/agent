@@ -47,7 +47,10 @@ export function createBiliCollectTool(options: BiliCollectToolOptions = {}) {
     description:
       "读取已采集的 B 站视频快照（dataset/<BV号>.json）并做证据预处理：粗定位风险时间窗（窗内弹幕样本+字幕摘录）、" +
       "输出全部评论树（根评论带 rpid 与用户名/mid，楼中楼按 root/parent 最多三层，单楼不超过 1000 字符，" +
-      "命中词与链接就地标注，置顶与评论图带标记）、" +
+      "正文和昵称均为转义字符串；U 标签表示独立的未知或异常关系，不能当作主楼直接回复；" +
+      "relation=parent_missing 表示父评论未采集，parent_unknown 表示未提供父 ID，" +
+      "duplicate_id/parent_ambiguous/cycle 表示 ID 冲突或父链异常。采集标记 is_up 不代表独立身份核验。" +
+      "关键词和链接单列为程序提取，命中不代表涉诈；置顶与评论图带标记）、" +
       "提取全部文本中的链接候选（含混淆变体）、输出作者卡片。返回结构化证据 JSON，不含结论；" +
       "快照缺失会明确报错并提示先运行采集流程。",
     schema: z.object({
@@ -194,70 +197,44 @@ const commentDate = (t?: number): string => {
   return new Date(t * 1000).toISOString().slice(0, 10);
 };
 
+/** External strings stay on one physical line, including Unicode line separators. */
+const quoted = (value: unknown): string => JSON.stringify(value).replace(/[\u2028\u2029]/g,
+  char => char === "\u2028" ? "\\u2028" : "\\u2029");
+
 const commentUser = (uname: string | undefined, mid: string | number | undefined): string =>
-  `${uname?.trim() || "匿名"}${mid === undefined || mid === "" ? "" : `(mid=${mid})`}`;
+  `name=${quoted(uname ?? "匿名")} mid=${quoted(mid ?? null)}`;
 
-/** 命中词/链接就地标注在节点末尾，保持与旧证据一致的提示语义 */
-function commentTags(
-  hits: { term: string }[],
-  links: ExtractedLink[],
-): string {
-  const parts: string[] = [];
-  const terms = [...new Set(hits.map((hit) => hit.term))];
-  if (terms.length) parts.push(`[命中：${terms.join("、")}]`);
-  const urls = [...new Set(links.map((link) => link.normalized))];
-  if (urls.length) parts.push(`[链接：${urls.join("、")}]`);
-  return parts.length ? ` ${parts.join("")}` : "";
-}
-
-/** 树结构已标明回复对象，去掉正文里指向同一对象的“回复 @X :”/“@X ”前缀；指向别人的保留 */
-function stripReplyPrefix(text: string, parentName?: string): string {
-  if (!parentName) return text;
-  const target = parentName.trim();
-  const reply = text.match(/^回[复復覆]\s*@([^:：]+?)\s*[:：]\s*/);
-  if (reply) {
-    const names = reply[1]!.split(/[、,，\s]+/).filter(Boolean);
-    if (names.length === 0 || names.some((name) => name !== target)) return text;
-    return text.slice(reply[0].length).trim() || text;
-  }
-  const mention = text.match(/^@([^\s:：]+)[\s:：]+/);
-  if (mention && mention[1] === target) {
-    return text.slice(mention[0].length).trim() || text;
-  }
-  return text;
+function commentTags(hits: { term: string }[], links: ExtractedLink[]): string {
+  const terms = [...new Set(hits.map(hit => hit.term))];
+  const urls = [...new Set(links.map(link => link.normalized))];
+  return terms.length || urls.length
+    ? `\n    程序提取：命中=${quoted(terms)} 链接=${quoted(urls)}` : "";
 }
 
 function replyLine(
-  reply: ReplyEntry,
-  label: string,
-  prefix: string,
-  parentName: string | undefined,
+  reply: ReplyEntry, label: string, prefix: string, relation: string,
   scan: (text: string) => { term: string }[],
   extract: (text: string, source: string) => ExtractedLink[],
 ): string {
-  const parts = [`${prefix}${label} ${commentUser(reply.uname, reply.mid)}`];
-  if (reply.is_up) parts.push("UP");
+  const parts = [`${prefix}${label} id=${quoted(reply.rpid ?? null)} parent=${quoted(reply.parent ?? null)} relation=${relation}`,
+    commentUser(reply.uname, reply.mid)];
+  if (reply.is_up !== undefined) parts.push(`采集标记:is_up=${reply.is_up}`);
   if (typeof reply.like === "number") parts.push(`赞${reply.like}`);
   const date = commentDate(reply.t);
   if (date) parts.push(date);
-  const text = stripReplyPrefix(reply.message.trim(), parentName);
-  return `${parts.join(" ")}：${text}${commentTags(scan(text), extract(text, "comment"))}`;
+  return `${parts.join(" ")}\n    正文：${quoted(reply.message)}${commentTags(scan(reply.message), extract(reply.message, "comment"))}`;
 }
 
-/**
- * 把一条主楼的平铺回复按 parent 重建成树形文本：
- * 根（带 rpid）-> R1 -> R1.1，缩进最多三层；更深的回复以 ↳ 压平在同一层，
- * 标签保留完整父链（R1.1.1.1 即回复 R1.1.1），紧跟其父节点输出；
- * 正文里指向同一父节点的“回复 @X :”前缀属于重复信息，去掉后保留原文的其余部分。
- * 单楼总字符数不超过 THREAD_CHAR_LIMIT，超出按顺序丢弃尾部回复并注明条数。
- */
+/** Reconstruct only explicit parent links. U labels mark detached/ambiguous nodes.
+ * Raw text is quoted and @ prefixes are preserved; extraction is separate metadata.
+ * The existing per-thread character budget still applies. */
 function renderCommentThread(
   root: CommentEntry,
   scan: (text: string) => { term: string }[],
   extract: (text: string, source: string) => ExtractedLink[],
 ): RenderedThread {
   const replies = root.replies ?? [];
-  const headerParts = [`[#${root.rpid?.trim() || "-"}]`, commentUser(root.uname, root.mid)];
+  const headerParts = [`[#${quoted(root.rpid ?? null)}]`, commentUser(root.uname, root.mid)];
   if (typeof root.like === "number") headerParts.push(`赞${root.like}`);
   const rootDate = commentDate(root.t);
   if (rootDate) headerParts.push(rootDate);
@@ -265,7 +242,7 @@ function renderCommentThread(
   const localImages = root.localPicPath ?? [];
   const imageCount = Math.max(localImages.length, root.pics?.length ?? 0);
   if (imageCount) {
-    headerParts.push(`评论图${imageCount}张${localImages.length ? `：${localImages.join("；")}` : ""}`);
+    headerParts.push(`评论图${imageCount}张${localImages.length ? `：${quoted(localImages)}` : ""}`);
   }
   if (replies.length) {
     const declared = typeof root.reply_count === "number" ? root.reply_count : undefined;
@@ -281,90 +258,72 @@ function renderCommentThread(
   const header = headerParts.join(" ");
   const bodyTags = commentTags(scan(root.message), extract(root.message, "comment"));
   if (replies.length === 0) {
-    return { text: `${header}\n  ${root.message.trim()}${bodyTags}`, truncated: false };
+    return { text: `${header}\n  正文：${quoted(root.message)}${bodyTags}`, truncated: false };
   }
 
   // 有楼中楼时整楼共享 1k 字符预算：先保根评论，再按顺序放回复
-  const bodyBudget = THREAD_CHAR_LIMIT - header.length - 1 - 2 - bodyTags.length;
-  let body = root.message.trim();
-  if (body.length > Math.max(0, bodyBudget - 1)) {
-    body = body.slice(0, Math.max(0, bodyBudget - 1)) + "…";
+  const bodyBudget = Math.max(0, THREAD_CHAR_LIMIT - header.length - bodyTags.length - 8);
+  let body = root.message;
+  // Clip before quoting: a budget cut must never leave an unterminated string.
+  if (quoted(body).length > bodyBudget) {
+    let low = 0, high = body.length;
+    while (low < high) {
+      const mid = Math.ceil((low + high) / 2);
+      if (quoted(body.slice(0, mid) + "…").length <= bodyBudget) low = mid; else high = mid - 1;
+    }
+    body = body.slice(0, low) + "…";
   }
-  const lines = [header, `  ${body}${bodyTags}`];
+  const lines = [header, `  正文：${quoted(body)}${bodyTags}`];
 
   const rootRpid = root.rpid?.trim();
-  const byId = new Map<string, ReplyEntry>();
+  const byId = new Map<string, ReplyEntry[]>();
   for (const reply of replies) {
     const id = reply.rpid?.trim();
-    if (id) byId.set(id, reply);
+    if (id) byId.set(id, [...(byId.get(id) ?? []), reply]);
   }
-
-  // parent 链（直接父在前、顶层在后），用于确定每条回复挂在哪一层
-  const chainOf = new Map<ReplyEntry, ReplyEntry[]>();
+  const parentOf = new Map<ReplyEntry, ReplyEntry>();
+  const relationOf = new Map<ReplyEntry, string>();
   for (const reply of replies) {
-    const chain: ReplyEntry[] = [];
-    let cur = reply;
-    const seen = new Set<string>();
-    while (true) {
-      const parentId = cur.parent?.trim();
-      if (!parentId || parentId === rootRpid || !byId.has(parentId)) break;
-      const curId = cur.rpid?.trim();
-      if (curId) {
-        if (seen.has(curId)) break;
-        seen.add(curId);
-      }
-      cur = byId.get(parentId)!;
-      chain.push(cur);
-      if (chain.length > MAX_THREAD_DEPTH + 8) break;
-    }
-    chainOf.set(reply, chain);
+    const id = reply.rpid?.trim();
+    const parent = reply.parent?.trim();
+    let relation: string;
+    if (id && (id === rootRpid || byId.get(id)!.length > 1)) relation = "duplicate_id";
+    else if (!parent) relation = "parent_unknown";
+    else if (id && parent === id) relation = "cycle";
+    else if ((byId.get(parent)?.length ?? 0) > 1 || (parent === rootRpid && byId.has(parent))) relation = "parent_ambiguous";
+    else if (rootRpid && parent === rootRpid) relation = "root";
+    else if (!byId.has(parent)) relation = "parent_missing";
+    else { relation = "reply"; parentOf.set(reply, byId.get(parent)![0]!); }
+    relationOf.set(reply, relation);
   }
-
-  const direct: ReplyEntry[] = [];
-  const childrenOf = new Map<string, ReplyEntry[]>();
-  const parentNameOf = new Map<ReplyEntry, string | undefined>();
+  // Cycles and descendants of cycles are shown flat; no input record is silently lost.
+  const cyclic = new Set<ReplyEntry>();
   for (const reply of replies) {
-    const parent = chainOf.get(reply)![0];
-    if (!parent) {
-      direct.push(reply);
-      parentNameOf.set(reply, root.uname);
-      continue;
+    const seen = new Set<ReplyEntry>();
+    let current: ReplyEntry | undefined = reply;
+    while (current) {
+      if (seen.has(current) || relationOf.get(current) === "cycle") { cyclic.add(reply); break; }
+      seen.add(current);
+      current = parentOf.get(current);
     }
-    parentNameOf.set(reply, parent.uname);
-    const parentId = parent.rpid?.trim() ?? "";
-    const list = childrenOf.get(parentId) ?? [];
-    list.push(reply);
-    childrenOf.set(parentId, list);
   }
-
-  // 标签沿真实父链累加：R1.2.1.1 明确表示“回复 R1.2.1”，不会落到祖先的兄弟层
-  const labelOf = new Map<string, string>();
-  const labelTree = (reply: ReplyEntry, label: string, seen: Set<string>): void => {
-    const id = reply.rpid?.trim() ?? "";
-    if (!id || seen.has(id)) return;
-    seen.add(id);
-    labelOf.set(id, label);
-    (childrenOf.get(id) ?? []).forEach((kid, index) => {
-      labelTree(kid, `${label}.${index + 1}`, seen);
-    });
-  };
-  const seenLabels = new Set<string>();
-  direct.forEach((reply, index) => labelTree(reply, `R${index + 1}`, seenLabels));
-
+  for (const reply of cyclic) { parentOf.delete(reply); relationOf.set(reply, "cycle"); }
+  const children = new Map<ReplyEntry, ReplyEntry[]>();
+  for (const [reply, parent] of parentOf) children.set(parent, [...(children.get(parent) ?? []), reply]);
   const nodeLines: string[] = [];
-  const renderedIds = new Set<string>();
-  const emit = (reply: ReplyEntry, prefix: string): void => {
-    const id = reply.rpid?.trim() ?? "";
-    if (id && renderedIds.has(id)) return;
-    if (id) renderedIds.add(id);
-    const label = labelOf.get(id) ?? "R?";
-    nodeLines.push(replyLine(reply, label, prefix, parentNameOf.get(reply), scan, extract));
-    for (const kid of childrenOf.get(id) ?? []) {
-      const depth = labelOf.get(kid.rpid?.trim() ?? "")?.split(".").length ?? 0;
-      emit(kid, depth <= 2 ? "  │  └ " : "  │  ↳ ");
-    }
+  const emit = (reply: ReplyEntry, label: string, detached: boolean): void => {
+    const depth = label.split(".").length;
+    const prefix = detached && depth === 1 ? "  ? " : depth === 1 ? "  ├ " : depth <= MAX_THREAD_DEPTH ? "  │  └ " : "  │  ↳ ";
+    nodeLines.push(replyLine(reply, label, prefix, relationOf.get(reply)!, scan, extract));
+    (children.get(reply) ?? []).forEach((kid, index) => emit(kid, `${label}.${index + 1}`, detached));
   };
-  direct.forEach((reply) => emit(reply, "  ├ "));
+  let rootIndex = 0;
+  let unknownIndex = 0;
+  for (const reply of replies) {
+    if (parentOf.has(reply)) continue;
+    const detached = relationOf.get(reply) !== "root";
+    emit(reply, detached ? `U${++unknownIndex}` : `R${++rootIndex}`, detached);
+  }
 
   let used = lines.join("\n").length;
   const rendered: string[] = [];
