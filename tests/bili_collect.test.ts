@@ -5,13 +5,15 @@ import { test, expect } from "bun:test";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
-import { createBiliCollectTool } from "../src/tools/bili_collect";
+import { createBiliCollectTool as createPagedTool } from "../src/tools/bili_collect";
 
 async function tempDir(prefix: string): Promise<string> {
   return fs.mkdtemp(path.join(tmpdir(), prefix));
 }
 
 const BV = "BV1AbCdEfGh2";
+// Selection tests inspect all selected evidence; paging is exercised separately.
+const createBiliCollectTool = (options: { datasetDir: string }) => createPagedTool({ ...options, pageTokens: 1_000_000 });
 
 async function rendered(root: Record<string, unknown>): Promise<string> {
   const dir = await tempDir("bili-relations-");
@@ -272,7 +274,7 @@ test("bili_collect：楼中楼树最多三层、根带 rpid、回复保留 rpid�
       t: 1_700_000_000,
       reply_count: 40,
       upreply: true,
-      message: "私信我领资料",
+      message: "普通资料讨论",
       replies,
     }],
   }));
@@ -325,7 +327,7 @@ test("bili_collect：作者语义档位决定单楼预算，high 比 unknown 展
     bvid: BV,
     fetched_at: "2026-11-10T00:00:00Z",
     ...(level ? { author: { name: "作者", semantic_level: level } } : {}),
-    comments: [{ rpid: "100000000001", mid: 111, uname: "楼主", message: "私信领资料", replies }],
+    comments: [{ rpid: "100000000001", mid: 111, uname: "楼主", message: "普通讨论", replies }],
   });
   const file = path.join(dir, `${BV}.json`);
   const run = async (level?: string) => {
@@ -349,7 +351,7 @@ test("bili_collect：作者语义档位决定单楼预算，high 比 unknown 展
   await fs.rm(dir, { recursive: true, force: true });
 });
 
-test("bili_collect：clean 档单楼 700、整段 16k，超出保序截断并留痕", async () => {
+test("bili_collect：clean 档普通评论遵守 700/16k 预算并交错补充", async () => {
   const dir = await tempDir("bili-collect-budget-clean-");
   const replies = Array.from({ length: 40 }, (_, i) => ({
     rpid: `8${String(i).padStart(8, "0")}`,
@@ -385,14 +387,14 @@ test("bili_collect：clean 档单楼 700、整段 16k，超出保序截断并留
   // 有楼中楼的主楼按 clean 档 700 截断
   expect(out.comment_threads[0].length).toBeLessThanOrEqual(700);
   expect(out.comment_stats.truncated_threads).toBeGreaterThan(0);
-  // 没有楼中楼的长主楼自身不裁剪，超预算是整楼不展示
-  expect(out.comment_threads[1]).toContain(longSolo);
+  // 普通楼按预算选择，本例正文可完整容纳；不依赖输出位置
+  expect(out.comment_threads.some((text: string) => text.includes(longSolo))).toBe(true);
   expect(out.notes.join("\n")).toContain("档位 clean");
   expect(out.notes.join("\n")).toContain("未展示");
   await fs.rm(dir, { recursive: true, force: true });
 });
 
-test("bili_collect：含联系方式/链接的楼不受总预算限制，强制展示", async () => {
+test("bili_collect：含联系方式/链接的楼优先于普通楼", async () => {
   const dir = await tempDir("bili-collect-forced-");
   const filler = Array.from({ length: 30 }, (_, i) => ({
     rpid: `6${String(i).padStart(8, "0")}`,
@@ -426,8 +428,8 @@ test("bili_collect：含联系方式/链接的楼不受总预算限制，强制�
   expect(out.comment_stats.budget.forced_threads).toBe(2);
   expect(out.comment_stats.shown_count).toBeLessThan(32);
   expect(out.comment_stats.shown_count + out.comment_stats.budget.dropped_threads).toBe(32);
-  expect(out.comment_stats.comment_chars).toBeGreaterThan(16_000);
-  expect(out.notes.join("\n")).toContain("强制展示");
+  expect(out.comment_stats.comment_chars).toBeLessThanOrEqual(16_000);
+  expect(texts.slice(0, 2).join("\n")).toContain("abc12345");
   await fs.rm(dir, { recursive: true, force: true });
 });
 
@@ -523,7 +525,7 @@ test("bili_collect：保留所有回复前缀原文", async () => {
   await fs.rm(dir, { recursive: true, force: true });
 });
 
-test("bili_collect：无楼中楼的主楼不受 1k 限制", async () => {
+test("bili_collect：普通主楼也受 1k 限制", async () => {
   const dir = await tempDir("bili-collect-solo-");
   const longMain = `超长主楼${"内容".repeat(600)}`; // 1204 字
   await fs.writeFile(path.join(dir, `${BV}.json`), JSON.stringify({
@@ -533,8 +535,9 @@ test("bili_collect：无楼中楼的主楼不受 1k 限制", async () => {
     comments: [{ rpid: "100000000001", mid: 111, uname: "甲", message: longMain }],
   }));
   const out = JSON.parse((await createBiliCollectTool({ datasetDir: dir }).execute({ bvid: BV })) as string);
-  expect(out.comment_threads[0]).toContain(longMain);
-  expect(out.comment_stats.truncated_threads).toBe(0);
+  expect(out.comment_threads[0].length).toBeLessThanOrEqual(1000);
+  expect(out.comment_threads[0]).toContain("…");
+  expect(out.comment_stats.truncated_threads).toBe(1);
   await fs.rm(dir, { recursive: true, force: true });
 });
 
@@ -564,6 +567,6 @@ test("bili_collect：评论全量输出，长文/楼中楼/时间点都不截断
   expect(first).toContain("置顶");
   expect(first).toContain(longReply);
   expect(first.length).toBeLessThanOrEqual(1_000);
-  expect(out.comment_threads[19]).toContain("普通评论 19");
+  expect(out.comment_threads.some((text: string) => text.includes("普通评论 19"))).toBe(true);
   await fs.rm(dir, { recursive: true, force: true });
 });

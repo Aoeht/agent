@@ -1016,6 +1016,8 @@ export class Agent {
     let budgetStopped: BudgetStopReason | undefined;
     let lastCompletion: CompletionResult | undefined;
     let attemptedVerificationRepair = false;
+    const pendingEvidencePages = new Map<string, string>();
+    let remindedEvidencePages = false;
     const finish = async (reason: StopReason, completion?: CompletionResult): Promise<AgentResult> => {
       const outcome = runOutcome(reason, completion);
       const finalAnswer = completion?.content?.trim()
@@ -1117,6 +1119,15 @@ export class Agent {
             : responseStop ?? (!llmContent?.trim() ? "empty_response"
               : this.config.planStore?.getSteps().some((step) => step.status !== "completed")
                 ? "plan_incomplete" : "answer");
+          if (reason === "answer" && pendingEvidencePages.size) {
+            if (!remindedEvidencePages && !budget.check() && (this.config.maxIterations <= 0 || iterations < this.config.maxIterations)) {
+              remindedEvidencePages = true;
+              messages.push({ role: "assistant", content: llmContent });
+              messages.push({ role: "user", content: "采证尚有未读分页，请继续调用 bili_collect；不能把已读片段当完整评论区：" + JSON.stringify([...pendingEvidencePages].map(([bvid, cursor]) => ({ bvid, cursor }))) });
+              continue;
+            }
+            return await finish("plan_incomplete", completion);
+          }
           // One bounded repair attempt; final acceptance rereads after all tools stop.
           if (reason === "answer" && !attemptedVerificationRepair && this.activeTask?.criteria.length &&
               this.config.verificationRoot &&
@@ -1179,7 +1190,10 @@ export class Agent {
           heartbeat.unref?.();
           let acceptingImages = true;
           try {
-            const callRuntime: ToolRuntime = { ...runtime };
+            const callRuntime: ToolRuntime = { ...runtime, outputBudget: {
+              maxTokens: this.config.toolResultMaxTokens ?? 2000,
+              countTokens: text => this.tokenCounter.estimateText(text, this.config.model),
+            } };
             if (this.visionEnabled) {
               callRuntime.emitImage = ({ dataUrl, label }) => {
                 if (!acceptingImages || runtime?.signal?.aborted) return false;
@@ -1209,6 +1223,15 @@ export class Agent {
               durationMs: Date.now() - startedAt,
               ok: !isErrorObservation(returned.toolResult),
             });
+            if (toolName === "bili_collect") {
+              try {
+                const page = JSON.parse(returned.toolResult);
+                if (page.format === "evidence_pages/v1" && typeof page.bvid === "string") {
+                  if (typeof page.next_cursor === "string") pendingEvidencePages.set(page.bvid, page.next_cursor);
+                  else if (page.next_cursor === null) pendingEvidencePages.delete(page.bvid);
+                }
+              } catch { /* A failed tool call cannot clear pending evidence. */ }
+            }
             this.taskStore.endAction(actionId, returned.toolResult, runtime?.signal?.aborted === true);
             this.activeTask = this.taskStore.setPlan(this.config.planStore?.getSteps() ?? []);
             this.events.emit("task_update", { task: this.activeTask });

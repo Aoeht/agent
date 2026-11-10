@@ -14,6 +14,7 @@ type ContentPart = OpenAI.Chat.Completions.ChatCompletionContentPart;
 
 // 工具运行时上下文：目前只有取消信号，MCP 调用会一路透传下去
 export interface ToolRuntime {
+  outputBudget?: { maxTokens: number; countTokens: (text: string) => number };
   /** Host-provided records from the separate visual stage; never pixels. */
   visualObservations?: string[];
   /** Host-bound task controller; tools cannot set their own verification result. */
