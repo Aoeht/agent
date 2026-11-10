@@ -36,6 +36,30 @@ test("loadSnapshot：合法快照、SRT 归一化、缺字段默认值", async (
   await fs.rm(dir, { recursive: true, force: true });
 });
 
+test("loadSnapshot：保留置顶标记与评论图片字段", async () => {
+  const dir = await tempDir("bili-snap-comment-");
+  const snapshot = {
+    schema: "bili-snapshot/v1",
+    bvid: "BV1AbCdEfGh2",
+    fetched_at: "2026-10-24T00:00:00Z",
+    comments: [{
+      like: 1,
+      is_pinned: true,
+      message: "置顶评论",
+      localPicPath: ["images/BV1AbCdEfGh2/a.jpg"],
+      pics: ["http://example.com/a.jpg"],
+    }],
+  };
+  await fs.writeFile(path.join(dir, "BV1AbCdEfGh2.json"), JSON.stringify(snapshot));
+  const loaded = await loadSnapshot(dir, "BV1AbCdEfGh2");
+  expect(loaded.comments[0]).toMatchObject({
+    is_pinned: true,
+    localPicPath: ["images/BV1AbCdEfGh2/a.jpg"],
+    pics: ["http://example.com/a.jpg"],
+  });
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
 test("loadSnapshot：segments 优先于 srt", async () => {
   const dir = await tempDir("bili-snap-seg-");
   const snapshot = {

@@ -87,6 +87,10 @@ export const CommentEntrySchema = z.object({
   message: z.string(),
   /** 置顶评论：作者置顶通常指向联系方式/资料/站外导流，是核心证据位 */
   is_pinned: z.boolean().optional(),
+  /** 评论附图本地相对路径（相对数据集根，如 images/BV.../xxx.jpg），供 read_image 查看 */
+  localPicPath: z.array(z.string()).optional(),
+  /** 评论附图原始 URL */
+  pics: z.array(z.string()).optional(),
   replies: z.array(ReplyEntrySchema).max(200).optional(),
 });
 

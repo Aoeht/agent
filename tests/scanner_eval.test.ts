@@ -6,7 +6,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
-import { runScannerEval, parseScannerReport, normalizeLevel, pairOutcome, createLiveScanPredictor, loadLabels } from "../benchmarks/scanner_eval";
+import { runScannerEval, parseScannerReport, normalizeLevel, pairOutcome, createLiveScanPredictor, loadLabels, describeGridWindows } from "../benchmarks/scanner_eval";
 import { cannedCases, cannedReports, cannedExpected } from "../benchmarks/scanner/fixtures";
 import { PlanStore } from "../src/core/plan_store";
 import { defineTool } from "../src/core/types";
@@ -133,6 +133,26 @@ describe("标注文件加载", () => {
   });
 });
 
+describe("九宫格时间窗口标注", () => {
+  test("按 manifest 给每张图带上窗口序号与秒级区间；缺失信息只保留文件名", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "scanner-grids-"));
+    await fs.writeFile(path.join(dir, "manifest.json"), JSON.stringify({
+      windows: [{ start_s: 0, end_s: 33 }, { start_s: 34, end_s: 60 }],
+      grids: [
+        { path: "grids/grid_001.jpg", window_indexes: [1, 2], cells: [{ t: 2 }, { t: 10 }, { t: 33 }] },
+        { path: "grids/grid_002.jpg", cells: [{ t: 3665 }, { t: 3700 }] },
+      ],
+    }));
+    expect(await describeGridWindows(dir, ["grid_001.jpg", "grid_002.jpg", "grid_003.jpg"]))
+      .toBe("grid_001.jpg（窗口 1–2，0:02–0:33）、grid_002.jpg（1:01:05–1:01:40）、grid_003.jpg");
+    // 没有 manifest 时退化为纯文件名
+    const bare = await fs.mkdtemp(path.join(os.tmpdir(), "scanner-grids-bare-"));
+    expect(await describeGridWindows(bare, ["grid_001.jpg"])).toBe("grid_001.jpg");
+    await fs.rm(dir, { recursive: true, force: true });
+    await fs.rm(bare, { recursive: true, force: true });
+  });
+});
+
 describe("live 管道接线（假 client 走真实 delegate 白名单与发现库）", () => {
   test("scanner 子代理跑完：报告落盘、发现库隔离落盘、三维度 dedupe_key 齐全", async () => {
     const bvid = "BVWFIX000001";
@@ -185,12 +205,19 @@ describe("live 管道接线（假 client 走真实 delegate 白名单与发现�
     const workDir = path.join(root, "work");
     const datasetDir = path.join(root, "dataset");
     await fs.mkdir(datasetDir, { recursive: true });
+    // 九宫格 + manifest：任务描述里应出现覆盖时间窗
+    const gridDir = path.join(workDir, "frames", bvid);
+    await fs.mkdir(gridDir, { recursive: true });
+    await fs.writeFile(path.join(gridDir, "grid_001.jpg"), "jpeg");
+    await fs.writeFile(path.join(gridDir, "manifest.json"), JSON.stringify({
+      grids: [{ path: "grids/grid_001.jpg", window_indexes: [1], cells: [{ t: 2 }, { t: 33 }] }],
+    }));
     const fakeBiliCollect = defineTool({
       name: "bili_collect",
       description: "假证据预处理：返回合成证据",
       schema: z.object({ bvid: z.string() }),
       parallelSafe: true,
-      execute: async () => JSON.stringify({ bvid, risk_windows: [], flagged_comments: [], links: [], notes: ["合成证据，无真实数据"] }),
+      execute: async () => JSON.stringify({ bvid, risk_windows: [], comments: [], links: [], notes: ["合成证据，无真实数据"] }),
     });
     const fakeRagSearch = defineTool({
       name: "rag_search",
@@ -242,6 +269,9 @@ describe("live 管道接线（假 client 走真实 delegate 白名单与发现�
     const childSystem = requests[0]!.messages[0].content as string;
     expect(childSystem).toContain("诈骗风险扫描");
     expect(childSystem).toContain("采证≠终判");
+    // 任务描述注入了九宫格的覆盖时间窗
+    const childTask = requests[0]!.messages.map((m: any) => m.content).join("\n");
+    expect(childTask).toContain("grid_001.jpg（窗口 1，0:02–0:33）");
 
     await fs.rm(root, { recursive: true, force: true });
   });

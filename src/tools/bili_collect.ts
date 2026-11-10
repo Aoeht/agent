@@ -16,7 +16,6 @@ import {
   loadSnapshot,
   normalizeTranscript,
   resolveBvid,
-  type CommentEntry,
   type VideoSnapshot,
 } from "../bili/snapshot";
 import { extractLinks, type ExtractedLink } from "../bili/links";
@@ -29,7 +28,7 @@ export interface BiliCollectToolOptions {
   datasetDir?: string;
 }
 
-/** 输出体量上限：超过后按优先级裁剪，再超硬截断——子代理上下文不能被一条弹幕海淹掉 */
+/** 输出体量上限：仅超限时压缩弹幕/字幕摘录（评论永远全量），并置 size_trimmed 留痕 */
 const OUTPUT_CHAR_LIMIT = 24_000;
 
 const trunc = (text: string, max: number): string => (text.length > max ? `${text.slice(0, max)}…` : text);
@@ -40,7 +39,8 @@ export function createBiliCollectTool(options: BiliCollectToolOptions = {}) {
     name: "bili_collect",
     description:
       "读取已采集的 B 站视频快照（dataset/<BV号>.json）并做证据预处理：粗定位风险时间窗（窗内弹幕样本+字幕摘录）、" +
-      "筛出命中风险的评论、提取全部文本中的链接候选（含混淆变体）、输出作者卡片。返回结构化证据 JSON，不含结论；" +
+      "输出全部评论（含楼中楼，命中风险的评论就地标注 hits/links，置顶与评论图带标记）、" +
+      "提取全部文本中的链接候选（含混淆变体）、输出作者卡片。返回结构化证据 JSON，不含结论；" +
       "快照缺失会明确报错并提示先运行采集流程。",
     schema: z.object({
       bvid: z.string().min(1).describe("BV 号或 B 站视频链接"),
@@ -110,48 +110,36 @@ async function collectEvidence(bvid: string, datasetDir: string): Promise<string
   }
   for (const segment of transcriptSegments) collectLinks(segment.text, "transcript");
 
-  // 命中评论：正文或楼中楼里有关键词/链接的都算，楼中楼单独标出
-  const flaggedComments: Array<{
-    uname?: string;
-    like?: number;
-    message: string;
-    hits: string[];
-    links: string[];
-    flagged_replies: Array<{ uname?: string; message: string; hits: string[]; links: string[] }>;
-  }> = [];
-  for (const comment of comments) {
-    if (flaggedComments.length >= 20) break;
-    const hits = scanKeywords(comment.message);
-    const links = extractLinks(comment.message, "comment");
-    const flaggedReplies = (comment.replies ?? [])
-      .map((reply) => ({
+  // 全量评论：一条不裁（含楼中楼与评论图），风险命中就地标注，由模型自己通读判定
+  const allComments = comments.map((comment) => {
+    const hits = scanKeywords(comment.message).map((h) => h.term);
+    const links = extractLinks(comment.message, "comment").map((l) => l.normalized);
+    const localImages = comment.localPicPath ?? [];
+    const imageCount = Math.max(localImages.length, comment.pics?.length ?? 0);
+    const replies = (comment.replies ?? []).map((reply) => {
+      const replyHits = scanKeywords(reply.message).map((h) => h.term);
+      const replyLinks = extractLinks(reply.message, "comment").map((l) => l.normalized);
+      return {
         ...(reply.uname !== undefined ? { uname: reply.uname } : {}),
-        message: trunc(reply.message, 200),
-        hits: scanKeywords(reply.message).map((h) => h.term),
-        links: extractLinks(reply.message, "comment").map((l) => l.normalized),
-      }))
-      .filter((r) => r.hits.length > 0 || r.links.length > 0)
-      .slice(0, 5);
-    if (hits.length === 0 && links.length === 0 && flaggedReplies.length === 0) continue;
-    flaggedComments.push({
-      ...(comment.uname !== undefined ? { uname: comment.uname } : {}),
-      ...(comment.like !== undefined ? { like: comment.like } : {}),
-      message: trunc(comment.message, 200),
-      hits: hits.map((h) => h.term),
-      links: links.map((l) => l.normalized),
-      flagged_replies: flaggedReplies,
+        ...(reply.like !== undefined ? { like: reply.like } : {}),
+        message: reply.message,
+        ...(replyHits.length ? { hits: replyHits } : {}),
+        ...(replyLinks.length ? { links: replyLinks } : {}),
+      };
     });
-  }
-
-  const topComments = comments
-    .slice()
-    .sort((a, b) => (b.like ?? 0) - (a.like ?? 0))
-    .slice(0, 15)
-    .map((comment: CommentEntry) => ({
+    return {
       ...(comment.uname !== undefined ? { uname: comment.uname } : {}),
       ...(comment.like !== undefined ? { like: comment.like } : {}),
-      message: trunc(comment.message, 160),
-    }));
+      ...(comment.t !== undefined ? { t: comment.t } : {}),
+      ...(comment.is_pinned ? { is_pinned: true } : {}),
+      ...(imageCount ? { image_count: imageCount } : {}),
+      ...(localImages.length ? { local_images: localImages } : {}),
+      message: comment.message,
+      ...(hits.length ? { hits } : {}),
+      ...(links.length ? { links } : {}),
+      ...(replies.length ? { replies } : {}),
+    };
+  });
 
   const evidence = {
     bvid,
@@ -187,12 +175,15 @@ async function collectEvidence(bvid: string, datasetDir: string): Promise<string
       : null,
     transcript: { source: transcriptSource, segment_count: transcriptSegments.length },
     danmaku: { count: danmaku.length },
-    comments: { count: comments.length },
+    comment_stats: {
+      count: comments.length,
+      pinned_count: comments.filter((comment) => comment.is_pinned).length,
+      reply_count: comments.reduce((sum, comment) => sum + (comment.replies?.length ?? 0), 0),
+    },
     title_desc_hits: titleDescHits.map((h) => ({ term: h.term, category: h.category, count: h.count })),
     risk_windows: localization.windows,
     keyword_totals: localization.keyword_totals.slice(0, 30),
-    flagged_comments: flaggedComments,
-    top_comments: topComments,
+    comments: allComments,
     links: [...linkMap.values()]
       .sort((a, b) => Number(b.short) - Number(a.short) || a.normalized.localeCompare(b.normalized))
       .slice(0, 25)
@@ -206,22 +197,17 @@ async function collectEvidence(bvid: string, datasetDir: string): Promise<string
     notes,
   };
 
-  return capOutput(evidence, datasetDir, bvid);
+  return capOutput(evidence);
 }
 
-/** 输出体量守护：先裁大字段再硬截断，截断必须留痕 */
-function capOutput(evidence: Record<string, unknown>, datasetDir: string, bvid: string): string {
-  let text = JSON.stringify(evidence);
+/** 输出体量守护：评论（含楼中楼）全量输出、绝不裁剪；仅在超限时压缩弹幕/字幕摘录并留痕 */
+function capOutput(evidence: Record<string, unknown>): string {
+  const text = JSON.stringify(evidence);
   if (text.length <= OUTPUT_CHAR_LIMIT) return text;
-  const trimmed = { ...evidence } as typeof evidence;
-  trimmed.top_comments = [];
-  trimmed.risk_windows = (evidence.risk_windows as RiskWindow[]).map((w) => ({
+  const trimmed = (evidence.risk_windows as RiskWindow[]).map((w) => ({
     ...w,
     transcript_excerpt: trunc(w.transcript_excerpt, 200),
     danmaku_hits: w.danmaku_hits.slice(0, 5).map((h) => ({ ...h, text: trunc(h.text, 100) })),
   }));
-  text = JSON.stringify(trimmed);
-  if (text.length <= OUTPUT_CHAR_LIMIT) return text;
-  return text.slice(0, OUTPUT_CHAR_LIMIT) +
-    `…（证据超长被截断，完整数据在快照 ${path.join(datasetDir, `${bvid}.json`)}）`;
+  return JSON.stringify({ ...evidence, size_trimmed: true, risk_windows: trimmed });
 }

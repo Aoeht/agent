@@ -22,7 +22,8 @@ import path from "node:path";
 import type OpenAI from "openai";
 import { ToolRegistry } from "../src/core/registry";
 import type { ToolDefinition } from "../src/core/types";
-import { createDelegateTaskTool, type DelegateBudget } from "../src/tools/delegate_task";
+import { DEFAULT_AGENT_MODEL } from "../src/config";
+import { createDelegateTaskTool, loadDelegateBudget, type DelegateBudget } from "../src/tools/delegate_task";
 import { createBiliCollectTool } from "../src/tools/bili_collect";
 import { createIngestFindingsTool } from "../src/tools/ingest_findings";
 import { createInspectLinkTool } from "../src/tools/inspect_link";
@@ -441,6 +442,50 @@ export interface LiveScanPredictorOptions {
   tools?: { biliCollect?: ToolDefinition; inspectLink?: ToolDefinition; ragSearch?: ToolDefinition; readImage?: ToolDefinition };
 }
 
+const formatClock = (seconds: number): string => {
+  const total = Math.max(0, Math.round(seconds));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  return hours
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
+    : `${minutes}:${String(secs).padStart(2, "0")}`;
+};
+
+interface GridManifest {
+  grids?: Array<{ path?: string; window_indexes?: number[]; cells?: Array<{ t?: number }> }>;
+}
+
+/**
+ * 给每张九宫格标注"覆盖抽帧窗口 + 起止时间"，注入 scanner 任务描述。
+ * 窗口信息来自 frames/<BV>/manifest.json（抽帧脚本产物）；缺失时只给文件名，
+ * 子代理仍可从每格左上角的时间戳读出时刻。
+ */
+export async function describeGridWindows(gridDir: string, grids: string[]): Promise<string> {
+  const manifest = await fs.readFile(path.join(gridDir, "manifest.json"), "utf8")
+    .then(text => JSON.parse(text) as GridManifest)
+    .catch(() => null);
+  const labels = new Map<string, string>();
+  for (const grid of manifest?.grids ?? []) {
+    if (!grid.path) continue;
+    const times = (grid.cells ?? [])
+      .map(cell => cell?.t)
+      .filter((t): t is number => typeof t === "number");
+    const indexes = grid.window_indexes ?? [];
+    const contiguous = indexes.every((value, i) => i === 0 || value === indexes[i - 1]! + 1);
+    const windows = indexes.length ? `窗口 ${indexes.join(contiguous ? "–" : "、")}` : "";
+    const span = times.length ? `${formatClock(Math.min(...times))}–${formatClock(Math.max(...times))}` : "";
+    const label = [windows, span].filter(Boolean).join("，");
+    if (label) labels.set(path.basename(grid.path), label);
+  }
+  return grids
+    .map(name => {
+      const label = labels.get(name);
+      return label ? `${name}（${label}）` : name;
+    })
+    .join("、");
+}
+
 export function createLiveScanPredictor(options: LiveScanPredictorOptions): ScanPredictor & { registry: ToolRegistry } {
   const reportsDir = path.join(options.workDir, "reports");
   const rawDir = path.join(options.workDir, "raw");
@@ -459,12 +504,13 @@ export function createLiveScanPredictor(options: LiveScanPredictorOptions): Scan
     ...(options.budget ? { budget: options.budget } : {}),
   });
   const predict = async (c: ScannerGoldCase): Promise<ScanOutcome> => {
-    // 子代理没有列目录能力，任务描述必须给出九宫格的确切文件名
+    // 子代理没有列目录能力，任务描述必须给出九宫格的确切文件名与各自时间窗
     const gridDir = path.join(options.workDir, "frames", c.id);
     const gridFiles = await fs.readdir(gridDir).catch(() => [] as string[]);
     const grids = gridFiles.filter((f) => /^grid_\d+\.jpg$/i.test(f)).sort();
     const gridHint = grids.length
-      ? `工作区 frames/${c.id}/ 下有九宫格：${grids.join("、")}，请用 read_image 按序号逐张查看。`
+      ? `工作区 frames/${c.id}/ 下有九宫格：${await describeGridWindows(gridDir, grids)}。` +
+        "每格左上角也标有时间戳，请用 read_image 按序号逐张查看。"
       : "本次没有该视频的九宫格抽帧目录。";
     const observation = await delegate.execute({
       role: "scanner",
@@ -486,7 +532,7 @@ export function createLiveScanPredictor(options: LiveScanPredictorOptions): Scan
 // ---------- CLI ----------
 
 function parseArgs(argv: string[]) {
-  const known = new Set(["--self-check", "--live", "--replay", "--dataset", "--labels", "--output", "--model", "--limit", "--only", "--force"]);
+  const known = new Set(["--self-check", "--live", "--replay", "--dataset", "--labels", "--output", "--model", "--limit", "--only", "--force", "--concurrency", "--max-tokens"]);
   const options: {
     mode: "replay" | "live" | "self-check";
     dataset: string;
@@ -496,17 +542,21 @@ function parseArgs(argv: string[]) {
     limit?: number;
     only: string[];
     force: boolean;
-  } = { mode: "replay", dataset: "dataset", labels: "benchmarks/scanner/labels.json", output: "work/scanner-eval", only: [], force: false };
+    concurrency: number;
+    maxTokens?: number;
+  } = { mode: "replay", dataset: "dataset", labels: "benchmarks/scanner/labels.json", output: "work/scanner-eval", only: [], force: false, concurrency: 1 };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
     if (!known.has(arg)) throw new Error(`未知参数 ${arg}（用法见 --help）`);
-    if (arg === "--self-check" || arg === "--live") options.mode = arg === "--live" ? "live" : "self-check";
+    if (arg === "--self-check" || arg === "--live" || arg === "--replay") options.mode = arg === "--live" ? "live" : arg === "--self-check" ? "self-check" : "replay";
     else if (arg === "--force") options.force = true;
     else if (arg === "--only") options.only.push(argv[++i]!);
-    else if (arg === "--limit") {
+    else if (arg === "--limit" || arg === "--concurrency" || arg === "--max-tokens") {
       const value = Number(argv[++i]);
-      if (!Number.isSafeInteger(value) || value <= 0) throw new Error("--limit 需要正整数");
-      options.limit = value;
+      if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${arg} 需要正整数`);
+      if (arg === "--limit") options.limit = value;
+      else if (arg === "--concurrency") options.concurrency = value;
+      else options.maxTokens = value;
     } else {
       const value = argv[++i];
       if (!value || value.startsWith("--")) throw new Error(`${arg} 需要一个值`);
@@ -534,7 +584,9 @@ if (import.meta.main) {
       "  bun benchmarks/scanner_eval.ts --replay  [--labels ...] [--output ...]          # 对已存报告重新打分（默认）",
       "  bun benchmarks/scanner_eval.ts --live    [--dataset dataset] [--labels ...] [--model m]",
       "                                           [--limit N] [--only BVxxx ...] [--force]",
-      "live 模式逐个真跑 scanner 子代理（走真实 delegate 管道）；发现库与轨迹都落在 --output 工作目录内，",
+      "                                           [--concurrency N] [--max-tokens N]",
+      "live 模式逐个真跑 scanner 子代理（走真实 delegate 管道）；--concurrency 控制并行子代理数，",
+      "--max-tokens 覆盖单次委派预算（默认按 AGENT_DELEGATE_TOKENS）。发现库与轨迹都落在 --output 工作目录内，",
       "不污染真实 .agent-data。报告落 <output>/reports/<BV>.json，原始回执落 <output>/raw/<BV>.txt。",
     ].join("\n"));
   } else {
@@ -555,17 +607,36 @@ if (import.meta.main) {
       if (options.mode === "live") {
         const live = selected.filter(c => !existingReports.has(c.id) || options.force);
         const capped = options.limit ? live.slice(0, options.limit) : live;
-        const model = options.model ?? process.env.AGENT_MODEL ?? "glm-5.2";
+        const model = options.model ?? process.env.AGENT_MODEL ?? DEFAULT_AGENT_MODEL;
         if (capped.length === 0) {
           console.log(`全部 ${selected.length} 条标注都已有报告，无需重跑（--force 强制重扫）。`);
         } else {
-          console.log(`live 扫描 ${capped.length}/${selected.length} 条（模型 ${model}）；快照目录：${options.dataset}`);
-          const predictor = createLiveScanPredictor({ datasetDir: options.dataset, workDir: options.output, model });
-          for (const testCase of capped) {
-            process.stdout.write(`扫描 ${testCase.id}（${testCase.category}）… `);
-            const outcome = await predictor(testCase);
-            console.log(outcome.report ? `完成（overall=${outcome.report.risk_level}）` : "未取得结构化报告，按整例弃权计");
-          }
+          const baseBudget = loadDelegateBudget();
+          const budget: DelegateBudget | undefined = options.maxTokens === undefined
+            ? undefined
+            : { ...baseBudget, maxTotalTokens: options.maxTokens, maxWallClockMs: Math.max(baseBudget.maxWallClockMs, 600_000) };
+          console.log(`live 扫描 ${capped.length}/${selected.length} 条（模型 ${model}，并发 ${Math.min(options.concurrency, capped.length)}` +
+            `${budget ? `，单条预算 ${budget.maxTotalTokens} tokens` : ""}）；快照目录：${options.dataset}`);
+          const predictor = createLiveScanPredictor({
+            datasetDir: options.dataset, workDir: options.output, model,
+            ...(budget ? { budget } : {}),
+          });
+          let started = 0;
+          const worker = async () => {
+            while (true) {
+              const index = started++;
+              const testCase = capped[index];
+              if (!testCase) return;
+              try {
+                const outcome = await predictor(testCase);
+                console.log(`[${index + 1}/${capped.length}] ${testCase.id}（${testCase.category}）` +
+                  (outcome.report ? `overall=${outcome.report.risk_level}` : "未取得结构化报告，按整例弃权计"));
+              } catch (error) {
+                console.log(`[${index + 1}/${capped.length}] ${testCase.id} 失败：${error instanceof Error ? error.message : String(error)}`);
+              }
+            }
+          };
+          await Promise.all(Array.from({ length: Math.min(options.concurrency, capped.length) }, () => worker()));
         }
       }
       // 打分一律走落盘报告（live 刚写完的也在其中），保证 live/replay 同一条打分路径
