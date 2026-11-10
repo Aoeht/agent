@@ -149,7 +149,7 @@ test("bili_collect：证据聚合端到端", async () => {
   );
   // 评论树：根带 rpid 与用户名/mid，楼中楼就地标注命中与链接
   expect(out.comment_threads).toHaveLength(2);
-  expect(out.comment_stats).toEqual({ count: 2, pinned_count: 0, reply_count: 1, truncated_threads: 0 });
+  expect(out.comment_stats).toMatchObject({ count: 2, pinned_count: 0, reply_count: 1, truncated_threads: 0 });
   const flagged = out.comment_threads.find((thread: string) => thread.includes('[#"1001"]'));
   expect(flagged).toContain('name="甲" mid=111');
   expect(flagged).toContain('命中=["进群","看置顶"]');
@@ -195,7 +195,7 @@ test("bili_collect：置顶评论强制入列并带评论图路径", async () =>
   const out = JSON.parse((await tool.execute({ bvid: BV })) as string);
   // 置顶评论赞数为 0 也照样全量输出，并带置顶标记与评论图路径
   expect(out.comment_threads).toHaveLength(3);
-  expect(out.comment_stats).toEqual({ count: 3, pinned_count: 1, reply_count: 0, truncated_threads: 0 });
+  expect(out.comment_stats).toMatchObject({ count: 3, pinned_count: 1, reply_count: 0, truncated_threads: 0 });
   const pinned = out.comment_threads.find((thread: string) => thread.includes("置顶"));
   expect(pinned).toContain("加微信 abc123 领资料");
   expect(pinned).toContain('评论图1张：["images/BV1AbCdEfGh2/pin.jpg"]');
@@ -243,7 +243,7 @@ test("bili_collect：输出超长时压缩弹幕/字幕摘录并留痕，评论�
   expect(out.comment_threads).toHaveLength(2);
   expect(out.comment_threads[0]).toContain("看置顶 进群领取");
   expect(out.comment_threads[0]).toContain("点 example点com 领");
-  expect(out.comment_stats).toEqual({ count: 2, pinned_count: 0, reply_count: 1, truncated_threads: 0 });
+  expect(out.comment_stats).toMatchObject({ count: 2, pinned_count: 0, reply_count: 1, truncated_threads: 0 });
   await fs.rm(dir, { recursive: true, force: true });
 });
 
@@ -283,26 +283,208 @@ test("bili_collect：楼中楼树最多三层、根带 rpid、回复保留 rpid�
   expect(thread).toContain(`[#"${rootRpid}"] name="楼主" mid=111`);
   expect(thread).toContain("楼中楼35/40条（不完整）");
   expect(thread).toContain("UP回复过");
-  // 三层树：根 -> R1 -> R1.1；更深回复带血统标签压平并带 ↳
+  // 三层树：根 -> R1 -> R1.1 -> R1.1.1（unknown 档取 3 层）
   expect(thread).toContain('R1 id="200000000002"');
   expect(thread).toContain('R1.1 id="300000000003"');
   expect(thread).toContain('R1.1.1 id="400000000004"');
-  // 第四层保留完整父链并紧跟其父输出，读起来不会错认成回复 R1.1
-  expect(thread).toContain('R1.1.1.1 id="450000000045"');
+  // 第四层超出未知档位（3 层）整支略去，楼内留痕说明
+  expect(thread).not.toContain('id="450000000045"');
+  expect(thread).toContain("超出档位 3 层深度");
   // 正文保留原始回复前缀
   expect(thread).toContain("回复 @甲 :我也要");
-  expect(thread.indexOf('R1.1.1.1 id="450000000045"')).toBeGreaterThan(thread.indexOf('R1.1.1 id="400000000004"'));
-  expect(thread).toContain("↳");
+  expect(thread.indexOf('R1.1.1 id="400000000004"')).toBeGreaterThan(thread.indexOf('R1.1 id="300000000003"'));
   // 父节点缺失的回复独立标记，不伪造主楼回复关系
   expect(thread).toContain('relation=parent_missing name="孤儿" mid=555');
   // 子回复保留原始 rpid
-  for (const id of ["200000000002", "300000000003", "400000000004", "450000000045", "500000000005"]) {
+  for (const id of ["200000000002", "300000000003", "400000000004", "500000000005"]) {
     expect(thread).toContain(`id="${id}"`);
   }
   // 单楼 1k 封顶，截断有明示
   expect(thread.length).toBeLessThanOrEqual(1_000);
   expect(thread).toContain("未展示");
-  expect(out.comment_stats).toEqual({ count: 1, pinned_count: 0, reply_count: 35, truncated_threads: 1 });
+  expect(out.comment_stats).toMatchObject({
+    count: 1, pinned_count: 0, reply_count: 35, truncated_threads: 1,
+    // 快照没给作者语义档，按 unknown 档（1000/24k、3 层）计预算
+    budget: { level: "unknown", per_thread: 1_000, total: 24_000, reply_depth: 3, dropped_threads: 0 },
+  });
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("bili_collect：作者语义档位决定单楼预算，high 比 unknown 展示更多楼中楼", async () => {
+  const dir = await tempDir("bili-collect-budget-tier-");
+  const replies = Array.from({ length: 40 }, (_, i) => ({
+    rpid: `7${String(i).padStart(8, "0")}`,
+    parent: "100000000001",
+    mid: 900 + i,
+    uname: `填${i}`,
+    like: 0,
+    message: `填充回复${i}${"内容".repeat(20)}`,
+  }));
+  const snapshot = (level?: string) => ({
+    schema: "bili-snapshot/v1",
+    bvid: BV,
+    fetched_at: "2026-11-10T00:00:00Z",
+    ...(level ? { author: { name: "作者", semantic_level: level } } : {}),
+    comments: [{ rpid: "100000000001", mid: 111, uname: "楼主", message: "私信领资料", replies }],
+  });
+  const file = path.join(dir, `${BV}.json`);
+  const run = async (level?: string) => {
+    await fs.writeFile(file, JSON.stringify(snapshot(level)));
+    return JSON.parse((await createBiliCollectTool({ datasetDir: dir }).execute({ bvid: BV })) as string);
+  };
+  const shownReplies = (text: string) => (text.match(/  [├│]/g) ?? []).length;
+
+  const unknown = await run();
+  const high = await run("high");
+  expect(unknown.comment_stats.budget).toEqual({ level: "unknown", per_thread: 1_000, total: 24_000, reply_depth: 3, forced_threads: 0, dropped_threads: 0 });
+  expect(high.comment_stats.budget).toEqual({ level: "high", per_thread: 2_000, total: 48_000, reply_depth: 3, forced_threads: 0, dropped_threads: 0 });
+  expect(unknown.comment_threads[0].length).toBeLessThanOrEqual(1_000);
+  expect(high.comment_threads[0].length).toBeLessThanOrEqual(2_000);
+  // 同一楼在 high 档下既突破 1k 又显示更多回复，且截断有明示
+  expect(high.comment_threads[0].length).toBeGreaterThan(1_000);
+  expect(shownReplies(high.comment_threads[0])).toBeGreaterThan(shownReplies(unknown.comment_threads[0]));
+  expect(unknown.comment_threads[0]).toContain("未展示");
+  expect(high.comment_threads[0]).toContain("未展示");
+  expect(high.comment_stats.truncated_threads).toBe(1);
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("bili_collect：clean 档单楼 700、整段 16k，超出保序截断并留痕", async () => {
+  const dir = await tempDir("bili-collect-budget-clean-");
+  const replies = Array.from({ length: 40 }, (_, i) => ({
+    rpid: `8${String(i).padStart(8, "0")}`,
+    parent: "100000000001",
+    mid: 900 + i,
+    uname: `填${i}`,
+    message: `回复${i}`,
+  }));
+  const longSolo = `独立主楼${"内容".repeat(250)}`; // 约 1012 字
+  // 40 条主楼各约 600 字，合计远超 clean 档 16k 总预算
+  const solo = Array.from({ length: 40 }, (_, i) => ({
+    rpid: `9${String(i).padStart(8, "0")}`,
+    mid: 700 + i,
+    uname: `u${i}`,
+    like: i,
+    message: i === 0 ? longSolo : `短主楼${i}${"填充".repeat(300)}`,
+  }));
+  await fs.writeFile(path.join(dir, `${BV}.json`), JSON.stringify({
+    schema: "bili-snapshot/v1",
+    bvid: BV,
+    fetched_at: "2026-11-10T00:00:00Z",
+    author: { name: "作者", semantic_level: "clean" },
+    comments: [{ rpid: "100000000001", mid: 111, uname: "楼主", message: "主楼", replies }, ...solo],
+  }));
+  const out = JSON.parse((await createBiliCollectTool({ datasetDir: dir }).execute({ bvid: BV })) as string);
+
+  expect(out.comment_stats.budget).toMatchObject({ level: "clean", per_thread: 700, total: 16_000 });
+  expect(out.comment_stats.count).toBe(41);
+  expect(out.comment_stats.shown_count).toBeLessThan(41);
+  expect(out.comment_stats.budget.dropped_threads).toBeGreaterThan(0);
+  expect(out.comment_stats.shown_count + out.comment_stats.budget.dropped_threads).toBe(41);
+  expect(out.comment_stats.comment_chars).toBeLessThanOrEqual(16_000);
+  // 有楼中楼的主楼按 clean 档 700 截断
+  expect(out.comment_threads[0].length).toBeLessThanOrEqual(700);
+  expect(out.comment_stats.truncated_threads).toBeGreaterThan(0);
+  // 没有楼中楼的长主楼自身不裁剪，超预算是整楼不展示
+  expect(out.comment_threads[1]).toContain(longSolo);
+  expect(out.notes.join("\n")).toContain("档位 clean");
+  expect(out.notes.join("\n")).toContain("未展示");
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("bili_collect：含联系方式/链接的楼不受总预算限制，强制展示", async () => {
+  const dir = await tempDir("bili-collect-forced-");
+  const filler = Array.from({ length: 30 }, (_, i) => ({
+    rpid: `6${String(i).padStart(8, "0")}`,
+    mid: 600 + i,
+    uname: `f${i}`,
+    like: 100 - i,
+    message: `普通主楼${i}${"填充".repeat(300)}`,
+  }));
+  const withReplies = (rpid: string) => Array.from({ length: 30 }, (_, i) => ({
+    rpid: `${rpid}${String(i).padStart(4, "0")}`,
+    parent: rpid,
+    mid: 500 + i,
+    uname: `r${i}`,
+    message: `回复内容${i}${"补充".repeat(8)}`,
+  }));
+  const contact = { rpid: "610000000001", mid: 1, uname: "引流", message: "加微信 abc12345 领资料", replies: withReplies("710000000001") };
+  const linkOnly = { rpid: "610000000002", mid: 2, uname: "链接", message: "访问 example点com 领取", replies: withReplies("710000000002") };
+  await fs.writeFile(path.join(dir, `${BV}.json`), JSON.stringify({
+    schema: "bili-snapshot/v1",
+    bvid: BV,
+    fetched_at: "2026-11-10T00:00:00Z",
+    author: { name: "作者", semantic_level: "clean" },
+    // 30 条普通长主楼先耗尽 16k 总预算，两条命中在最后，必须仍能看到
+    comments: [...filler, contact, linkOnly],
+  }));
+  const out = JSON.parse((await createBiliCollectTool({ datasetDir: dir }).execute({ bvid: BV })) as string);
+  const texts = out.comment_threads as string[];
+  expect(texts.some((thread) => thread.includes("加微信 abc12345"))).toBe(true);
+  expect(texts.some((thread) => thread.includes("example点com"))).toBe(true);
+  expect(out.comment_stats.count).toBe(32);
+  expect(out.comment_stats.budget.forced_threads).toBe(2);
+  expect(out.comment_stats.shown_count).toBeLessThan(32);
+  expect(out.comment_stats.shown_count + out.comment_stats.budget.dropped_threads).toBe(32);
+  expect(out.comment_stats.comment_chars).toBeGreaterThan(16_000);
+  expect(out.notes.join("\n")).toContain("强制展示");
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("bili_collect：楼中楼层数按档位裁剪（low/clean 1 层、medium 2 层、high 3 层）", async () => {
+  const dir = await tempDir("bili-collect-depth-");
+  const snapshot = (level: string) => ({
+    schema: "bili-snapshot/v1",
+    bvid: BV,
+    fetched_at: "2026-11-10T00:00:00Z",
+    author: { name: "作者", semantic_level: level },
+    comments: [{
+      rpid: "100",
+      mid: 1,
+      uname: "楼主",
+      message: "主楼",
+      replies: [
+        { rpid: "201", parent: "100", uname: "甲", message: "第一层回复" },
+        { rpid: "202", parent: "201", uname: "乙", message: "第二层回复" },
+        { rpid: "203", parent: "202", uname: "丙", message: "第三层回复" },
+        { rpid: "204", parent: "203", uname: "丁", message: "第四层回复" },
+      ],
+    }],
+  });
+  const file = path.join(dir, `${BV}.json`);
+  const run = async (level: string) => {
+    await fs.writeFile(file, JSON.stringify(snapshot(level)));
+    return JSON.parse((await createBiliCollectTool({ datasetDir: dir }).execute({ bvid: BV })) as string);
+  };
+
+  const low = await run("low");
+  expect(low.comment_stats.budget.reply_depth).toBe(1);
+  expect(low.comment_threads[0]).toContain("第一层回复");
+  expect(low.comment_threads[0]).not.toContain("第二层回复");
+  expect(low.comment_threads[0]).toContain("超出档位 1 层深度");
+  expect(low.comment_stats.truncated_threads).toBe(1);
+
+  const clean = await run("clean");
+  expect(clean.comment_stats.budget.reply_depth).toBe(1);
+  expect(clean.comment_threads[0]).not.toContain("第二层回复");
+
+  const medium = await run("medium");
+  expect(medium.comment_stats.budget.reply_depth).toBe(2);
+  expect(medium.comment_threads[0]).toContain("第二层回复");
+  expect(medium.comment_threads[0]).not.toContain("第三层回复");
+  expect(medium.comment_threads[0]).toContain("超出档位 2 层深度");
+
+  const high = await run("high");
+  expect(high.comment_stats.budget.reply_depth).toBe(3);
+  expect(high.comment_threads[0]).toContain("第三层回复");
+  expect(high.comment_threads[0]).not.toContain("第四层回复");
+  expect(high.comment_threads[0]).toContain("超出档位 3 层深度");
+
+  // 缺失档位按 unknown，保持 3 层
+  const unknown = await run("unknown");
+  expect(unknown.comment_threads[0]).toContain("第三层回复");
+  expect(unknown.comment_threads[0]).not.toContain("第四层回复");
+
   await fs.rm(dir, { recursive: true, force: true });
 });
 
@@ -376,7 +558,7 @@ test("bili_collect：评论全量输出，长文/楼中楼/时间点都不截断
   const out = JSON.parse((await createBiliCollectTool({ datasetDir: dir }).execute({ bvid: BV })) as string);
   expect(out.size_trimmed).toBeUndefined();
   expect(out.comment_threads).toHaveLength(20); // 旧实现只留前 15 条
-  expect(out.comment_stats).toEqual({ count: 20, pinned_count: 1, reply_count: 1, truncated_threads: 0 });
+  expect(out.comment_stats).toMatchObject({ count: 20, pinned_count: 1, reply_count: 1, truncated_threads: 0 });
   const first = out.comment_threads[0] as string;
   expect(first).toContain(longMain);
   expect(first).toContain("置顶");

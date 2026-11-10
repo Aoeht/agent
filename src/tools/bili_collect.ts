@@ -22,21 +22,26 @@ import {
 } from "../bili/snapshot";
 import { extractLinks, type ExtractedLink } from "../bili/links";
 import { localizeRisks, type RiskWindow } from "../bili/localize";
-import { associateContacts } from "../bili/contacts";
+import { associateContacts, hasContactSignal } from "../bili/contacts";
 import { measureDataCoverage } from "../bili/coverage";
+import type { AuthorRiskLevel } from "../bili/author_risk";
 
 export interface BiliCollectToolOptions {
   /** 快照数据集目录；缺省 BILI_DATASET_DIR，再缺省 dataset/。注册时固定，子代理不可指定任意路径 */
   datasetDir?: string;
 }
 
-/** 输出体量上限：仅超限时压缩弹幕/字幕摘录（评论永远全量），并置 size_trimmed 留痕 */
+/** 输出体量上限：仅超限时压缩弹幕/字幕摘录（评论按作者档位预算控制），并置 size_trimmed 留痕 */
 const OUTPUT_CHAR_LIMIT = 24_000;
 
-/** 单个楼中楼（主楼+回复）的字符上限；超出按顺序截断并注明未展示条数 */
-const THREAD_CHAR_LIMIT = 1_000;
-/** 根 -> R1 -> R1.1 共三层；更深的回复保留血统标签（R1.1.1）压平在同一条二层回复之后 */
-const MAX_THREAD_DEPTH = 2;
+/** 评论字符预算：单楼上限 / 整段评论总字符 / 楼中楼层数；档位来自快照 author.semantic_level，缺失按 unknown */
+const COMMENT_BUDGETS: Record<AuthorRiskLevel, { per_thread: number; total: number; reply_depth: number }> = {
+  high: { per_thread: 2_000, total: 48_000, reply_depth: 3 },
+  medium: { per_thread: 1_400, total: 32_000, reply_depth: 2 },
+  low: { per_thread: 1_000, total: 24_000, reply_depth: 1 },
+  clean: { per_thread: 700, total: 16_000, reply_depth: 1 },
+  unknown: { per_thread: 1_000, total: 24_000, reply_depth: 3 },
+};
 
 const trunc = (text: string, max: number): string => (text.length > max ? `${text.slice(0, max)}…` : text);
 
@@ -46,7 +51,11 @@ export function createBiliCollectTool(options: BiliCollectToolOptions = {}) {
     name: "bili_collect",
     description:
       "读取已采集的 B 站视频快照（dataset/<BV号>.json）并做证据预处理：粗定位风险时间窗（窗内弹幕样本+字幕摘录）、" +
-      "输出全部评论树（根评论带 rpid 与用户名/mid，楼中楼按 root/parent 最多三层，单楼不超过 1000 字符，" +
+      "输出评论树（根评论带 rpid 与用户名/mid，楼中楼按 root/parent 按档位限层：high/unknown 3 层、medium 2 层、low/clean 1 层；" +
+      "单楼与整段字符预算同样按作者语义档位分档，" +
+      "high/medium/low/clean/unknown = 单楼 2000/1400/1000/700/1000、总字符 48k/32k/24k/16k/24k，缺失按 unknown，" +
+      "超出按顺序截断并在 notes/comment_stats.budget 留痕；超出档位层数的深浅回复整支略去并计入未展示；" +
+      "含联系方式或链接命中的主楼一律强制展示（budget.forced_threads）；" +
       "正文和昵称均为转义字符串；U 标签表示独立的未知或异常关系，不能当作主楼直接回复；" +
       "relation=parent_missing 表示父评论未采集，parent_unknown 表示未提供父 ID，" +
       "duplicate_id/parent_ambiguous/cycle 表示 ID 冲突或父链异常。采集标记 is_up 不代表独立身份核验。" +
@@ -121,11 +130,44 @@ async function collectEvidence(bvid: string, datasetDir: string): Promise<string
   }
   for (const segment of transcriptSegments) collectLinks(segment.text, "transcript");
 
-  // 评论以树形文本交给模型：根评论带 rpid，楼内按 root/parent 重建最多三层，保留用户名与 mid
-  const commentThreads = comments.map((comment) => renderCommentThread(comment, scanKeywords, extractLinks));
+  // 评论以树形文本交给模型：根评论带 rpid，楼内按 root/parent 重建最多三层，保留用户名与 mid；
+  // 单楼与整段字符预算按作者语义档位（快照 author.semantic_level）分档，缺失按 unknown；
+  // 命中联系方式/链接的楼不受总预算限制（这些命中会以 links/contact_associations 进模型，树必须可见）
+  const level: AuthorRiskLevel = snapshot.author?.semantic_level ?? "unknown";
+  const budget = COMMENT_BUDGETS[level];
+  const renderedThreads = comments.map((comment) =>
+    renderCommentThread(comment, scanKeywords, extractLinks, budget.per_thread, budget.reply_depth));
+  const forcedIndexes = new Set<number>();
+  comments.forEach((comment, index) => {
+    if (hasContactSignal(comment.message)) forcedIndexes.add(index);
+    else if ((comment.replies ?? []).some((reply) => hasContactSignal(reply.message))) forcedIndexes.add(index);
+  });
+  let commentChars = 0;
+  let forcedShown = 0;
+  let overflowed = false;
+  const commentThreads: RenderedThread[] = [];
+  renderedThreads.forEach((thread, index) => {
+    const forced = forcedIndexes.has(index);
+    if (!forced && (overflowed || (commentThreads.length > 0 && commentChars + thread.text.length > budget.total))) {
+      overflowed = true;
+      return;
+    }
+    commentThreads.push(thread);
+    commentChars += thread.text.length;
+    if (forced) forcedShown += 1;
+  });
+  const droppedThreads = renderedThreads.length - commentThreads.length;
   const replyCaptured = comments.reduce((sum, comment) => sum + (comment.replies?.length ?? 0), 0);
   const truncatedThreads = commentThreads.filter((thread) => thread.truncated).length;
-  if (truncatedThreads > 0) notes.push(`${truncatedThreads} 个楼中楼超过 ${THREAD_CHAR_LIMIT} 字符，已按顺序截断`);
+  if (truncatedThreads > 0) {
+    notes.push(`${truncatedThreads} 个楼中楼超出档位 ${level} 的单楼 ${budget.per_thread} 字符或 ${budget.reply_depth} 层深度，已截断`);
+  }
+  if (droppedThreads > 0) {
+    notes.push(`评论总字符超出档位 ${level} 预算 ${budget.total}，${droppedThreads} 条主楼未展示`);
+  }
+  if (commentChars > budget.total) {
+    notes.push(`含联系方式/链接的 ${forcedShown} 条主楼强制展示，评论 ${commentChars} 字符超出档位 ${level} 预算 ${budget.total}`);
+  }
 
   const evidence = {
     bvid,
@@ -163,9 +205,12 @@ async function collectEvidence(bvid: string, datasetDir: string): Promise<string
     danmaku: { count: danmaku.length },
     comment_stats: {
       count: comments.length,
+      shown_count: commentThreads.length,
       pinned_count: comments.filter((comment) => comment.is_pinned).length,
       reply_count: replyCaptured,
       truncated_threads: truncatedThreads,
+      comment_chars: commentChars,
+      budget: { level, per_thread: budget.per_thread, total: budget.total, reply_depth: budget.reply_depth, forced_threads: forcedShown, dropped_threads: droppedThreads },
     },
     title_desc_hits: titleDescHits.map((h) => ({ term: h.term, category: h.category, count: h.count })),
     risk_windows: localization.windows,
@@ -232,6 +277,8 @@ function renderCommentThread(
   root: CommentEntry,
   scan: (text: string) => { term: string }[],
   extract: (text: string, source: string) => ExtractedLink[],
+  charLimit: number,
+  replyDepth: number,
 ): RenderedThread {
   const replies = root.replies ?? [];
   const headerParts = [`[#${quoted(root.rpid ?? null)}]`, commentUser(root.uname, root.mid)];
@@ -261,8 +308,8 @@ function renderCommentThread(
     return { text: `${header}\n  正文：${quoted(root.message)}${bodyTags}`, truncated: false };
   }
 
-  // 有楼中楼时整楼共享 1k 字符预算：先保根评论，再按顺序放回复
-  const bodyBudget = Math.max(0, THREAD_CHAR_LIMIT - header.length - bodyTags.length - 8);
+  // 有楼中楼时整楼共享档位单楼预算：先保根评论，再按顺序放回复
+  const bodyBudget = Math.max(0, charLimit - header.length - bodyTags.length - 8);
   let body = root.message;
   // Clip before quoting: a budget cut must never leave an unterminated string.
   if (quoted(body).length > bodyBudget) {
@@ -310,12 +357,19 @@ function renderCommentThread(
   for (const reply of cyclic) { parentOf.delete(reply); relationOf.set(reply, "cycle"); }
   const children = new Map<ReplyEntry, ReplyEntry[]>();
   for (const [reply, parent] of parentOf) children.set(parent, [...(children.get(parent) ?? []), reply]);
+  const subtreeSize = (node: ReplyEntry): number =>
+    1 + (children.get(node) ?? []).reduce((sum, kid) => sum + subtreeSize(kid), 0);
   const nodeLines: string[] = [];
+  let depthDropped = 0;
   const emit = (reply: ReplyEntry, label: string, detached: boolean): void => {
     const depth = label.split(".").length;
-    const prefix = detached && depth === 1 ? "  ? " : depth === 1 ? "  ├ " : depth <= MAX_THREAD_DEPTH ? "  │  └ " : "  │  ↳ ";
+    const prefix = detached && depth === 1 ? "  ? " : depth === 1 ? "  ├ " : depth <= 2 ? "  │  └ " : "  │  ↳ ";
     nodeLines.push(replyLine(reply, label, prefix, relationOf.get(reply)!, scan, extract));
-    (children.get(reply) ?? []).forEach((kid, index) => emit(kid, `${label}.${index + 1}`, detached));
+    (children.get(reply) ?? []).forEach((kid, index) => {
+      // 超出档位层数的整支略去，计数进"未展示"；不静默丢失
+      if (depth + 1 > replyDepth) { depthDropped += subtreeSize(kid); return; }
+      emit(kid, `${label}.${index + 1}`, detached);
+    });
   };
   let rootIndex = 0;
   let unknownIndex = 0;
@@ -328,26 +382,27 @@ function renderCommentThread(
   let used = lines.join("\n").length;
   const rendered: string[] = [];
   for (const line of nodeLines) {
-    if (used + 1 + line.length > THREAD_CHAR_LIMIT) break;
+    if (used + 1 + line.length > charLimit) break;
     rendered.push(line);
     used += 1 + line.length;
   }
   let dropped = replies.length - rendered.length;
   let text = lines.concat(rendered).join("\n");
   if (dropped > 0) {
-    let note = `  …（本楼另有 ${dropped} 条回复未展示）`;
-    while (rendered.length > 0 && text.length + 1 + note.length > THREAD_CHAR_LIMIT) {
+    const depthNote = depthDropped > 0 ? `，其中 ${depthDropped} 条超出档位 ${replyDepth} 层深度` : "";
+    let note = `  …（本楼另有 ${dropped} 条回复未展示${depthNote}）`;
+    while (rendered.length > 0 && text.length + 1 + note.length > charLimit) {
       rendered.pop();
       dropped += 1;
-      note = `  …（本楼另有 ${dropped} 条回复未展示）`;
+      note = `  …（本楼另有 ${dropped} 条回复未展示${depthNote}）`;
       text = lines.concat(rendered).join("\n");
     }
-    if (text.length + 1 + note.length <= THREAD_CHAR_LIMIT) text += `\n${note}`;
+    if (text.length + 1 + note.length <= charLimit) text += `\n${note}`;
   }
   return { text, truncated: dropped > 0 };
 }
 
-/** 输出体量守护：评论（含楼中楼）全量输出、绝不裁剪；仅在超限时压缩弹幕/字幕摘录并留痕 */
+/** 输出体量守护：评论已按作者档位预算落盘，这里只在超限时压缩弹幕/字幕摘录并留痕 */
 function capOutput(evidence: Record<string, unknown>): string {
   const text = JSON.stringify(evidence);
   if (text.length <= OUTPUT_CHAR_LIMIT) return text;

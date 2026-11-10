@@ -11,16 +11,24 @@ interface ContactAssociation {
   evidence: ContactEvidence[];
 }
 
+const CONTACT_PATTERNS: Array<[ContactKind, RegExp]> = [
+  ["wechat", /(?<![a-z0-9_])(?:微信(?:号)?|微[信讯]|vx|wechat)\s*[:：=号]?\s*([a-z][a-z0-9_-]{5,19})(?![a-z0-9_-])/gi],
+  ["qq", /(?<![a-z0-9_])(?:qq(?:号)?|扣扣)\s*[:：=号]?\s*([1-9][0-9]{4,11})(?![0-9])/gi],
+  ["qq_group", /(?<![a-z0-9_])qq群(?:号)?\s*[:：=]?\s*([1-9][0-9]{4,11})(?![0-9])/gi],
+  ["phone", /(?<![a-z0-9_])(?:手机(?:号)?|电话|tel)\s*[:：=]?\s*(?:\+?86[ -]?)?(1[3-9][0-9](?:[ -]?[0-9]){8})(?![0-9])/gi],
+  ["email", /([a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+)/gi],
+];
+
+/** 文本是否命中联系方式正则或链接候选（与 associateContacts 同口径），用于强制展示相关评论楼 */
+export function hasContactSignal(text: string): boolean {
+  const normalized = text.normalize("NFKC");
+  const matched = CONTACT_PATTERNS.some(([, pattern]) => new RegExp(pattern.source, pattern.flags).test(normalized));
+  return matched || extractLinks(normalized, "comment").length > 0;
+}
+
 /** 只关联明确标识；类型不同不合并，同域名也不等于同一账号或同一控制者。 */
 export function associateContacts(snapshot: VideoSnapshot) {
   const found = new Map<string, ContactAssociation>();
-  const patterns: Array<[ContactKind, RegExp]> = [
-    ["wechat", /(?<![a-z0-9_])(?:微信(?:号)?|微[信讯]|vx|wechat)\s*[:：=号]?\s*([a-z][a-z0-9_-]{5,19})(?![a-z0-9_-])/gi],
-    ["qq", /(?<![a-z0-9_])(?:qq(?:号)?|扣扣)\s*[:：=号]?\s*([1-9][0-9]{4,11})(?![0-9])/gi],
-    ["qq_group", /(?<![a-z0-9_])qq群(?:号)?\s*[:：=]?\s*([1-9][0-9]{4,11})(?![0-9])/gi],
-    ["phone", /(?<![a-z0-9_])(?:手机(?:号)?|电话|tel)\s*[:：=]?\s*(?:\+?86[ -]?)?(1[3-9][0-9](?:[ -]?[0-9]){8})(?![0-9])/gi],
-    ["email", /([a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+)/gi],
-  ];
   const collect = (original: string, source: string, ref: string, t?: number) => {
     const text = original.normalize("NFKC");
     const seen = new Set<string>();
@@ -37,7 +45,7 @@ export function associateContacts(snapshot: VideoSnapshot) {
       }
       found.set(key, entry);
     };
-    for (const [kind, pattern] of patterns) {
+    for (const [kind, pattern] of CONTACT_PATTERNS) {
       for (const match of text.matchAll(pattern)) {
         // 邮箱 local-part 保留大小写，域名可忽略大小写；避免强行合并不同地址。
         const raw = match[1]!;

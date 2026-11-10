@@ -53,6 +53,8 @@ export const VideoMetaSchema = z.object({
 
 export const AuthorSchema = z.object({
   mid: z.union([z.string(), z.number()]).optional(),
+  /** 上游作者语义档（author-semantic/v5）：只用于评论字符预算分档，不代表作者风险结论；缺失按 unknown */
+  semantic_level: z.enum(["high", "medium", "low", "clean", "unknown"]).optional(),
   name: z.string().default(""),
   fans: z.number().optional(),
   attention: z.number().optional(),
