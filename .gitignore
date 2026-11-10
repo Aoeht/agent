@@ -39,6 +39,7 @@ report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 C盘清理资料_2026-10-15.zip
 # 真实浏览器复用实验用的专用 Chrome profile（体积大且含浏览器状态，绝不入库）
 .chrome-sandbox-profile
+.chrome-inspect-profile
 # 运行轨迹（含对话与工具结果，本地排查用）
 .traces
 .inspect-evidence/

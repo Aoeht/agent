@@ -9,6 +9,12 @@ export function parseBrowserDevice(value: string | undefined): BrowserDevice {
   return normalized === "mobile" || normalized === "wechat" ? normalized : "desktop";
 }
 
+/** 持久化资料目录：未配置或空白时返回 undefined，保持一次性临时上下文。 */
+export function resolveBrowserProfileDir(value: string | undefined): string | undefined {
+  const trimmed = (value ?? "").trim();
+  return trimmed === "" ? undefined : trimmed;
+}
+
 const ANDROID_UA =
   "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36";
 // 微信内置浏览器的识别靠 MicroMessenger；只认微信 UA 的 H5 页在普通移动 UA 下仍是占位页

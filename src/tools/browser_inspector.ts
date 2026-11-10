@@ -1,4 +1,4 @@
-import { chromium } from "playwright";
+import { chromium, type Browser, type BrowserContext } from "playwright";
 import dns from "node:dns/promises";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -7,7 +7,7 @@ import readline from "node:readline/promises";
 import type { ToolRuntime } from "../core/types";
 import { assertPublicHost, detectProtection } from "../utils/web_guard";
 import { extractHtmlFeatures } from "../utils/html_text";
-import { browserContextOptions, type BrowserDevice } from "../utils/browser_device";
+import { browserContextOptions, resolveBrowserProfileDir, type BrowserDevice } from "../utils/browser_device";
 import { captureVisibleScreenshot } from "./browser_screenshot";
 
 /** 独立浏览器上下文，不读取个人配置。路由检查是纵深防护，不是 OS 网络沙箱。 */
@@ -23,21 +23,45 @@ export async function inspectInBrowser(
   const lookup = (host: string) => dns.lookup(host, { all: true });
   await assertPublicHost(new URL(url), lookup);
   const proxy = process.env.INSPECT_BROWSER_PROXY;
-  const browser = await chromium.launch({
+  // 可选专用持久档：人工登录一次后 cookie 落盘，后续采证复用；不配置时仍是临时上下文
+  const profileDir = resolveBrowserProfileDir(process.env.INSPECT_BROWSER_PROFILE);
+  const launchOptions = {
     channel: process.env.INSPECT_BROWSER_CHANNEL || "msedge",
     headless: process.env.INSPECT_BROWSER_HEADLESS === "1",
     timeout: 30_000,
+    // Playwright 默认带 --enable-automation（暴露 navigator.webdriver、顶部自动化提示条），
+    // B 站极验这类风控会据此直接拒绝登录；只影响自动化标记，不改站点行为或同源策略。
+    ignoreDefaultArgs: ["--enable-automation"],
+    args: ["--disable-blink-features=AutomationControlled"],
     ...(proxy ? { proxy: { server: proxy } } : {}),
-  });
-  const close = () => { void browser.close().catch(() => {}); };
+  };
+  let browser: Browser | undefined;
+  let context: BrowserContext | undefined;
+  const close = () => { void context?.close().catch(() => {}); };
   signal.addEventListener("abort", close, { once: true });
   try {
     signal.throwIfAborted();
-    const context = await browser.newContext({
-      ...browserContextOptions(device),
-      acceptDownloads: false, serviceWorkers: "block", permissions: [],
-    });
+    if (profileDir) {
+      const resolvedProfile = path.resolve(profileDir);
+      await fs.mkdir(resolvedProfile, { recursive: true });
+      context = await chromium.launchPersistentContext(resolvedProfile, {
+        ...launchOptions,
+        ...browserContextOptions(device),
+        acceptDownloads: false, serviceWorkers: "block", permissions: [],
+      });
+      browser = context.browser() ?? undefined;
+    } else {
+      browser = await chromium.launch(launchOptions);
+      context = await browser.newContext({
+        ...browserContextOptions(device),
+        acceptDownloads: false, serviceWorkers: "block", permissions: [],
+      });
+    }
     const denied: string[] = [];
+    // 去掉 --enable-automation 后部分站点仍会读到残留标记，这里统一抹掉最显眼的一项。
+    await context.addInitScript(() => {
+      Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+    });
     await context.route("**/*", async route => {
       try {
         await assertPublicHost(new URL(route.request().url()), lookup);
@@ -79,8 +103,8 @@ export async function inspectInBrowser(
       const scheme = target?.protocol ?? "unknown";
       const appScheme = target !== undefined && !/^(?:about|chrome-error|data|blob):$/i.test(scheme);
       return {
-        method: "browser", device_mode: device, captured_at: new Date().toISOString(),
-        final_url: page.url(),
+        method: "browser", device_mode: device, profile_mode: profileDir ? "persistent" : "isolated",
+        captured_at: new Date().toISOString(), final_url: page.url(),
         access_status: appScheme ? "app_scheme" : "network_error",
         http_status: responseStatus, human_confirmed: humanConfirmed,
         navigation_error: navigationError ?? `页面跳转到非 http(s) 地址 ${scheme}`,
@@ -129,10 +153,13 @@ export async function inspectInBrowser(
     // 滚动步长跟实际视口走，不再写死 900；390 宽的移动形态两屏覆盖太少，多截一屏。
     const maxScreens = device === "desktop" ? 2 : 3;
     const positions = [0];
+    const scrollable = height - viewportHeight;
     for (let index = 1; index < maxScreens; index++) {
+      // 可滚动高度不足 100px 时不值得再截一张几乎重复的图（会多消耗一次图片额度）
+      if (scrollable <= 100) break;
       const y = index * viewportHeight;
       if (y >= height) break;
-      const clamped = Math.min(y, Math.max(0, height - viewportHeight));
+      const clamped = Math.min(y, scrollable);
       if (!positions.includes(clamped)) positions.push(clamped);
     }
     for (const y of positions) {
@@ -154,7 +181,8 @@ export async function inspectInBrowser(
       }
     }
     return {
-      method: "browser", device_mode: device, captured_at: new Date().toISOString(), final_url: finalUrl,
+      method: "browser", device_mode: device, profile_mode: profileDir ? "persistent" : "isolated",
+      captured_at: new Date().toISOString(), final_url: finalUrl,
       access_status: protection.blocked ? "challenge" : [401, 403, 429].includes(responseStatus) ? "denied" : navigationError && !text ? "network_error" : confirmed ? "observed" : "unconfirmed",
       http_status: responseStatus,
       human_confirmed: confirmed, navigation_error: navigationError,
@@ -170,6 +198,8 @@ export async function inspectInBrowser(
     };
   } finally {
     signal.removeEventListener("abort", close);
-    await browser.close().catch(() => {});
+    // 持久档的 context.close() 会一并关掉浏览器；临时档则回退到 browser.close()
+    if (context) await context.close().catch(() => {});
+    else await browser?.close().catch(() => {});
   }
 }

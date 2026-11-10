@@ -3,7 +3,7 @@ import { Agent } from "../src/core/agent";
 import { ToolRegistry } from "../src/core/registry";
 import { createInspectLinkTool } from "../src/tools/inspect_link";
 import { detectProtection, isPrivateAddress } from "../src/utils/web_guard";
-import { browserContextOptions, parseBrowserDevice } from "../src/utils/browser_device";
+import { browserContextOptions, parseBrowserDevice, resolveBrowserProfileDir } from "../src/utils/browser_device";
 
 test("正常 CDN 页面和验证码组件不等于挑战页", () => {
   expect(detectProtection({ "cf-ray": "ray", "cf-cache-status": "HIT" }, "<h1>内容</h1>").blocked).toBe(false);
@@ -69,6 +69,11 @@ test("采证形态：移动/微信是移动视口+触摸+对应 UA，桌面保�
   expect(parseBrowserDevice(" WeChat ")).toBe("wechat");
   expect(parseBrowserDevice(undefined)).toBe("desktop");
   expect(parseBrowserDevice("tablet")).toBe("desktop");
+
+  // 未配置/空白 = 临时上下文；配置后原样作为专用持久档目录
+  expect(resolveBrowserProfileDir(undefined)).toBeUndefined();
+  expect(resolveBrowserProfileDir("   ")).toBeUndefined();
+  expect(resolveBrowserProfileDir(" .chrome-inspect-profile ")).toBe(".chrome-inspect-profile");
 });
 
 test("调用方取消后不升级到浏览器", async () => {
