@@ -3,6 +3,7 @@ import { Agent } from "../src/core/agent";
 import { ToolRegistry } from "../src/core/registry";
 import { createInspectLinkTool } from "../src/tools/inspect_link";
 import { detectProtection, isPrivateAddress } from "../src/utils/web_guard";
+import { browserContextOptions, parseBrowserDevice } from "../src/utils/browser_device";
 
 test("正常 CDN 页面和验证码组件不等于挑战页", () => {
   expect(detectProtection({ "cf-ray": "ray", "cf-cache-status": "HIT" }, "<h1>内容</h1>").blocked).toBe(false);
@@ -52,6 +53,22 @@ test("browser 模式直接采证，图片以多模态消息发出且不进入 tr
   expect(parts[0].text).toContain("image-call");
   expect(JSON.stringify(result.steps)).not.toContain("TESTIMAGE");
   expect(JSON.stringify(result.messages)).not.toContain("TESTIMAGE");
+});
+
+test("采证形态：移动/微信是移动视口+触摸+对应 UA，桌面保持 1280x900", () => {
+  expect(browserContextOptions("desktop")).toEqual({ viewport: { width: 1280, height: 900 }, locale: "zh-CN" });
+
+  const mobile = browserContextOptions("mobile");
+  expect(mobile.viewport).toEqual({ width: 390, height: 844 });
+  expect(mobile.isMobile).toBe(true);
+  expect(mobile.hasTouch).toBe(true);
+  expect(mobile.userAgent).toContain("Android");
+  expect(mobile.userAgent).toContain("Mobile");
+
+  expect(browserContextOptions("wechat").userAgent).toContain("MicroMessenger");
+  expect(parseBrowserDevice(" WeChat ")).toBe("wechat");
+  expect(parseBrowserDevice(undefined)).toBe("desktop");
+  expect(parseBrowserDevice("tablet")).toBe("desktop");
 });
 
 test("调用方取消后不升级到浏览器", async () => {

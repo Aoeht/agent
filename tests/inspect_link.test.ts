@@ -459,6 +459,64 @@ test("URL 归一化：无 scheme 的粘贴域名补 https，非法输入给人�
   expect(seen.length).toBe(2); // 非法输入没有走到浏览器
 });
 
+test("auto 命中手机占位页自动切微信形态，显式 device 原样透传", async () => {
+  const devices: Array<string | undefined> = [];
+  const tool = createInspectLinkTool({
+    fetchImpl: async () =>
+      htmlResponse("<html><head><title>提示</title></head><body><p>请在微信中打开本页面后继续操作</p></body></html>"),
+    lookupImpl: PUBLIC_LOOKUP,
+    browserInspect: async (_url, _runtime, device) => {
+      devices.push(device);
+      return { access_status: "observed", capture_status: "complete" };
+    },
+  });
+
+  const out = (await tool.execute({ url: "https://h5.example/x", mode: "auto" })) as any;
+  expect(devices).toEqual(["wechat"]);
+  // HTTP 证据照常保留，且占位页信号已经产出
+  expect(String(out.http.landing.title)).toBe("提示");
+  expect(out.http.signals).toContain("页面提示需要在微信内打开，桌面形态可能只看到占位页");
+
+  await tool.execute({ url: "https://h5.example/y", mode: "browser", device: "mobile" });
+  expect(devices[1]).toBe("mobile");
+});
+
+test("手机专用占位页在 http 采证里成为独立信号", async () => {
+  const tool = makeTool(async () => htmlResponse("<title>提示</title><p>请使用手机浏览器打开</p>"));
+  const out = (await tool.execute({ url: "https://m.example/x" })) as any;
+  expect(out.signals).toContain("页面提示需要在手机内打开，桌面形态可能只看到占位页");
+});
+
+test("device=mobile/wechat 时静态采证使用移动 UA", async () => {
+  const userAgents: string[] = [];
+  const tool = createInspectLinkTool({
+    fetchImpl: async (_url, init) => {
+      userAgents.push(String((init?.headers as Record<string, string>)["user-agent"]));
+      return htmlResponse("<title>ok</title>");
+    },
+    lookupImpl: PUBLIC_LOOKUP,
+  });
+
+  await tool.execute({ url: "https://a.example/x", mode: "http", device: "mobile" });
+  await tool.execute({ url: "https://a.example/x", mode: "http", device: "wechat" });
+  await tool.execute({ url: "https://a.example/x", mode: "http", device: "desktop" });
+  expect(userAgents[0]).toContain("Android");
+  expect(userAgents[1]).toContain("MicroMessenger");
+  expect(userAgents[2]).toContain("Windows NT");
+});
+
+test("浏览器结果里出现手机占位页时标记 mobile_only_page 并提示换形态", async () => {
+  const tool = createInspectLinkTool({
+    browserInspect: async () => ({
+      access_status: "observed", capture_status: "complete", title: "提示",
+      visible_text: "请用手机访问本页面",
+    }),
+  });
+  const out = (await tool.execute({ url: "https://h5.example/z", mode: "browser" })) as any;
+  expect(out.browser.mobile_only_page).toBe(true);
+  expect(String(out.browser.next_action)).toContain("device=mobile");
+});
+
 test("同回合浏览器失败去重键用归一化后的 URL", async () => {
   let opens = 0;
   const tool = createInspectLinkTool({
