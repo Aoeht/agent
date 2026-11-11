@@ -9,7 +9,9 @@ import { McpClientManager } from "../src/mcp/client_manager";
 const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII=";
 
 test("真实 filesystem MCP：图片经附件通道传递，structuredContent 副本不进入文本", async () => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "mcp-filesystem-image-"));
+  // filesystem server 会把允许根 realpath 后与字面请求路径比对；temp 是 junction/符号链接/8.3 短名时
+  // （GitHub Windows runner 即是）两者不一致会被判越界，故这里先归一化。
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "mcp-filesystem-image-")));
   const adapter = new McpAdapter({ allowedRoots: [root] });
   const manager = new McpClientManager(adapter);
   try {
@@ -24,9 +26,10 @@ test("真实 filesystem MCP：图片经附件通道传递，structuredContent �
       const result = await adapter.registry.execute("filesystem__read_media_file", { path: path.join(root, "pixel.png") }, {
         emitImage: image => { if (accepting) images.push(image.dataUrl); return accepting; },
       });
+      // 先断言附加标记：服务端拒绝时 result 是错误全文，让它先失败才看得见原因
+      expect(result).toContain(accepting ? "已附加" : "未附加");
       expect(images).toHaveLength(accepting ? 1 : 0);
       expect(result).not.toContain(png);
-      expect(result).toContain(accepting ? "已附加" : "未附加");
       const parsed = JSON.parse(result);
       expect(parsed.structuredContent.content[0]).toMatchObject({ type: "image", mimeType: "image/png" });
       expect(parsed.structuredContent.content[0].data).toContain("已省略");
