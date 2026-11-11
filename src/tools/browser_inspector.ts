@@ -44,9 +44,14 @@ export async function inspectInBrowser(
     if (profileDir) {
       const resolvedProfile = path.resolve(profileDir);
       await fs.mkdir(resolvedProfile, { recursive: true });
+      // 淘宝等站点的登录会话是会话级 cookie，Chromium 持久档关闭时不会落盘；
+      // 登录流程会在档内写一份 state.json，启动时用它把会话 cookie 补回上下文。
+      const statePath = path.join(resolvedProfile, "state.json");
+      const storageState = await fs.access(statePath).then(() => statePath, () => undefined);
       context = await chromium.launchPersistentContext(resolvedProfile, {
         ...launchOptions,
         ...browserContextOptions(device),
+        ...(storageState ? { storageState } : {}),
         acceptDownloads: false, serviceWorkers: "block", permissions: [],
       });
       browser = context.browser() ?? undefined;
