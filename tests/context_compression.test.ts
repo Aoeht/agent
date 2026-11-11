@@ -20,7 +20,7 @@ import { createUpdatePlanTool } from "../src/tools/update_plan";
 import { Agent } from "../src/core/agent";
 import { ToolRegistry } from "../src/core/registry";
 import { defineTool } from "../src/core/types";
-import { processToolOutput } from "../src/core/tool_outputs";
+import { offloadedPathOf, processToolOutput } from "../src/core/tool_outputs";
 import { renderCitationBlock } from "../src/core/citations";
 import { estimateImageTokensFromDataUrl } from "../src/utils/image_tokens";
 import type { Message } from "../src/core/types";
@@ -169,8 +169,11 @@ describe("processToolOutput", () => {
       countTokens,
     });
     expect(out.offloadedPath).toBeTruthy();
-    expect(out.content).toContain("完整输出已保存到文件");
+    // 提示语邀请模型读回（不再只说"供人工查看"）
+    expect(out.content).toContain("完整输出已落盘到文件，需要完整内容时用文件读取工具或 run_script 读取");
     expect(out.content).toContain(out.offloadedPath!);
+    // 正文标记可被机器解析（打桩时据此保留指针）
+    expect(offloadedPathOf(out.content)).toBe(out.offloadedPath);
     const saved = await fs.readFile(out.offloadedPath!, "utf-8");
     expect(saved).toBe(raw); // 落盘的是完整原文，信息无损
     await fs.rm(dir, { recursive: true, force: true });
@@ -181,6 +184,27 @@ describe("processToolOutput", () => {
     const out = await processToolOutput(raw, "search", { maxTokens: 100, offloadTokens: 1000, countTokens });
     expect(out.offloadedPath).toBeUndefined();
     expect(out.truncated).toBe(true);
+  });
+});
+
+describe("offloadedPathOf", () => {
+  test("新版措辞：解析出落盘路径", () => {
+    const content =
+      "开头正文。\n\n…[工具输出过长已截断：原始约 900 tokens，此处仅保留开头。" +
+      "完整输出已落盘到文件，需要完整内容时用文件读取工具或 run_script 读取：C:\\tmp\\a.txt]…";
+    expect(offloadedPathOf(content)).toBe("C:\\tmp\\a.txt");
+  });
+
+  test("旧版措辞（历史会话消息）：同样能解析", () => {
+    const content =
+      "开头。\n\n…[工具输出过长已截断：原始约 900 tokens，此处仅保留开头。" +
+      "完整输出已保存到文件（供人工或后续程序查看）：C:\\tmp\\old.txt]…";
+    expect(offloadedPathOf(content)).toBe("C:\\tmp\\old.txt");
+  });
+
+  test("普通截断与短输出：无路径", () => {
+    expect(offloadedPathOf("短输出")).toBeUndefined();
+    expect(offloadedPathOf("A…[工具输出过长已截断：原始约 900 tokens，省略中间约 100 tokens]…Z")).toBeUndefined();
   });
 });
 
@@ -224,6 +248,33 @@ describe("ContextManager", () => {
     // 旧工具输出既不进请求，也不无声消失——进了摘要调用的输入
     expect(result.map(textOf).join("")).not.toContain("旧工具输出");
     expect(textOf(summaryCalls[0]!.messages[1])).toContain("旧工具输出");
+  });
+
+  test("阶梯 1 打桩保留落盘指针：offload 路径随占位符留在上下文里", async () => {
+    const { client } = makeSummaryClient();
+    const cm = makeManager(client, 800);
+    const offloadPath = "C:\\agent-sessions\\s1\\tool_outputs\\2026-11-11T00-00-00-search-abc123.txt";
+    const messages: Message[] = [
+      { role: "system", content: "系统规则" },
+      { role: "user", content: "查一下背景" },
+      toolCallMessage("t1"),
+      { role: "tool", tool_call_id: "t1", content:
+        `数据行开头。\n\n…[工具输出过长已截断：原始约 5000 tokens，此处仅保留开头。` +
+        `完整输出已落盘到文件，需要完整内容时用文件读取工具或 run_script 读取：${offloadPath}]…` +
+        longText("旧工具输出", 400) },
+      { role: "user", content: "第二问：接着查" },
+      toolCallMessage("t2"),
+      { role: "tool", tool_call_id: "t2", content: "新输出：很小" },
+    ];
+    const result = await cm.compress(messages);
+    // 走的是阶梯 1：结构不变、没有摘要块，旧工具输出换成占位符
+    expect(rolesOf(result)).toEqual(["system", "user", "assistant", "tool", "user", "assistant", "tool"]);
+    const stub = textOf(result[3]!);
+    expect(stub).toContain("工具输出已省略");
+    // 打桩不再丢掉"原文在哪"：路径与读回指引随占位符保留
+    expect(stub).toContain(offloadPath);
+    expect(stub).toContain("读取该文件");
+    expect(stub).not.toContain("旧工具输出");
   });
 
   test("阶梯 3：对话没得折时也把未观察的旧工具组并入摘要，引用块不挤占观察窗口", async () => {
@@ -712,10 +763,10 @@ describe("Agent 上下文压缩集成", () => {
     const result = await agent.run("帮我查一下");
     expect(result.success).toBe(true);
 
-    // 工具结果被截断且落盘（信息无损）
+    // 工具结果被截断且落盘（信息无损），提示语邀请模型读回
     const toolMsg = result.messages.find((m) => m.role === "tool")!;
     expect(textOf(toolMsg)).toContain("已截断");
-    expect(textOf(toolMsg)).toContain("完整输出已保存到文件");
+    expect(textOf(toolMsg)).toContain("完整输出已落盘到文件，需要完整内容时用文件读取工具或 run_script 读取");
     const offloadDir = path.join(store.dir, "tool_outputs");
     const offloaded = await fs.readdir(offloadDir);
     expect(offloaded.length).toBe(1);

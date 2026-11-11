@@ -4,6 +4,7 @@ import { Message } from "./types";
 import { CommercialTokenCounter } from "../utils/token_counter";
 import { estimateImageTokensFromDataUrl } from "../utils/image_tokens";
 import { wrapSummaryBlock } from "./untrusted";
+import { offloadedPathOf } from "./tool_outputs";
 import {
   stripCitationPreamble,
   citationPreambleOf,
@@ -283,7 +284,11 @@ export class ContextManager {
     const argsPreview = rawArgs.length > 120 ? `${rawArgs.slice(0, 120)}…` : rawArgs;
     // 引用块是编号→来源的映射，不随工具正文一起省略；否则模型记忆里的 [n] 会失去出处
     const preamble = citationPreambleOf(toolMsg.content);
-    entry.stubText = `[工具输出已省略以节省上下文：原约 ${entry.original} tokens。此前调用了 ${name}(${argsPreview})。]${preamble ? `\n\n${preamble}` : ""}`;
+    // 落盘的原文不因打桩失联：路径是随消息持久化的指针，模型随时可用文件工具/run_script 读回
+    const offloaded = offloadedPathOf(toolMsg.content);
+    entry.stubText = `[工具输出已省略以节省上下文：原约 ${entry.original} tokens。此前调用了 ${name}(${argsPreview})。` +
+      (offloaded ? `完整输出已落盘到 ${offloaded}，需要完整内容时读取该文件。` : "") +
+      `]${preamble ? `\n\n${preamble}` : ""}`;
     entry.stubTokens = 4 + this.tokenCounter.estimateText(entry.stubText, this.config.modelName);
     return entry;
   }

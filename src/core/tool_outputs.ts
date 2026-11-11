@@ -30,6 +30,26 @@ function sanitizeName(name: string): string {
   return name.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 40) || "tool";
 }
 
+/**
+ * 落盘标记（正文里的机器可解析指针）：路径随消息一起持久化、一起进上下文，
+ * 压缩打桩时靠它把"原文在哪"保留下来（见 context_manager.stubEntryFor），
+ * 模型需要完整内容时据此用文件读取工具或 run_script 读回。
+ */
+const OFFLOAD_MARKER = "完整输出已落盘到文件，需要完整内容时用文件读取工具或 run_script 读取：";
+
+/** 从工具输出正文解析落盘路径；兼容旧版措辞（"供人工或后续程序查看"时代写入的消息） */
+export function offloadedPathOf(content: string): string | undefined {
+  for (const marker of [OFFLOAD_MARKER, "完整输出已保存到文件（供人工或后续程序查看）："]) {
+    const start = content.indexOf(marker);
+    if (start === -1) continue;
+    const rest = content.slice(start + marker.length);
+    const end = rest.indexOf("]…");
+    const candidate = (end === -1 ? rest : rest.slice(0, end)).trim();
+    return candidate || undefined;
+  }
+  return undefined;
+}
+
 /** token 预算 → 大致字符数（按该文本实测的 token/char 压缩率换算，中英文都适用） */
 function charsForTokens(
   text: string,
@@ -65,7 +85,7 @@ export async function processToolOutput(
       return {
         content:
           `${raw.slice(0, headChars)}\n\n…[工具输出过长已截断：原始约 ${fullTokens} tokens，此处仅保留开头。` +
-          `完整输出已保存到文件（供人工或后续程序查看）：${filePath}]…`,
+          `${OFFLOAD_MARKER}${filePath}]…`,
         fullTokens,
         truncated: true,
         offloadedPath: filePath,
