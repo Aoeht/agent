@@ -107,8 +107,11 @@ export const CommentEntrySchema = z.object({
   upreply: z.boolean().optional(),
   /** 评论附图本地相对路径（相对数据集根，如 images/BV.../xxx.jpg），供 read_image 查看 */
   localPicPath: z.array(z.string()).optional(),
-  /** 评论附图原始 URL */
-  pics: z.array(z.string()).optional(),
+  /** 评论附图原始 URL。采集侧新格式给对象（url/asset_id/local_path/status…）、旧格式给字符串，
+   *  统一归一成 URL 字符串：否则单个字段形态不符会让整份快照校验失败、整个视频被静默跳过。 */
+  pics: z.array(
+    z.union([z.string(), z.object({ url: z.string() })]).transform((p) => typeof p === "string" ? p : p.url),
+  ).optional(),
   /** 平铺的楼中楼，parent 字段用于重建树；上限 500 条/楼 */
   replies: z.array(ReplyEntrySchema).max(500).optional(),
 });
