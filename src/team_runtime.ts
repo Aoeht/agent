@@ -14,7 +14,8 @@ import { createUpdatePlanTool } from "./tools/update_plan";
 import { createReadTaskStateTool } from "./tools/set_acceptance_criteria";
 import { createToolTelemetry } from "./tools/telemetry";
 import { createVlmFraudCheckTool, loadVlmOptions, probeVlmEndpoint, scannerVlmEnabled } from "./tools/vlm_fraud_check";
-import type { ProviderStore } from "./core/providers";
+import { providers, type ProviderStore } from "./core/providers";
+import { resolveTunnelConfig, vlmTunnel, type VlmTunnelManager } from "./tools/vlm_tunnel";
 
 // Explicit host allowlist: neither generated roles nor MCP annotations can grant writes.
 const WORKER_TOOLS = new Set([
@@ -62,8 +63,8 @@ export function scannerCapabilities(env: NodeJS.ProcessEnv = process.env): strin
 export interface ScannerRegistryOptions {
   sandboxRoot?: string;
   env?: NodeJS.ProcessEnv;
-  /** 测试注入：vLLM 客户端 / 供应商清单 / 体检 fetcher */
-  vlm?: { client?: OpenAI; store?: ProviderStore; fetcher?: typeof fetch };
+  /** 测试注入：vLLM 客户端 / 供应商清单 / 体检 fetcher / 隧道管理器 */
+  vlm?: { client?: OpenAI; store?: ProviderStore; fetcher?: typeof fetch; tunnel?: VlmTunnelManager };
 }
 
 export async function createScannerRegistry(source: ToolRegistry, planStore: PlanStore, options: ScannerRegistryOptions = {}): Promise<ToolRegistry> {
@@ -77,6 +78,9 @@ export async function createScannerRegistry(source: ToolRegistry, planStore: Pla
   const env = options.env ?? process.env;
   if (scannerVlmEnabled(env)) {
     const vlmOptions = loadVlmOptions(env);
+    // 配了 AGENT_VLLM_SSH_HOST 就先自动起隧道再体检；没配则沿用手动隧道
+    const tunnelConfig = resolveTunnelConfig(vlmOptions.model, env, options.vlm?.store ?? providers);
+    if (tunnelConfig) await (options.vlm?.tunnel ?? vlmTunnel).ensure(tunnelConfig);
     await probeVlmEndpoint(vlmOptions.model, {
       ...(options.vlm?.store ? { store: options.vlm.store } : {}),
       ...(options.vlm?.fetcher ? { fetcher: options.vlm.fetcher } : {}),
