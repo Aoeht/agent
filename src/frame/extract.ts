@@ -9,7 +9,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { frameBudgetFor, type FrameBudget } from "./policy";
-import type { VideoProfile } from "./profile";
+import { decodableDuration, pickVideoStream, type VideoProfile } from "./profile";
 import { appendCoverageWindows, selectFrameCandidates, type SelectionOptions } from "./select";
 import type { ExtractedFrame, FramePlan, FrameWindow } from "./types";
 
@@ -92,15 +92,24 @@ function run(command: string, args: string[]): Promise<RunResult> {
   });
 }
 
-/** 读取视频时长（秒）；ffprobe 不可用或文件损坏时抛错 */
+/** 读取可解码的视频流时长（秒）；ffprobe 不可用或文件损坏时抛错。口径见 decodableDuration */
 export async function probeDuration(videoPath: string): Promise<number> {
   const { stdout } = await run("ffprobe", [
     "-v", "error",
+    "-show_entries", "stream=codec_type,duration:stream_disposition=attached_pic",
     "-show_entries", "format=duration",
-    "-of", "default=nw=1:nk=1",
+    "-of", "json",
     videoPath,
   ]);
-  const duration = Number.parseFloat(stdout.trim());
+  let parsed: { streams?: unknown; format?: unknown };
+  try {
+    parsed = JSON.parse(stdout) as { streams?: unknown; format?: unknown };
+  } catch {
+    throw new FrameExtractError(`无法读取视频时长：${videoPath}`);
+  }
+  const streams = Array.isArray(parsed.streams) ? parsed.streams as Array<Record<string, unknown>> : [];
+  const format = (parsed.format ?? {}) as Record<string, unknown>;
+  const duration = decodableDuration(pickVideoStream(streams), format);
   if (!Number.isFinite(duration) || duration <= 0) {
     throw new FrameExtractError(`无法读取视频时长：${videoPath}`);
   }

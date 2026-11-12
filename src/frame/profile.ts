@@ -158,6 +158,26 @@ function parseRotation(stream: Record<string, unknown>): number {
   return 0;
 }
 
+/** 挑 ffmpeg 实际会解码的那条视频流：跳过 attached_pic 封面（B 站 mp4 普遍带一条 mjpeg 封面流） */
+export function pickVideoStream(streams: Array<Record<string, unknown>>): Record<string, unknown> | undefined {
+  const videos = streams.filter((stream) => stream.codec_type === "video");
+  return videos.find((stream) => !(stream.disposition as Record<string, unknown> | undefined)?.attached_pic) ?? videos[0];
+}
+
+/**
+ * 可解码时长：优先视频流时长，容器时长只作回退（部分容器不报流时长）。
+ * 容器时长会被封面/数据流撑长（B 站语料实测中位 +0.017s、最大 +2.915s），
+ * 按它排末帧会越过末帧 PTS，ffmpeg 取不到帧，mjpeg 报 "Could not open encoder before EOF"。
+ */
+export function decodableDuration(
+  video: Record<string, unknown> | undefined,
+  format: Record<string, unknown>,
+): number {
+  const fromStream = Number.parseFloat(String(video?.duration ?? ""));
+  if (Number.isFinite(fromStream) && fromStream > 0) return fromStream;
+  return Number.parseFloat(String(format.duration ?? ""));
+}
+
 /** ffprobe 元信息：时长、显示分辨率、旋转、音轨、fps、位深、HDR */
 export async function probeVideoMeta(videoPath: string): Promise<VideoMetaProbe> {
   let parsed: Record<string, unknown>;
@@ -175,10 +195,10 @@ export async function probeVideoMeta(videoPath: string): Promise<VideoMetaProbe>
     throw new VideoProfileError(`ffprobe 输出无法解析：${error instanceof Error ? error.message : String(error)}`);
   }
   const streams = Array.isArray(parsed.streams) ? parsed.streams as Array<Record<string, unknown>> : [];
-  const video = streams.find((stream) => stream.codec_type === "video");
+  const video = pickVideoStream(streams);
   if (!video) throw new VideoProfileError(`没有视频流：${videoPath}`);
   const format = (parsed.format ?? {}) as Record<string, unknown>;
-  const duration = Number.parseFloat(String(format.duration ?? video.duration ?? ""));
+  const duration = decodableDuration(video, format);
   if (!Number.isFinite(duration) || duration <= 0) {
     throw new VideoProfileError(`无法读取视频时长：${videoPath}`);
   }

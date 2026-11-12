@@ -2,7 +2,8 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { dhash, hammingDistance, probeVideoMeta, probeVideoProfile } from "../src/frame/profile";
+import { decodableDuration, dhash, hammingDistance, pickVideoStream, probeVideoMeta, probeVideoProfile } from "../src/frame/profile";
+import { extractFrameAt, probeDuration } from "../src/frame/extract";
 
 const ffmpegReady = Bun.which("ffmpeg") !== null && Bun.which("ffprobe") !== null;
 
@@ -25,6 +26,38 @@ describe("dHash 纯函数", () => {
     }
     expect(hammingDistance(dhash(gradient), dhash(dark))).toBeGreaterThan(0);
     expect(hammingDistance(dhash(gradient), dhash(gradient))).toBe(0);
+  });
+});
+
+describe("时长口径纯函数", () => {
+  const cover = { codec_type: "video", duration: "15.000000", disposition: { attached_pic: 1 } };
+  const real = { codec_type: "video", duration: "12.000000", disposition: { attached_pic: 0 } };
+  const audio = { codec_type: "audio", duration: "15.000000" };
+
+  test("封面流排在前面也要跳过，取 ffmpeg 实际解码的那条", () => {
+    expect(pickVideoStream([cover, real, audio])).toBe(real);
+    expect(pickVideoStream([real, audio, cover])).toBe(real);
+    expect(pickVideoStream([audio])).toBeUndefined();
+    expect(pickVideoStream([])).toBeUndefined();
+  });
+
+  test("只有封面流时退回它，不返回 undefined", () => {
+    expect(pickVideoStream([cover])).toBe(cover);
+  });
+
+  test("容器时长被音轨/封面撑长时，取视频流时长", () => {
+    expect(decodableDuration(real, { duration: "15.000000" })).toBe(12);
+  });
+
+  test("流时长缺失（N/A）时回退容器时长", () => {
+    expect(decodableDuration({ codec_type: "video", duration: "N/A" }, { duration: "15.0" })).toBe(15);
+    expect(decodableDuration(undefined, { duration: "15.0" })).toBe(15);
+    expect(decodableDuration({ codec_type: "video" }, { duration: "15.0" })).toBe(15);
+  });
+
+  test("两个时长都不可用时返回 NaN，由调用方抛错", () => {
+    expect(Number.isNaN(decodableDuration(undefined, {}))).toBe(true);
+    expect(Number.isNaN(decodableDuration({ duration: "0" }, { duration: "N/A" }))).toBe(true);
   });
 });
 
@@ -117,5 +150,58 @@ describeWithFfmpeg("视频画像预扫描", () => {
     expect(profile.orientation).toBe("portrait");
     expect(profile.meta.width).toBe(180);
     expect(profile.meta.height).toBe(320);
+  });
+});
+
+describeWithFfmpeg("容器时长 ≠ 视频流时长（B 站 mp4 形态）", () => {
+  let workDir = "";
+  let videoPath = "";
+
+  beforeAll(async () => {
+    workDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-agent-frame-duration-"));
+    videoPath = path.join(workDir, "cover.mp4");
+    // 视频 12s、音轨 15s、外加一条 640x360 的 attached_pic 封面流：
+    // 容器时长被撑到 15s，封面流时长也是 15s，只有真视频流是 12s。
+    runFfmpeg([
+      "-y", "-hide_banner", "-loglevel", "error",
+      "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=10:duration=12",
+      "-f", "lavfi", "-i", "sine=frequency=440:duration=15",
+      "-f", "lavfi", "-i", "color=c=red:s=640x360:d=1",
+      "-map", "0:v:0", "-map", "1:a:0", "-map", "2:v:0",
+      "-c:v:0", "libx264", "-pix_fmt", "yuv420p",
+      "-c:v:1", "png", "-disposition:v:1", "attached_pic",
+      "-c:a", "aac", videoPath,
+    ]);
+  });
+
+  afterAll(async () => {
+    await fs.rm(workDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
+
+  test("probeVideoMeta 取视频流时长与真视频分辨率，不被封面/音轨带偏", async () => {
+    const meta = await probeVideoMeta(videoPath);
+    expect(meta.duration_s).toBeCloseTo(12, 1);
+    expect(meta.width).toBe(320);
+    expect(meta.height).toBe(180);
+    expect(meta.has_audio).toBe(true);
+  });
+
+  test("probeDuration 与 probeVideoMeta 同口径", async () => {
+    const meta = await probeVideoMeta(videoPath);
+    expect(await probeDuration(videoPath)).toBeCloseTo(meta.duration_s, 6);
+  });
+
+  test("按视频流时长排末帧能抽出来，按容器时长排会 EOF", async () => {
+    const dur = await probeDuration(videoPath);
+    // 30s 分段规则下这片只有 1 段，末帧 = 8.5/9 × 时长
+    const lastT = (8.5 / 9) * dur;
+    const okPath = path.join(workDir, "ok.jpg");
+    await extractFrameAt(videoPath, lastT, okPath);
+    expect((await fs.stat(okPath)).size).toBeGreaterThan(0);
+
+    // 容器时长 15s 会把末帧排到 14.17s，越过 12s 的真实流末尾
+    const beyondT = (8.5 / 9) * 15;
+    const badPath = path.join(workDir, "bad.jpg");
+    await expect(extractFrameAt(videoPath, beyondT, badPath)).rejects.toThrow();
   });
 });
