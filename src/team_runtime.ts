@@ -13,6 +13,8 @@ import { renderEnvBlock, snapshotEnv } from "./prompts/env_block";
 import { createUpdatePlanTool } from "./tools/update_plan";
 import { createReadTaskStateTool } from "./tools/set_acceptance_criteria";
 import { createToolTelemetry } from "./tools/telemetry";
+import { createVlmFraudCheckTool, loadVlmOptions, probeVlmEndpoint, scannerVlmEnabled } from "./tools/vlm_fraud_check";
+import type { ProviderStore } from "./core/providers";
 
 // Explicit host allowlist: neither generated roles nor MCP annotations can grant writes.
 const WORKER_TOOLS = new Set([
@@ -48,11 +50,43 @@ export const SCANNER_CAPABILITIES =
   "链接采证(inspect_link)、反诈知识库检索(rag_search)、结论沉淀(ingest_findings)。" +
   "不能写文件、运行脚本、操作浏览器人工验证或再派生 Agent；快照缺失或某维度数据不足时，在报告里如实说明并记为无法判断。";
 
-export function createScannerRegistry(source: ToolRegistry, planStore: PlanStore): ToolRegistry {
+/** opt-in 挂载 vLLM 专用判定时，能力声明同步补充，scanner 提示词据此引导调用 */
+export function scannerCapabilities(env: NodeJS.ProcessEnv = process.env): string {
+  if (!scannerVlmEnabled(env)) return SCANNER_CAPABILITIES;
+  return SCANNER_CAPABILITIES +
+    "已挂载微调反诈专用视觉判定(vlm_fraud_check)：带图评论的重要证据图逐张调用它做结构化判定" +
+    "（image 传 local_images 路径、text 传该条评论正文），与 read_image 的自我观察互补；" +
+    "该工具报告用户已选择停止时，立即结束扫描并在 unresolved 注明视觉判定未完成。";
+}
+
+export interface ScannerRegistryOptions {
+  sandboxRoot?: string;
+  env?: NodeJS.ProcessEnv;
+  /** 测试注入：vLLM 客户端 / 供应商清单 / 体检 fetcher */
+  vlm?: { client?: OpenAI; store?: ProviderStore; fetcher?: typeof fetch };
+}
+
+export async function createScannerRegistry(source: ToolRegistry, planStore: PlanStore, options: ScannerRegistryOptions = {}): Promise<ToolRegistry> {
   const registry = new ToolRegistry();
   registry.use(createToolTelemetry());
   for (const definition of source.list()) {
     if (SCANNER_TOOLS.has(definition.name)) registry.register(definition);
+  }
+  // vLLM 专用判定是显式 opt-in（AGENT_SCANNER_VLLM，默认关）：不进主注册表、不在拷贝白名单里，
+  // 只有开启且体检通过才挂给 scanner。体检失败立刻抛错，不拖到扫描中途。
+  const env = options.env ?? process.env;
+  if (scannerVlmEnabled(env)) {
+    const vlmOptions = loadVlmOptions(env);
+    await probeVlmEndpoint(vlmOptions.model, {
+      ...(options.vlm?.store ? { store: options.vlm.store } : {}),
+      ...(options.vlm?.fetcher ? { fetcher: options.vlm.fetcher } : {}),
+    });
+    registry.register(createVlmFraudCheckTool({
+      ...vlmOptions,
+      ...(options.sandboxRoot !== undefined ? { sandboxRoot: options.sandboxRoot } : {}),
+      ...(options.vlm?.client ? { client: options.vlm.client } : {}),
+      ...(options.vlm?.store ? { store: options.vlm.store } : {}),
+    }));
   }
   registry.register(createUpdatePlanTool(planStore));
   registry.register(createReadTaskStateTool());

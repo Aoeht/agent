@@ -323,7 +323,7 @@ describe("live 管道接线（假 client 走真实 delegate 白名单与发现�
     });
 
     // 白名单接线正确：scanner 注册表里有领域四件套 + 计划工具，没有写类/委派工具
-    const scannerRegistry = createScannerRegistry(predictor.registry, new PlanStore());
+    const scannerRegistry = await createScannerRegistry(predictor.registry, new PlanStore());
     for (const name of ["bili_collect", "inspect_link", "rag_search", "ingest_findings", "update_plan"]) {
       expect(scannerRegistry.get(name)).toBeDefined();
     }

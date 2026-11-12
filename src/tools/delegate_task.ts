@@ -11,7 +11,8 @@
  * 安全边界：
  * - 子代理工具集是显式只读白名单（WORKER_TOOLS），不含 delegate_task 自身——
  *   子代理不能再派生子代理，不存在递归失控；
- * - 子代理无人机协作通道（不传 requestHuman/askUser），完全自主跑完或被取消；
+ * - 子代理默认无人机协作通道，完全自主跑完或被取消；仅 scanner 例外放行 askUser
+ *   （vLLM 专用判定服务不可用时询问用户停止/付费继续），其余角色不传 requestHuman/askUser；
  * - 子代理报告经由 wrapUntrustedData 围栏回注：它读过外部网页/文件，内容里的
  *   指令不能反过来指挥主对话。
  */
@@ -23,9 +24,9 @@ import { Agent } from "../core/agent";
 import { PlanStore } from "../core/plan_store";
 import { TraceRecorder } from "../core/trace";
 import { wrapUntrustedData } from "../core/untrusted";
-import { createTeamRegistry, createScannerRegistry, TEAM_CAPABILITIES, SCANNER_CAPABILITIES } from "../team_runtime";
+import { createTeamRegistry, createScannerRegistry, TEAM_CAPABILITIES, scannerCapabilities } from "../team_runtime";
 import { renderEnvBlock, snapshotEnv } from "../prompts/env_block";
-import { defineTool } from "../core/types";
+import { defineTool, type ToolRuntime } from "../core/types";
 import type { ToolRegistry } from "../core/registry";
 
 export interface DelegateTaskToolOptions {
@@ -108,7 +109,7 @@ const childSystemPrompt = (role: string, sandboxRoot: string): string => {
   if (role === "scanner") {
     return (
       `你是主对话派出的 scanner 子 Agent，专门对单个 B 站视频做诈骗风险扫描，` +
-      `从视频内容、作者账号、评论区三个维度取证并定性。${SCANNER_CAPABILITIES}\n` +
+      `从视频内容、作者账号、评论区三个维度取证并定性。${scannerCapabilities()}\n` +
       `工作区：${sandboxRoot}\n` +
       "你看不到主对话的其它内容：任务描述里应包含 BV 号；没有就说明无法扫描。\n" +
       "固定流程：\n" +
@@ -181,7 +182,7 @@ export function createDelegateTaskTool(options: DelegateTaskToolOptions) {
       // 白名单注册表按角色选择：scanner 用扫描白名单（快照/链接/知识库/沉淀），
       // 其余角色用只读调研白名单；两者都不含 delegate_task，子代理无法再委派
       const registry = args.role === "scanner"
-        ? createScannerRegistry(options.sourceRegistry, planStore)
+        ? await createScannerRegistry(options.sourceRegistry, planStore, { sandboxRoot: options.sandboxRoot })
         : createTeamRegistry(options.sourceRegistry, planStore);
       if (options.config.visionCapable === false || runtime?.visualObservations !== undefined) registry.unregister("read_image");
       // 预算决策独立成函数（resolveDelegateBudget）：显式注入原样尊重，scanner 默认放宽墙钟
@@ -210,7 +211,13 @@ export function createDelegateTaskTool(options: DelegateTaskToolOptions) {
         // traceDir 不可写不影响委派本身
       }
 
-      const result = await agent.run(`委派任务：\n${args.goal}`, runtime?.signal ? { signal: runtime.signal } : undefined);
+      // 仅 scanner 放行 askUser：vLLM 判定服务不可用时由工具询问用户停止/付费继续；
+      // 其余角色维持无人机协作通道
+      const childRuntime: ToolRuntime = {
+        ...(runtime?.signal ? { signal: runtime.signal } : {}),
+        ...(args.role === "scanner" && runtime?.askUser ? { askUser: runtime.askUser } : {}),
+      };
+      const result = await agent.run(`委派任务：\n${args.goal}`, childRuntime);
 
       const header = `委派完成：${args.role}（${result.stopReason} · 工具 ${result.toolCallsCount} 次 · ${result.totalTokens} tokens` +
         `${result.cachedPromptTokens ? ` · 缓存命中 ${result.cachedPromptTokens}` : ""}）`;

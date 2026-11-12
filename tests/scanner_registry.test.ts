@@ -65,8 +65,8 @@ function fakeClient(reply: (index: number) => { content: string; toolCalls?: Arr
   return { client, requests };
 }
 
-test("createScannerRegistry：扫描白名单在，调研外工具与写类工具不在", () => {
-  const registry = createScannerRegistry(sourceRegistry(), new PlanStore());
+test("createScannerRegistry：扫描白名单在，调研外工具与写类工具不在", async () => {
+  const registry = await createScannerRegistry(sourceRegistry(), new PlanStore());
   for (const name of ["bili_collect", "inspect_link", "rag_search", "ingest_findings", "update_plan", "read_task_state"]) {
     expect(registry.get(name)).toBeDefined();
   }
