@@ -70,3 +70,8 @@ benchmarks/gaia-runs
 # 个人文档与知识笔记（本地留存，不入库）
 docs/
 .mcp.json
+
+# A2A 任务快照与运行轨迹（机器本地）
+.agent-a2a/
+# LangGraph 互操作实验场（Python 虚拟环境与 uv 状态）
+interop/langgraph/.venv/

@@ -40,6 +40,17 @@
  *                                  关闭后不提供图片通道，read_image 直接返回可读错误
  *   AGENT_MEMORY_DIR               跨会话记忆目录（缺省 .agent-memory；记忆条目 memory.jsonl + MEMORY.md 视图）
  *   AGENT_MODEL_PROBE              对话开始时探测候选模型可用性（微型补全），"0"/"false" 关闭（默认开启）
+ *   AGENT_A2A_SERVER               A2A 服务端开关（默认关闭）：开启后 Web 服务器挂
+ *                                  /.well-known/agent-card.json + /a2a（JSON-RPC，v1.0）
+ *   AGENT_A2A_PUBLIC_URL           名片里对外宣称的接口地址（默认 http://<HOST>:<PORT>/a2a）；
+ *                                  走隧道/反代暴露时用它指到公网地址
+ *   AGENT_A2A_NAME                 Agent Card 的 name（默认 ai_agent）
+ *   AGENT_A2A_AGENTS               出站远端 Agent 白名单 JSON：[{"name","url","token"?}]，
+ *                                  非空时主对话注册 a2a_call 工具（URL 由配置给出，模型不能自选）
+ *   AGENT_A2A_ALLOW_HTTP           出站允许 http://127.0.0.1|localhost（本地联调；默认仅 HTTPS）
+ *   AGENT_A2A_ALLOW_MISSING_VERSION 入站允许缺 A2A-Version 头（默认拒绝——缺头视为 0.3，报文不兼容）
+ *   AGENT_A2A_TASK_TIMEOUT_MS      入站任务墙钟兜底（默认 600000，到点按 CANCELED 收尾）
+ *   AGENT_A2A_DIR                  A2A 任务快照目录（缺省 .agent-a2a；tasks.jsonl 审计留痕）
  */
 
 import path from "node:path";

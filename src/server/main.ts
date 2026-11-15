@@ -29,9 +29,16 @@ import { EventHub, SessionManager } from "./sessions";
 import type { ServerEvent } from "./protocol";
 import { TraceViewError } from "./trace_viewer";
 import { UserImageError, MAX_REQUEST_IMAGE_BYTES } from "../core/user_images";
+import { buildAgentCard } from "../a2a/agent_card";
+import { A2aOperations } from "../a2a/operations";
+import { TaskStore } from "../a2a/task_store";
+import { createA2aTaskRunner } from "../a2a/runner";
+import { handleA2aPost } from "../a2a/jsonrpc";
 
 const PORT = intEnv("AGENT_UI_PORT", 8787);
 const HOST = process.env.AGENT_UI_HOST?.trim() || "127.0.0.1";
+// A2A 服务端开关：默认关闭（不新增公开面）；开启后挂 /.well-known/agent-card.json 与 /a2a
+const A2A_ENABLED = boolEnv("AGENT_A2A_SERVER", false);
 const REMOTE_HARDENING = boolEnv("AGENT_UI_REMOTE_HARDENING", false);
 const APPROVAL_TIMEOUT_MS = intEnv("AGENT_UI_APPROVAL_TIMEOUT_MS", 120_000);
 const SESSION_DIR = resolveSessionDir();
@@ -103,14 +110,29 @@ async function main(): Promise<void> {
     traceDir: TRACE_DIR,
   });
 
+  // ---- A2A 服务端（AGENT_A2A_SERVER=1 才装配）：名片 + JSON-RPC 共用同一个 TaskStore ----
+  // 名片里的接口地址要让调用方可达：通配绑定（0.0.0.0/::）写进名片客户端连不上，
+  // 默认落回 127.0.0.1；对外暴露用 AGENT_A2A_PUBLIC_URL 指到公网地址
+  const cardHost = ["0.0.0.0", "::", ""].includes(HOST) ? "127.0.0.1" : HOST;
+  const a2aCard = buildAgentCard({
+    interfaceUrl: process.env.AGENT_A2A_PUBLIC_URL?.trim() || `http://${cardHost}:${PORT}/a2a`,
+  });
+  const a2aOperations = new A2aOperations({
+    store: new TaskStore(),
+    runner: createA2aTaskRunner(runtime),
+  });
+
   const server = Bun.serve({
     port: PORT,
     hostname: HOST,
     maxRequestBodySize: MAX_MESSAGE_BODY_BYTES,
-    fetch: (req) => route(req, sessions, bridge, hub, runtime, gate),
+    fetch: (req) => route(req, sessions, bridge, hub, runtime, gate, a2aOperations, a2aCard),
   });
   console.log(`🌐 [UI] 工作台已就绪: http://${HOST}:${server.port}/`);
   console.log(`📂 [UI] 会话目录: ${SESSION_DIR}`);
+  if (A2A_ENABLED) {
+    console.log(`🤝 [A2A] 服务端已开放: 名片 ${a2aCard.supportedInterfaces[0]!.url.replace(/\/a2a$/, "")}/.well-known/agent-card.json · JSON-RPC ${a2aCard.supportedInterfaces[0]!.url}（A2A v1.0）`);
+  }
   // 供应商清单读写分离最容易出的错是"存哪儿了"，每次启动把它明说出来
   console.log(`📦 [UI] 供应商配置: ${providers.describe()}`);
 
@@ -126,7 +148,9 @@ async function route(
   bridge: UiBridge,
   hub: EventHub,
   runtime: ServerRuntime,
-  gate: AuthGate
+  gate: AuthGate,
+  a2aOperations: A2aOperations,
+  a2aCard: ReturnType<typeof buildAgentCard>
 ): Promise<Response> {
   const url = new URL(req.url);
   const pathname = url.pathname;
@@ -430,6 +454,31 @@ async function route(
       sessions.resetAgents();
       console.log(`📦 [UI] 沙箱目录已切换: ${runtime.sandboxRoot}`);
       return json({ sandboxRoot: runtime.sandboxRoot });
+    }
+
+    // ---- A2A：名片发现 + JSON-RPC（AGENT_A2A_SERVER=1 才开放）----
+    // 与其它端点一样在门禁之后：设了 AGENT_UI_TOKEN 时对端必须带 Bearer（名片含
+    // 能力信息，属于规范里"可被访问控制保护"的内容）
+    if (A2A_ENABLED) {
+      if (pathname === "/.well-known/agent-card.json" || pathname === "/.well-known/agent.json") {
+        if (method !== "GET") return json({ error: "Method Not Allowed" }, 405);
+        // version 即能力指纹：ETag 用它，语义完全吻合（进阶篇 5.4）
+        const etag = `"${a2aCard.version}"`;
+        if (req.headers.get("if-none-match") === etag) {
+          return new Response(null, { status: 304, headers: { etag } });
+        }
+        return new Response(JSON.stringify(a2aCard), {
+          headers: {
+            "content-type": "application/json; charset=utf-8",
+            "cache-control": "public, max-age=300",
+            etag,
+          },
+        });
+      }
+      if (pathname === "/a2a") {
+        if (method !== "POST") return json({ error: "A2A JSON-RPC 端点仅接受 POST" }, 405);
+        return handleA2aPost(req, { transport: a2aOperations });
+      }
     }
 
     // ---- 静态资源（非 API 的 GET 一律回 SPA）----
