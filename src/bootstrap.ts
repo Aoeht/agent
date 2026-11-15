@@ -36,6 +36,7 @@ import { createReadImageTool } from "./tools/read_image";
 import { createToolSearchTool } from "./core/tool_search";
 import { createDelegateTaskTool } from "./tools/delegate_task";
 import { createTeamTaskTool } from "./tools/team_task";
+import { createA2aCallTool, loadA2aAgents } from "./tools/a2a_delegate";
 import { resolveScriptSandbox, ScriptSandboxResolution } from "./tools/sandbox_docker";
 import { loadSkills, SkillManifest } from "./skills/loader";
 import { McpAdapter } from "./mcp/adapter";
@@ -201,6 +202,12 @@ export function registerSessionTools(
         ...(options.teamDir ? { teamDir: options.teamDir } : {}),
       }));
     }
+  }
+  // 远端 A2A Agent 桥：AGENT_A2A_AGENTS 配置非空才注册。URL 由宿主配置给出（白名单
+  // 构造防 SSRF），无配置即无入口——主对话默认行为不变
+  const a2aAgents = loadA2aAgents();
+  if (a2aAgents.length > 0) {
+    registry.register(createA2aCallTool({ agents: a2aAgents }));
   }
   // 沙箱脚本执行器：技能脚本（load_skill 物化到 .skills/）与模型自写脚本共用的唯一执行面；
   // 执行后端由 AGENT_SANDBOX 解析结果决定（宿主机进程或一次性容器），
