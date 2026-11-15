@@ -1,0 +1,23 @@
+[project]
+name = "a2a-langgraph-interop"
+version = "0.1.0"
+description = "ai_agent 的 A2A 接口 ↔ LangGraph 互操作实验场（双向：TS 客户端→本服务、a2a-sdk 客户端→TS 服务端）"
+requires-python = ">=3.10"
+dependencies = [
+    # A2A 官方 Python SDK（v1.0 线格式）+ HTTP 服务端件（1.3.0 的 http-server extra 只带 starlette）
+    "a2a-sdk[http-server]>=1.0",
+    "uvicorn>=0.30",
+    # LangGraph：优先用本地 clone 的源码（A:\Langchain\repos），失败可注释掉换 PyPI 版
+    "langgraph @ file:///A:/Langchain/repos/langgraph/libs/langgraph",
+    "langgraph-prebuilt @ file:///A:/Langchain/repos/langgraph/libs/prebuilt",
+    # DashScope 兼容模式（OpenAI 协议）跑 ReAct agent
+    "langchain-openai>=1.0",
+    "python-dotenv>=1.0",
+]
+
+[tool.uv]
+# PyPI 直连可达；如需换镜像在此加 [[tool.uv.index]]
+package = false
+
+[dependency-groups]
+dev = []
