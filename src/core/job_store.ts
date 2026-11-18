@@ -315,7 +315,8 @@ export class JobStore {
 
     const finish = async (code: number | null): Promise<void> => {
       clearTimeout(timer);
-      this.tracked.delete(record.id);
+      // tracked 登记保留到终态落盘之后：先删的话，read/save 的异步空窗里
+      // reconcile 会看到"没登记 + pid 不在"，把记录误判成无退出码的 reconciled exited
       const current = (await this.read(record.id)) ?? record;
       if (current.status !== "running") {
         // 已被 expire/kill 定过状态：只补退出码与结束时间，不覆盖原因
@@ -324,11 +325,13 @@ export class JobStore {
           (current.status === "timed_out" ? EXIT_TIMED_OUT : code ?? 1);
         const saved: JobRecord = { ...current, endedAt: current.endedAt ?? Date.now(), exitCode };
         await this.save(saved);
+        this.tracked.delete(record.id);
         this.announce(saved);
         return;
       }
       const exited: JobRecord = { ...current, status: "exited", endedAt: Date.now(), exitCode: code ?? 1 };
       await this.save(exited);
+      this.tracked.delete(record.id);
       this.announce(exited);
     };
     // 极短脚本可能在登记（写 JSON 是异步的）期间就退出，close 已经错过：
